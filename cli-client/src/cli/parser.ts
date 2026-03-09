@@ -1,14 +1,18 @@
-export function parseCliInput(argv) {
+interface ParsedInput {
+  mode: string
+  command?: string | null
+  prompt?: string
+  model?: string | null
+}
+
+export function parseCliInput(argv: string[]): ParsedInput {
   const [first, ...rest] = argv
 
   if (!first) {
     return { mode: "ui" }
   }
 
-  if (first === "ui") {
-    return { mode: "ui" }
-  }
-
+  if (first === "ui") return { mode: "ui" }
   if (first === "login") return { mode: "login" }
   if (first === "register") return { mode: "register" }
   if (first === "logout") return { mode: "logout" }
@@ -19,72 +23,38 @@ export function parseCliInput(argv) {
   if (first === "usage") return { mode: "usage" }
 
   if (first === "model" || first === "models") {
-    return {
-      mode: "model",
-      model: rest[0] || null
-    }
+    return { mode: "model", model: rest[0] || null }
   }
 
   if (first === "plan") {
-    return {
-      mode: "run",
-      command: "/plan",
-      prompt: rest.join(" ").trim()
-    }
+    return { mode: "run", command: "/plan", prompt: rest.join(" ").trim() }
   }
 
   if (first === "implement") {
-    return {
-      mode: "run",
-      command: "/implement",
-      prompt: rest.join(" ").trim()
-    }
+    return { mode: "run", command: "/implement", prompt: rest.join(" ").trim() }
   }
 
   if (first === "pull") {
-    return {
-      mode: "run",
-      command: "/pull",
-      prompt: ""
-    }
+    return { mode: "run", command: "/pull", prompt: "" }
   }
 
   if (first === "continue" || first === "cont") {
-    return {
-      mode: "run",
-      command: "/continue",
-      prompt: rest.length > 0 ? rest.join(" ").trim() : "continue the previous task"
-    }
+    return { mode: "run", command: "/continue", prompt: rest.length > 0 ? rest.join(" ").trim() : "continue the previous task" }
   }
 
   if (first === "stash") {
-    return {
-      mode: "run",
-      command: "/stash",
-      prompt: rest.join(" ").trim()
-    }
+    return { mode: "run", command: "/stash", prompt: rest.join(" ").trim() }
   }
 
   if (first.startsWith("/")) {
-    return {
-      mode: "run",
-      command: first,
-      prompt: rest.join(" ").trim()
-    }
+    return { mode: "run", command: first, prompt: rest.join(" ").trim() }
   }
 
-  // Detect "continue" as a plain prompt too
   const fullPrompt = [first, ...rest].join(" ").trim()
   if (fullPrompt.toLowerCase() === "continue" || fullPrompt.toLowerCase() === "continue the previous task") {
-    return {
-      mode: "run",
-      command: "/continue",
-      prompt: "continue the previous task"
-    }
+    return { mode: "run", command: "/continue", prompt: "continue the previous task" }
   }
 
-  // Guard: reject bare command-like words that aren't valid commands
-  // Prompts must be quoted (sys "do something") or be clearly not a command word
   const COMMAND_WORDS = new Set([
     "login", "register", "logout", "whoami", "user", "chats", "chat",
     "delete", "billing", "subscribe", "plans", "usage", "model", "models",
@@ -96,24 +66,15 @@ export function parseCliInput(argv) {
     return { mode: "noop" }
   }
 
-  return {
-    mode: "run",
-    command: null,
-    prompt: fullPrompt
-  }
+  return { mode: "run", command: null, prompt: fullPrompt }
 }
 
-export function parseUiLine(line) {
+export function parseUiLine(line: string): ParsedInput | null {
   const trimmed = line.trim()
 
-  if (!trimmed) {
-    return null
-  }
+  if (!trimmed) return null
 
-  if (trimmed === "/exit" || trimmed === "/quit") {
-    return { mode: "exit" }
-  }
-
+  if (trimmed === "/exit" || trimmed === "/quit") return { mode: "exit" }
   if (trimmed === "/login") return { mode: "login" }
   if (trimmed === "/register") return { mode: "register" }
   if (trimmed === "/logout") return { mode: "logout" }
@@ -124,74 +85,38 @@ export function parseUiLine(line) {
   if (trimmed === "/usage") return { mode: "usage" }
 
   if (trimmed === "/model" || trimmed.startsWith("/model ")) {
-    return {
-      mode: "model",
-      model: trimmed === "/model" ? null : trimmed.replace("/model", "").trim()
-    }
+    return { mode: "model", model: trimmed === "/model" ? null : trimmed.replace("/model", "").trim() }
   }
 
   if (trimmed === "/pull") {
-    return {
-      mode: "run",
-      command: "/pull",
-      prompt: ""
-    }
+    return { mode: "run", command: "/pull", prompt: "" }
   }
 
   if (trimmed === "/continue" || trimmed === "/cont" || trimmed.startsWith("/continue ")) {
     const extra = trimmed.replace(/^\/cont(inue)?/, "").trim()
-    return {
-      mode: "run",
-      command: "/continue",
-      prompt: extra || "continue the previous task"
-    }
+    return { mode: "run", command: "/continue", prompt: extra || "continue the previous task" }
   }
 
   if (trimmed.startsWith("/plan ")) {
-    return {
-      mode: "run",
-      command: "/plan",
-      prompt: trimmed.replace("/plan", "").trim()
-    }
+    return { mode: "run", command: "/plan", prompt: trimmed.replace("/plan", "").trim() }
   }
 
   if (trimmed.startsWith("/implement ")) {
-    return {
-      mode: "run",
-      command: "/implement",
-      prompt: trimmed.replace("/implement", "").trim()
-    }
+    return { mode: "run", command: "/implement", prompt: trimmed.replace("/implement", "").trim() }
   }
 
   if (trimmed.startsWith("/stash ")) {
-    return {
-      mode: "run",
-      command: "/stash",
-      prompt: trimmed.replace("/stash", "").trim()
-    }
+    return { mode: "run", command: "/stash", prompt: trimmed.replace("/stash", "").trim() }
   }
 
   if (trimmed.startsWith("/")) {
     const [command, ...rest] = trimmed.split(" ")
-    return {
-      mode: "run",
-      command,
-      prompt: rest.join(" ").trim()
-    }
+    return { mode: "run", command, prompt: rest.join(" ").trim() }
   }
 
-  // Detect "continue" typed as plain text in interactive mode
   if (trimmed.toLowerCase() === "continue" || trimmed.toLowerCase() === "cont") {
-    return {
-      mode: "run",
-      command: "/continue",
-      prompt: "continue the previous task"
-    }
+    return { mode: "run", command: "/continue", prompt: "continue the previous task" }
   }
 
-  return {
-    mode: "run",
-    command: null,
-    prompt: trimmed
-  }
+  return { mode: "run", command: null, prompt: trimmed }
 }

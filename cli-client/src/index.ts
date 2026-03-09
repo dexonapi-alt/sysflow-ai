@@ -1,5 +1,5 @@
 import { parseCliInput } from "./cli/parser.js"
-import { ensureSysbase, setSelectedModel, getSelectedModel, MODELS } from "./lib/sysbase.js"
+import { ensureSysbase, setSelectedModel } from "./lib/sysbase.js"
 import { runAgent } from "./agent/agent.js"
 import { startUi } from "./cli/ui.js"
 import { showModelPicker } from "./commands/model.js"
@@ -7,10 +7,9 @@ import { handleLogin, handleRegister, handleLogout, handleWhoami } from "./comma
 import { showChats, deleteActiveChat } from "./commands/chats.js"
 import { showPlanPicker, showUsage } from "./commands/billing.js"
 
-async function main() {
+async function main(): Promise<void> {
   const args = process.argv.slice(2)
 
-  // No args = interactive mode
   if (args.length === 0) {
     await startUi()
     return
@@ -23,45 +22,14 @@ async function main() {
     return
   }
 
-  if (parsed.mode === "login") {
-    await handleLogin()
-    return
-  }
-
-  if (parsed.mode === "register") {
-    await handleRegister()
-    return
-  }
-
-  if (parsed.mode === "logout") {
-    await handleLogout()
-    return
-  }
-
-  if (parsed.mode === "whoami") {
-    await handleWhoami()
-    return
-  }
-
-  if (parsed.mode === "chats") {
-    await showChats()
-    return
-  }
-
-  if (parsed.mode === "delete-chat") {
-    await deleteActiveChat()
-    return
-  }
-
-  if (parsed.mode === "billing") {
-    await showPlanPicker()
-    return
-  }
-
-  if (parsed.mode === "usage") {
-    await showUsage()
-    return
-  }
+  if (parsed.mode === "login") { await handleLogin(); return }
+  if (parsed.mode === "register") { await handleRegister(); return }
+  if (parsed.mode === "logout") { await handleLogout(); return }
+  if (parsed.mode === "whoami") { await handleWhoami(); return }
+  if (parsed.mode === "chats") { await showChats(); return }
+  if (parsed.mode === "delete-chat") { await deleteActiveChat(); return }
+  if (parsed.mode === "billing") { await showPlanPicker(); return }
+  if (parsed.mode === "usage") { await showUsage(); return }
 
   if (parsed.mode === "model") {
     await ensureSysbase()
@@ -74,17 +42,15 @@ async function main() {
     return
   }
 
-  if (parsed.mode === "noop") {
-    return
-  }
+  if (parsed.mode === "noop") return
 
   await runAgent({
-    prompt: parsed.prompt,
+    prompt: parsed.prompt || "",
     command: parsed.command
   })
 }
 
 main().catch((error) => {
-  console.error(`  error: ${error.message}`)
+  console.error(`  error: ${(error as Error).message}`)
   process.exit(1)
 })

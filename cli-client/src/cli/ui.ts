@@ -7,15 +7,15 @@ import { parseUiLine } from "./parser.js"
 
 const PROMPT = chalk.blue("  | ")
 
-export async function startUi() {
+export async function startUi(): Promise<void> {
   await ensureSysbase()
   const currentModel = await getSelectedModel()
   const user = await getAuthUser()
   const chatInfo = await getActiveChatInfo()
 
   console.log("")
-  const userTag = user ? chalk.green(user.username) : chalk.yellow("not logged in")
-  const chatTag = chatInfo?.title ? chalk.cyan(chatInfo.title) : chalk.dim("no chat")
+  const userTag = user ? chalk.green(String(user.username)) : chalk.yellow("not logged in")
+  const chatTag = chatInfo?.title ? chalk.cyan(String(chatInfo.title)) : chalk.dim("no chat")
   console.log(chalk.dim(`  sys v0.1  ${chalk.white(path.basename(process.cwd()))}  model: ${chalk.white(currentModel)}  user: ${userTag}  chat: ${chatTag}`))
   console.log(chalk.dim("  /model /chats /billing /usage /login /whoami /continue /exit"))
   console.log("")
@@ -47,56 +47,56 @@ export async function startUi() {
     }
 
     if (parsed.mode === "login") {
-      const { handleLogin } = await import("./auth.js")
+      const { handleLogin } = await import("../commands/auth.js")
       await handleLogin()
       rl.prompt()
       return
     }
 
     if (parsed.mode === "register") {
-      const { handleRegister } = await import("./auth.js")
+      const { handleRegister } = await import("../commands/auth.js")
       await handleRegister()
       rl.prompt()
       return
     }
 
     if (parsed.mode === "logout") {
-      const { handleLogout } = await import("./auth.js")
+      const { handleLogout } = await import("../commands/auth.js")
       await handleLogout()
       rl.prompt()
       return
     }
 
     if (parsed.mode === "whoami") {
-      const { handleWhoami } = await import("./auth.js")
+      const { handleWhoami } = await import("../commands/auth.js")
       await handleWhoami()
       rl.prompt()
       return
     }
 
     if (parsed.mode === "chats") {
-      const { showChats } = await import("./chat-picker.js")
+      const { showChats } = await import("../commands/chats.js")
       await showChats()
       rl.prompt()
       return
     }
 
     if (parsed.mode === "delete-chat") {
-      const { deleteActiveChat } = await import("./chat-picker.js")
+      const { deleteActiveChat } = await import("../commands/chats.js")
       await deleteActiveChat()
       rl.prompt()
       return
     }
 
     if (parsed.mode === "billing") {
-      const { showPlanPicker } = await import("./billing.js")
+      const { showPlanPicker } = await import("../commands/billing.js")
       await showPlanPicker()
       rl.prompt()
       return
     }
 
     if (parsed.mode === "usage") {
-      const { showUsage } = await import("./billing.js")
+      const { showUsage } = await import("../commands/billing.js")
       await showUsage()
       rl.prompt()
       return
@@ -107,7 +107,7 @@ export async function startUi() {
         await setSelectedModel(parsed.model)
         console.log(chalk.green(`  model set to ${parsed.model}`))
       } else {
-        const { showModelPicker } = await import("./model-picker.js")
+        const { showModelPicker } = await import("../commands/model.js")
         await showModelPicker()
       }
       console.log("")
@@ -117,16 +117,15 @@ export async function startUi() {
 
     working = true
     rl.pause()
-    // Clear the prompt line so | doesn't bleed into agent output
     process.stdout.write("\r\x1B[K")
 
     try {
       await runAgent({
-        prompt: parsed.prompt,
+        prompt: parsed.prompt || "",
         command: parsed.command
       })
     } catch (error) {
-      console.log(chalk.red(`  error: ${error.message}`))
+      console.log(chalk.red(`  error: ${(error as Error).message}`))
     }
 
     working = false
