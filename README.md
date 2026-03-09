@@ -2,6 +2,8 @@
 
 AI-powered coding agent that runs in your terminal. Write prompts, and Sysflow reads, writes, and executes code on your behalf.
 
+Built with **TypeScript**. AI model providers use an **OOP class-based architecture** (BaseProvider + subclasses), while the rest of the codebase follows a **functional style**.
+
 ## Architecture
 
 ```
@@ -64,6 +66,7 @@ The server persists session history in PostgreSQL, so the AI remembers what it d
 - Node.js 20+
 - PostgreSQL 15+ (or Docker)
 - API key for at least one provider (Gemini or OpenRouter)
+- TypeScript runs via [tsx](https://github.com/privatenumber/tsx) — no separate build step needed
 
 ### 1. Clone & Install
 
@@ -170,61 +173,63 @@ More models (Gemini Pro, Llama 70B, Mistral, Claude) exist in the server but are
 
 ```
 server/src/
-├── index.js                 # Entry point — Fastify setup, route registration
+├── index.ts                 # Entry point — Fastify setup, route registration
+├── types.ts                 # Shared TypeScript interfaces and types
 ├── services/                # Business logic
-│   ├── context.js           # Project context loading (memories, fixes)
-│   └── task.js              # Task creation and step management
+│   ├── context.ts           # Project context loading (memories, fixes)
+│   └── task.ts              # Task creation and step management
 ├── routes/                  # HTTP endpoints
-│   ├── agent.js             # POST /agent/run — main AI endpoint
-│   ├── auth.js              # POST /auth/register, /auth/login
-│   ├── chats.js             # CRUD /chats
-│   └── billing.js           # Stripe billing, usage, plans
+│   ├── agent.ts             # POST /agent/run — main AI endpoint
+│   ├── auth.ts              # POST /auth/register, /auth/login
+│   ├── chats.ts             # CRUD /chats
+│   └── billing.ts           # Stripe billing, usage, plans
 ├── handlers/                # Request orchestration
-│   ├── user-message.js      # Handles new user prompts
-│   └── tool-result.js       # Handles tool execution results
-├── providers/               # AI model adapters
-│   ├── adapter.js           # Model router
-│   ├── gemini.js            # Google Gemini
-│   ├── openrouter.js        # OpenRouter (Llama, Mistral, etc.)
-│   ├── claude-sonnet.js     # Anthropic Claude Sonnet
-│   ├── claude-opus.js       # Anthropic Claude Opus
-│   ├── swe.js               # Mock provider for testing
-│   └── normalize.js         # Response normalization
+│   ├── user-message.ts      # Handles new user prompts
+│   └── tool-result.ts       # Handles tool execution results
+├── providers/               # AI model adapters (OOP — BaseProvider + subclasses)
+│   ├── base-provider.ts     # Abstract base class with shared logic
+│   ├── adapter.ts           # Provider registry and model router
+│   ├── gemini.ts            # Google Gemini provider
+│   ├── openrouter.ts        # OpenRouter provider (Llama, Mistral, etc.)
+│   ├── claude-sonnet.ts     # Anthropic Claude Sonnet provider
+│   ├── claude-opus.ts       # Anthropic Claude Opus provider
+│   ├── swe.ts               # Mock provider for testing
+│   └── normalize.ts         # Response normalization
 ├── store/                   # Data access layer
-│   ├── sessions.js          # Session history (PostgreSQL)
-│   ├── context.js           # Context entries (PostgreSQL)
-│   ├── subscriptions.js     # Plans, billing, usage limits
-│   ├── usage.js             # Token usage tracking
-│   ├── runs.js              # In-memory run state
-│   ├── tasks.js             # In-memory task state
-│   ├── tool-results.js      # In-memory tool results
-│   ├── memory.js            # In-memory project memory
-│   └── checkout-events.js   # SSE checkout notifications
+│   ├── sessions.ts          # Session history (PostgreSQL)
+│   ├── context.ts           # Context entries (PostgreSQL)
+│   ├── subscriptions.ts     # Plans, billing, usage limits
+│   ├── usage.ts             # Token usage tracking
+│   ├── runs.ts              # In-memory run state
+│   ├── tasks.ts             # In-memory task state
+│   ├── tool-results.ts      # In-memory tool results
+│   ├── memory.ts            # In-memory project memory
+│   └── checkout-events.ts   # SSE checkout notifications
 └── db/                      # Database
-    ├── connection.js         # PostgreSQL pool, migrations runner
-    └── migrations/           # Schema migrations (001–009)
+    ├── connection.ts         # PostgreSQL pool, migrations runner
+    └── migrations/           # Schema migrations (001–009, plain JS)
 ```
 
 ### CLI Client (`cli-client/`)
 
 ```
 cli-client/src/
-├── index.js                 # Entry point — CLI argument routing
+├── index.ts                 # Entry point — CLI argument routing
 ├── agent/                   # AI agent loop
-│   ├── agent.js             # Main agent loop (display, reasoning, tools)
-│   ├── executor.js          # Tool execution dispatcher
-│   └── tools.js             # Tool implementations (file ops, commands)
+│   ├── agent.ts             # Main agent loop (display, reasoning, tools)
+│   ├── executor.ts          # Tool execution dispatcher
+│   └── tools.ts             # Tool implementations (file ops, commands)
 ├── commands/                # CLI commands
-│   ├── auth.js              # login, register, logout, whoami
-│   ├── billing.js           # Plan picker, usage display
-│   ├── chats.js             # Chat session management
-│   └── model.js             # Model selection UI
+│   ├── auth.ts              # login, register, logout, whoami
+│   ├── billing.ts           # Plan picker, usage display
+│   ├── chats.ts             # Chat session management
+│   └── model.ts             # Model selection UI
 ├── cli/                     # Terminal UI
-│   ├── ui.js                # Interactive readline interface
-│   └── parser.js            # CLI argument parser
+│   ├── ui.ts                # Interactive readline interface
+│   └── parser.ts            # CLI argument parser
 └── lib/                     # Shared utilities
-    ├── server.js             # HTTP client for server communication
-    └── sysbase.js            # Local config and sysbase management
+    ├── server.ts             # HTTP client for server communication
+    └── sysbase.ts            # Local config and sysbase management
 ```
 
 ## Documentation
