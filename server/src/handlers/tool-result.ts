@@ -10,30 +10,36 @@ import { saveContext } from "../store/context.js"
 import { loadRunContext } from "../services/context.js"
 import { callModelAdapter } from "../providers/adapter.js"
 import { mapNormalizedResponseToClient } from "../providers/normalize.js"
+import type { ClientResponse } from "../types.js"
 
-export async function handleToolResult(body) {
+interface ToolResultBody {
+  runId: string
+  tool: string
+  result: Record<string, unknown>
+}
+
+export async function handleToolResult(body: ToolResultBody): Promise<ClientResponse> {
   await saveToolResult(body.runId, body.tool, body.result)
 
   const run = await getRun(body.runId)
 
-  // Record this action for session memory (needs projectId from run)
   recordRunAction(body.runId, body.tool, body.result, run.projectId)
   const task = await getTask(run.taskId)
   const context = await loadRunContext({
     runId: body.runId,
     taskId: run.taskId,
     projectId: run.projectId,
-    cwd: run.cwd,
-    sysbasePath: run.sysbasePath
+    cwd: run.cwd as string,
+    sysbasePath: run.sysbasePath as string | undefined
   })
 
   const normalized = await callModelAdapter({
     model: run.model,
     runId: body.runId,
-    task,
-    context,
+    task: task as never,
+    context: context as never,
     userMessage: run.content,
-    command: run.command,
+    command: run.command as string | undefined,
     toolResult: {
       tool: body.tool,
       result: body.result
@@ -41,7 +47,7 @@ export async function handleToolResult(body) {
     projectId: run.projectId,
     userId: run.userId || null,
     chatId: run.chatId || null
-  })
+  } as never)
 
   await persistModelUsage({
     runId: body.runId,
@@ -55,35 +61,32 @@ export async function handleToolResult(body) {
 
   if (response.status === "completed" || response.status === "failed") {
     if (response.status === "completed") {
-      await finalizeTask(run.taskId, response)
-      await finalizeRun(body.runId, response)
+      await finalizeTask(run.taskId, response as never)
+      await finalizeRun(body.runId, response as never)
       await maybeUpdateProjectMemory({
         runId: body.runId,
         projectId: run.projectId,
-        command: run.command,
-        sysbasePath: run.sysbasePath
+        command: run.command as string | undefined,
+        sysbasePath: run.sysbasePath as string | undefined
       })
     }
 
-    // Save session summary for cross-run memory
     const runLog = getRunActions(body.runId)
     await saveSessionEntry(run.projectId, {
       runId: body.runId,
       prompt: run.content,
       model: run.model,
-      actions: runLog.actions,
-      filesModified: runLog.filesModified,
       outcome: response.status,
       error: response.error || null,
+      filesModified: runLog.filesModified,
       userId: run.userId || null,
       chatId: run.chatId || null
     })
 
-    // Auto-save context: learn from completed tasks and failures
     try {
       await autoSaveContext(run, runLog, response)
     } catch (err) {
-      console.error("[context] Failed to auto-save context:", err.message)
+      console.error("[context] Failed to auto-save context:", (err as Error).message)
     }
 
     clearRunActions(body.runId)
@@ -92,14 +95,21 @@ export async function handleToolResult(body) {
   return response
 }
 
-/**
- * Automatically extract and save useful context from completed/failed runs.
- * - Completed tasks: save as "memory" (what was done)
- * - Failed tasks with errors: save as "fix" (what went wrong)
- * - Error→fix patterns: when errors occurred mid-run but the task still completed
- * - Writes fix files to sysbase/fixes/ so the AI can read them on future runs
- */
-async function autoSaveContext(run, runLog, response) {
+interface RunRecord {
+  projectId: string
+  userId?: string | null
+  content: string
+  sysbasePath?: string
+  [key: string]: unknown
+}
+
+interface RunLog {
+  actions: Array<Record<string, unknown>>
+  filesModified: string[]
+  errors: Array<{ tool: string; error: string; actionIndex: number }>
+}
+
+async function autoSaveContext(run: RunRecord, runLog: RunLog, response: ClientResponse): Promise<void> {
   const tags = extractSimpleTags(run.content)
 
   if (response.status === "completed" && runLog.filesModified.length > 0) {
@@ -128,7 +138,6 @@ async function autoSaveContext(run, runLog, response) {
     await writeFixFile(run, fixContent)
   }
 
-  // Detect error→fix patterns: errors happened mid-run but task completed
   const errors = runLog.errors || []
   if (response.status === "completed" && errors.length > 0) {
     for (const err of errors) {
@@ -156,10 +165,7 @@ async function autoSaveContext(run, runLog, response) {
   }
 }
 
-/**
- * Write a fix entry to sysbase/fixes/ as a local file so the AI reads it.
- */
-async function writeFixFile(run, content) {
+async function writeFixFile(run: RunRecord, content: string): Promise<void> {
   try {
     if (!run.sysbasePath) return
     const fixesDir = path.join(run.sysbasePath, "fixes")
@@ -176,11 +182,11 @@ async function writeFixFile(run, content) {
     )
     console.log(`[context] Wrote fix file: sysbase/fixes/${filename}`)
   } catch (err) {
-    console.error("[context] Failed to write fix file:", err.message)
+    console.error("[context] Failed to write fix file:", (err as Error).message)
   }
 }
 
-function extractSimpleTags(prompt) {
+function extractSimpleTags(prompt: string): string[] {
   if (!prompt) return []
   const stopWords = new Set([
     "the", "a", "an", "is", "are", "to", "of", "in", "for", "on", "with",

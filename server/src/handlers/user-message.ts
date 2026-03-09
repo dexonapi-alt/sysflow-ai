@@ -7,13 +7,24 @@ import { buildSessionSummary, getLastSession, saveOrphanedSessions, buildContinu
 import { buildContextForPrompt } from "../store/context.js"
 import { callModelAdapter } from "../providers/adapter.js"
 import { mapNormalizedResponseToClient } from "../providers/normalize.js"
+import type { ClientResponse } from "../types.js"
 
-export async function handleUserMessage(body) {
+interface UserMessageBody {
+  projectId: string
+  model: string
+  content: string
+  command?: string
+  cwd: string
+  sysbasePath?: string
+  directoryTree?: Array<{ name: string; type: string }>
+  userId?: string | null
+  chatId?: string | null
+}
+
+export async function handleUserMessage(body: UserMessageBody): Promise<ClientResponse> {
   const runId = crypto.randomUUID()
   const taskId = crypto.randomUUID()
 
-  // Flush any orphaned runs (interrupted mid-execution) into session history
-  // so the AI remembers what happened even if the previous run didn't complete
   await saveOrphanedSessions(body.projectId, body.chatId)
 
   const task = await createTask({
@@ -33,27 +44,23 @@ export async function handleUserMessage(body) {
     cwd: body.cwd,
     sysbasePath: body.sysbasePath,
     task
-  })
+  }) as Record<string, unknown>
 
-  // Load session memory — scoped to chat if available, else project-wide
   const sessionSummary = await buildSessionSummary(body.projectId, body.chatId)
   if (sessionSummary) {
     context.sessionHistory = sessionSummary
   }
 
-  // Load project context/patterns/memories from DB (smart keyword filtering)
   const projectContext = await buildContextForPrompt(body.projectId, body.content)
   if (projectContext) {
     context.projectKnowledge = projectContext
   }
 
-  // If this is a "continue" command, load detailed continuation context
   if (body.command === "/continue") {
     const continueCtx = await buildContinueContext(body.projectId, body.chatId)
     if (continueCtx) {
       context.continueContext = continueCtx
     }
-    // Also keep the last session for backward compat
     const lastSession = await getLastSession(body.projectId, body.chatId)
     if (lastSession) {
       context.continueFrom = lastSession
@@ -77,15 +84,15 @@ export async function handleUserMessage(body) {
   const normalized = await callModelAdapter({
     model: body.model,
     runId,
-    task,
-    context,
+    task: task as never,
+    context: context as never,
     userMessage: body.content,
     command: body.command,
-    directoryTree: body.directoryTree || [],
+    directoryTree: (body.directoryTree || []) as never,
     projectId: body.projectId,
     userId: body.userId || null,
     chatId: body.chatId || null
-  })
+  } as never)
 
   await persistModelUsage({
     runId,
