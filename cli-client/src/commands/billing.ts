@@ -4,12 +4,10 @@ import { getAuthToken } from "../lib/sysbase.js"
 
 const SERVER_URL = process.env.SYS_SERVER_URL || "http://localhost:3000"
 
-// ─── Box drawing helpers ───
-
 const BOX_W = 56
 const B = chalk.magenta
 
-function boxTop(title) {
+function boxTop(title: string): string {
   const inner = BOX_W - 2
   const pad = Math.max(0, inner - title.length - 2)
   const left = Math.floor(pad / 2)
@@ -17,28 +15,35 @@ function boxTop(title) {
   return B("  ╭" + "─".repeat(left) + ` ${title} ` + "─".repeat(right) + "╮")
 }
 
-function boxRow(text, rawLen) {
+function boxRow(text: string, rawLen?: number): string {
   const inner = BOX_W - 2
   const visLen = rawLen != null ? rawLen : text.replace(/\x1B\[[0-9;]*m/g, "").length
   const padR = Math.max(0, inner - visLen)
   return B("  │") + text + " ".repeat(padR) + B("│")
 }
 
-function boxEmpty() {
+function boxEmpty(): string {
   return boxRow("", 0)
 }
 
-function boxBottom() {
+function boxBottom(): string {
   return B("  ╰" + "─".repeat(BOX_W - 2) + "╯")
 }
 
-function boxDivider() {
+function boxDivider(): string {
   return B("  ├" + "─".repeat(BOX_W - 2) + "┤")
 }
 
-// ─── Plan picker popup ───
+interface PlanItem {
+  id: string
+  label: string
+  price: string
+  desc: string
+  priceId: string | null
+  isCurrent: boolean
+}
 
-export async function showPlanPicker() {
+export async function showPlanPicker(): Promise<void> {
   const token = await getAuthToken()
   if (!token) {
     console.log("")
@@ -47,8 +52,8 @@ export async function showPlanPicker() {
     return
   }
 
-  // Fetch plans and current usage
-  let plans, usage
+  let plans: Array<Record<string, unknown>>
+  let usage: Record<string, unknown>
   try {
     const [plansRes, usageRes] = await Promise.all([
       fetch(`${SERVER_URL}/billing/plans`),
@@ -56,45 +61,39 @@ export async function showPlanPicker() {
         headers: { Authorization: `Bearer ${token}` }
       })
     ])
-    plans = (await plansRes.json()).plans
-    usage = await usageRes.json()
+    plans = ((await plansRes.json()) as { plans: Array<Record<string, unknown>> }).plans
+    usage = await usageRes.json() as Record<string, unknown>
   } catch (err) {
-    console.log(chalk.red(`  Connection error: ${err.message}`))
+    console.log(chalk.red(`  Connection error: ${(err as Error).message}`))
     return
   }
 
-  const currentPlan = usage.plan || "free"
+  const currentPlan = (usage.plan as string) || "free"
 
-  // Build display items
-  const items = plans.map((p) => {
-    const isCurrent = p.id === currentPlan
-    return {
-      id: p.id,
-      label: p.label,
-      price: p.price,
-      desc: p.desc,
-      priceId: p.priceId,
-      isCurrent
-    }
-  })
+  const items: PlanItem[] = plans.map((p) => ({
+    id: p.id as string,
+    label: p.label as string,
+    price: p.price as string,
+    desc: p.desc as string,
+    priceId: p.priceId as string | null,
+    isCurrent: p.id === currentPlan
+  }))
 
   let selected = items.findIndex((i) => i.isCurrent)
   if (selected < 0) selected = 0
 
   let prevLineCount = 0
 
-  function render() {
-    // Erase previous output by moving up and clearing
+  function render(): void {
     if (prevLineCount > 0) {
       process.stdout.write(`\x1B[${prevLineCount}A\x1B[J`)
     }
 
-    const lines = []
+    const lines: string[] = []
     lines.push("")
     lines.push(boxTop("Subscription Plans"))
     lines.push(boxEmpty())
 
-    // Current status
     if (currentPlan === "free") {
       const statusText = `  Plan: Free  ·  ${usage.promptsUsed || 0}/${usage.promptsLimit || 10} prompts today`
       lines.push(boxRow(chalk.dim(statusText), statusText.length))
@@ -137,13 +136,13 @@ export async function showPlanPicker() {
 
   render()
 
-  const choice = await new Promise((resolve) => {
+  const choice = await new Promise<PlanItem | null>((resolve) => {
     const { stdin } = process
     if (stdin.isTTY) stdin.setRawMode(true)
     readline.emitKeypressEvents(stdin)
     stdin.resume()
 
-    const onKey = (str, key) => {
+    const onKey = (_str: string, key: readline.Key) => {
       if (!key) return
       if (key.name === "up") {
         selected = (selected - 1 + items.length) % items.length
@@ -187,7 +186,6 @@ export async function showPlanPicker() {
     return
   }
 
-  // Create checkout session
   console.log("")
   console.log(chalk.dim("  Creating checkout session..."))
 
@@ -201,7 +199,7 @@ export async function showPlanPicker() {
       body: JSON.stringify({ priceId: choice.priceId })
     })
 
-    const data = await res.json()
+    const data = await res.json() as Record<string, unknown>
 
     if (!res.ok) {
       console.log(chalk.red(`  ${data.error || "Checkout failed"}`))
@@ -214,7 +212,6 @@ export async function showPlanPicker() {
     console.log(chalk.cyan.underline(`  ${data.url}`))
     console.log("")
 
-    // Try to open the URL automatically
     try {
       const { exec } = await import("node:child_process")
       const platform = process.platform
@@ -228,18 +225,17 @@ export async function showPlanPicker() {
     console.log("")
     console.log(chalk.dim("  Waiting for payment..."))
 
-    // Wait for payment via SSE — server pushes when success page is hit
-    const sseUrl = `${SERVER_URL}/billing/checkout-stream?sessionId=${encodeURIComponent(data.sessionId)}`
-    const result = await new Promise((resolve) => {
+    const sseUrl = `${SERVER_URL}/billing/checkout-stream?sessionId=${encodeURIComponent(data.sessionId as string)}`
+    const result = await new Promise<Record<string, unknown> | null>((resolve) => {
       const controller = new AbortController()
       const timeout = setTimeout(() => {
         controller.abort()
         resolve(null)
-      }, 5 * 60 * 1000) // 5 min safety timeout
+      }, 5 * 60 * 1000)
 
       fetch(sseUrl, { signal: controller.signal })
         .then(async (res) => {
-          const reader = res.body.getReader()
+          const reader = res.body!.getReader()
           const decoder = new TextDecoder()
           let buffer = ""
 
@@ -248,7 +244,6 @@ export async function showPlanPicker() {
             if (done) break
             buffer += decoder.decode(value, { stream: true })
 
-            // Parse SSE data lines
             const lines = buffer.split("\n")
             buffer = lines.pop() || ""
             for (const line of lines) {
@@ -260,7 +255,7 @@ export async function showPlanPicker() {
                     resolve(parsed)
                     return
                   }
-                } catch {}
+                } catch { /* ignore */ }
               }
             }
           }
@@ -278,13 +273,11 @@ export async function showPlanPicker() {
     }
     console.log("")
   } catch (err) {
-    console.log(chalk.red(`  Connection error: ${err.message}`))
+    console.log(chalk.red(`  Connection error: ${(err as Error).message}`))
   }
 }
 
-// ─── Show usage summary ───
-
-export async function showUsage() {
+export async function showUsage(): Promise<void> {
   const token = await getAuthToken()
   if (!token) {
     console.log("")
@@ -303,7 +296,7 @@ export async function showUsage() {
       return
     }
 
-    const data = await res.json()
+    const data = await res.json() as Record<string, unknown>
 
     console.log("")
     console.log(boxTop("Usage"))
@@ -320,13 +313,13 @@ export async function showUsage() {
       console.log(boxRow(chalk.dim(remainRow), remainRow.length))
     } else {
       const credRow = `  Credits: $${data.creditsRemaining} / $${data.creditsTotal}`
-      const costRow = `  Today's cost: $${(data.todayCostCents / 100).toFixed(4)}`
+      const costRow = `  Today's cost: $${((data.todayCostCents as number) / 100).toFixed(4)}`
       const reqRow = `  Today's requests: ${data.todayRequests}`
       console.log(boxRow(chalk.dim(credRow), credRow.length))
       console.log(boxRow(chalk.dim(costRow), costRow.length))
       console.log(boxRow(chalk.dim(reqRow), reqRow.length))
       if (data.periodEnd) {
-        const renewDate = new Date(data.periodEnd).toLocaleDateString()
+        const renewDate = new Date(data.periodEnd as string).toLocaleDateString()
         const renewRow = `  Renews: ${renewDate}`
         console.log(boxRow(chalk.dim(renewRow), renewRow.length))
       }
@@ -336,6 +329,6 @@ export async function showUsage() {
     console.log(boxBottom())
     console.log("")
   } catch (err) {
-    console.log(chalk.red(`  Connection error: ${err.message}`))
+    console.log(chalk.red(`  Connection error: ${(err as Error).message}`))
   }
 }

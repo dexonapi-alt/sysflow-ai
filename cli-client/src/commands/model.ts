@@ -2,7 +2,13 @@ import readline from "node:readline"
 import chalk from "chalk"
 import { MODELS, VISIBLE_MODELS, getSelectedModel, setSelectedModel, getReasoningEnabled, setReasoningEnabled, ensureSysbase } from "../lib/sysbase.js"
 
-function arrowPicker(items, startIndex, title) {
+interface PickerItem {
+  label: string
+  desc: string
+  tag?: string
+}
+
+function arrowPicker(items: PickerItem[], startIndex: number, title: string): Promise<number> {
   let index = startIndex
 
   const totalLines = items.length * 2
@@ -11,8 +17,8 @@ function arrowPicker(items, startIndex, title) {
   console.log(chalk.white.bold(`  ${title}`) + chalk.dim("  (up/down, enter)"))
   console.log("")
 
-  function render() {
-    const lines = []
+  function render(): string[] {
+    const lines: string[] = []
     for (let i = 0; i < items.length; i++) {
       const isSelected = i === index
       const pointer = isSelected ? chalk.blue("  > ") : "    "
@@ -25,7 +31,6 @@ function arrowPicker(items, startIndex, title) {
     return lines
   }
 
-  // Draw initial
   const initial = render()
   for (const line of initial) console.log(line)
 
@@ -35,7 +40,7 @@ function arrowPicker(items, startIndex, title) {
     readline.emitKeypressEvents(stdin)
     stdin.resume()
 
-    function redraw() {
+    function redraw(): void {
       process.stdout.write(`\x1b[${totalLines}A`)
       const lines = render()
       for (const line of lines) {
@@ -43,7 +48,7 @@ function arrowPicker(items, startIndex, title) {
       }
     }
 
-    function onKeypress(str, key) {
+    function onKeypress(_str: string, key: readline.Key): void {
       if (!key) return
 
       if (key.name === "up") {
@@ -69,14 +74,13 @@ function arrowPicker(items, startIndex, title) {
   })
 }
 
-export async function showModelPicker() {
+export async function showModelPicker(): Promise<void> {
   await ensureSysbase()
   const current = await getSelectedModel()
   const currentReasoning = await getReasoningEnabled()
 
-  // Step 1: Pick model (only show visible models)
   const displayModels = VISIBLE_MODELS.length > 0 ? VISIBLE_MODELS : MODELS
-  const modelItems = displayModels.map((m) => ({
+  const modelItems: PickerItem[] = displayModels.map((m) => ({
     label: m.label,
     desc: m.desc,
     tag: m.id === current ? chalk.green(" (current)") : ""
@@ -97,8 +101,7 @@ export async function showModelPicker() {
   const selected = displayModels[modelChoice]
   await setSelectedModel(selected.id)
 
-  // Step 2: Pick reasoning mode
-  const reasoningItems = [
+  const reasoningItems: PickerItem[] = [
     { label: "Reasoning", desc: "Visible AI thinking before each action" },
     { label: "No reasoning (faster)", desc: "Skip reasoning output, faster execution" }
   ]
