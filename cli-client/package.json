@@ -1,0 +1,26 @@
+{
+  "name": "sysflow-client",
+  "version": "0.1.0",
+  "description": "Sysflow CLI - AI coding agent with local tool execution",
+  "type": "module",
+  "bin": {
+    "sys": "./bin/sys.js"
+  },
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "link": "npm link"
+  },
+  "keywords": [
+    "ai",
+    "coding-agent",
+    "cli"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.6.2",
+    "ora": "^9.3.0",
+    "ws": "^8.19.0"
+  }
+}
