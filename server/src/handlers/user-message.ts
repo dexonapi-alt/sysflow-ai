@@ -7,6 +7,7 @@ import { buildSessionSummary, getLastSession, saveOrphanedSessions, buildContinu
 import { buildContextForPrompt } from "../store/context.js"
 import { callModelAdapter } from "../providers/adapter.js"
 import { mapNormalizedResponseToClient } from "../providers/normalize.js"
+import { analyzeTaskComplexity } from "../services/completion-guard.js"
 import type { ClientResponse } from "../types.js"
 
 interface UserMessageBody {
@@ -48,7 +49,16 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
 
   const sessionSummary = await buildSessionSummary(body.projectId, body.chatId)
   if (sessionSummary) {
-    context.sessionHistory = sessionSummary
+    // ─── Fresh-start detection: filter stale session references ───
+    const currentFiles = (body.directoryTree || []).map((e) => e.name)
+    const hasScaffoldedContent = currentFiles.length > 2 // more than just config files
+
+    if (!hasScaffoldedContent && sessionSummary.includes("write_file")) {
+      // Old sessions reference files that no longer exist — this is a fresh start
+      context.sessionHistory = `⚠️ FRESH START DETECTED: Previous session data references files that no longer exist in this directory. The project was deleted or reset.\n\nCurrent directory contains: ${currentFiles.length > 0 ? currentFiles.join(", ") : "(empty)"}\n\nIMPORTANT: Ignore all previous file references. Start the task from scratch. Do NOT try to read, scan, or list directories from previous sessions — they do not exist. Create everything fresh.`
+    } else {
+      context.sessionHistory = sessionSummary
+    }
   }
 
   const projectContext = await buildContextForPrompt(body.projectId, body.content)
@@ -59,7 +69,13 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
   if (body.command === "/continue") {
     const continueCtx = await buildContinueContext(body.projectId, body.chatId)
     if (continueCtx) {
-      context.continueContext = continueCtx
+      // Also check for stale continue context
+      const currentFiles = (body.directoryTree || []).map((e) => e.name)
+      if (currentFiles.length <= 2 && continueCtx.includes("Files already created:")) {
+        context.continueContext = `⚠️ FRESH START: Previous files were deleted. Start from scratch. Current directory: ${currentFiles.join(", ") || "(empty)"}`
+      } else {
+        context.continueContext = continueCtx
+      }
     }
     const lastSession = await getLastSession(body.projectId, body.chatId)
     if (lastSession) {
@@ -102,6 +118,20 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     userId: body.userId || null,
     isNewPrompt: true
   })
+
+  // Layer 3: Guard against AI completing on the FIRST call (before any tools run)
+  // For complex tasks, the AI should NEVER say "completed" without running any tools
+  if (normalized.kind === "completed") {
+    const analysis = analyzeTaskComplexity(body.content)
+    if (analysis.complexity !== "simple") {
+      console.log(`[user-message] AI tried to complete ${analysis.complexity} task on first call — overriding to needs_tool`)
+      normalized.kind = "needs_tool"
+      normalized.tool = "list_directory"
+      normalized.args = { path: "." }
+      normalized.content = "Starting implementation..."
+      normalized.reasoning = "I need to implement the full task, not just respond with a summary."
+    }
+  }
 
   return mapNormalizedResponseToClient(runId, normalized)
 }
