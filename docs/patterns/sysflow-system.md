@@ -1,20 +1,21 @@
-# Catelis System Pattern
+# Sysflow System Pattern
 
-> How the Catelis pattern-aware AI system works within Sysflow
+> How the pattern-aware AI system works within Sysflow
 
-## What is Catelis
+## What is Sysflow's AI System
 
-Catelis is the AI identity and behavioral framework embedded into Sysflow's AI providers. It transforms the AI from a stateless code generator into a pattern-aware engineering system.
+Sysflow's AI behavioral framework transforms the AI from a stateless code generator into a pattern-aware engineering system.
 
 ## Where It Lives in Code
 
 | Component | File | What it does |
 |-----------|------|-------------|
-| System prompt | `server/src/providers/base-provider.ts` | Catelis identity, principles, pipeline, rules |
-| Knowledge loader | `server/src/services/context.ts` | Loads `catelis-memory/` files into AI context |
+| System prompt | `server/src/providers/base-provider.ts` | AI identity, principles, pipeline, rules |
+| Knowledge loader | `server/src/services/context.ts` | Loads `sysbase/` files into AI context |
+| Pattern index | `server/src/services/pattern-index.ts` | Indexes sysbase knowledge files for fast lookup |
 | Pattern store | `server/src/store/context.ts` | Saves/queries patterns with confidence + lifecycle |
 | Auto-save | `server/src/handlers/tool-result.ts` | Creates patterns on task completion/failure |
-| Task pipeline | `server/src/services/task.ts` | Aligns task steps with Catelis feature pipeline |
+| Task pipeline | `server/src/services/task.ts` | Aligns task steps with feature pipeline |
 
 ## Core Principles (embedded in system prompt)
 
@@ -26,7 +27,7 @@ Catelis is the AI identity and behavioral framework embedded into Sysflow's AI p
 ## Knowledge Priority Order
 
 1. Codebase (read files)
-2. Existing patterns (catelis-memory + DB context)
+2. Existing patterns (sysbase knowledge + DB context)
 3. Session history
 4. Project context and fixes
 5. User clarification
@@ -62,16 +63,17 @@ Catelis is the AI identity and behavioral framework embedded into Sysflow's AI p
 ## How Knowledge Flows
 
 ```
-catelis-memory/ (static files in repo)
+sysbase/ (per-project knowledge directory)
         │
         ▼
-context.ts: loadCatelisKnowledge()
-  - Reads architecture/overview.md (always)
-  - Reads patterns/, conventions/, architecture/ (keyword-matched)
-  - Reads status/current.md (always)
+pattern-index.ts: buildPatternIndex()
+  - Indexes architecture/, patterns/, conventions/, stack/, status/, decisions/, fixes/
+  - Token-based search with boosting for key files
         │
         ▼
-Added to projectMemory[] → sent to AI in system context
+context.ts: loadSysbaseKnowledge()
+  - Reads top 8 matches by relevance
+  - Added to projectMemory[] → sent to AI in system context
 
 context_entries (PostgreSQL, dynamic)
         │

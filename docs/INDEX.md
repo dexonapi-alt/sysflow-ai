@@ -1,4 +1,4 @@
-# Catelis Memory — Master Index
+# Sysflow Knowledge — Master Index
 
 > Last updated: 2026-03-26
 
@@ -10,7 +10,7 @@
 - [database.md](architecture/database.md) — PostgreSQL schema, migrations, stores
 
 ## Patterns
-- [catelis-system.md](patterns/catelis-system.md) — How the Catelis pattern-aware AI system works
+- [sysflow-system.md](patterns/sysflow-system.md) — How the pattern-aware AI system works
 - [agent-loop.md](patterns/agent-loop.md) — How the agent loop works end-to-end
 - [tool-execution.md](patterns/tool-execution.md) — Tool dispatch and result handling
 - [auth-flow.md](patterns/auth-flow.md) — Authentication and JWT flow

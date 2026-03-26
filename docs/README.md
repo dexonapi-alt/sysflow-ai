@@ -1,4 +1,4 @@
-# Catelis Memory
+# Sysflow Knowledge Base
 
 **AI Knowledge Base for the Sysflow Project**
 
@@ -13,7 +13,7 @@ This folder is a living knowledge base that any AI assistant can read to underst
 ## Folder Structure
 
 ```
-catelis-memory/
+docs/
 ├── README.md              # You are here
 ├── INDEX.md               # Master index of all knowledge files
 ├── architecture/          # System design, data flow, component relationships
