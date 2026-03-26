@@ -147,22 +147,44 @@ export async function deleteFileTool(filePath: string): Promise<boolean> {
   return true
 }
 
+/** Directories to always skip when searching code */
+const SEARCH_EXCLUDE_DIRS = [
+  "node_modules", ".git", ".next", ".turbo", "dist", "build",
+  ".cache", "coverage", ".output", ".nuxt", ".svelte-kit",
+  "sysbase", "sysbase-knowledge", "__pycache__", ".venv"
+]
+
 export async function searchCodeTool(directory: string, pattern: string): Promise<string[]> {
   return new Promise((resolve) => {
     const isWindows = process.platform === "win32"
     const shell = isWindows ? "cmd.exe" : "/bin/sh"
+
+    // Use PowerShell on Windows for proper directory exclusion
+    // Use grep with --exclude-dir on Linux/Mac
     const cmd = isWindows
-      ? `findstr /s /n /c:"${pattern}" *`
-      : `grep -rn "${pattern}" "${directory}" --include="*" -l`
+      ? `powershell -NoProfile -Command "Get-ChildItem -Path '.' -Recurse -File -Include *.ts,*.tsx,*.js,*.jsx,*.json,*.prisma,*.css,*.html,*.md ${SEARCH_EXCLUDE_DIRS.map(d => `| Where-Object { $_.FullName -notmatch '\\\\${d}\\\\' }`).join(" ")} | Select-String -Pattern '${pattern.replace(/'/g, "''")}' -List | ForEach-Object { $_.Path + ':' + $_.LineNumber + ':' + $_.Line.Trim() }"`
+      : `grep -rn "${pattern}" "${directory}" --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" --include="*.json" --include="*.prisma" --include="*.css" --include="*.html" ${SEARCH_EXCLUDE_DIRS.map(d => `--exclude-dir="${d}"`).join(" ")} -l`
     const shellArgs = isWindows ? ["/c", cmd] : ["-c", cmd]
 
     const child = spawn(shell, shellArgs, { cwd: directory })
     let stdout = ""
     child.stdout.on("data", (d: Buffer) => { stdout += d.toString() })
+
+    // Timeout: if search takes more than 15s, return what we have
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM")
+      const results = stdout.trim().split("\n").filter(Boolean)
+      resolve(results.length > 0 ? results : [`(search timed out after 15s — try a more specific pattern)`])
+    }, 15_000)
+
     child.on("close", () => {
+      clearTimeout(timer)
       resolve(stdout.trim().split("\n").filter(Boolean))
     })
-    child.on("error", () => resolve([]))
+    child.on("error", () => {
+      clearTimeout(timer)
+      resolve([])
+    })
   })
 }
 
@@ -214,6 +236,7 @@ interface CommandResult {
   timedOut?: boolean
   interactive?: boolean
   message?: string
+  verified?: boolean
 }
 
 export async function runCommandTool(command: string, cwd: string = process.cwd()): Promise<CommandResult> {
@@ -240,7 +263,7 @@ export async function runCommandTool(command: string, cwd: string = process.cwd(
     }
   }
 
-  // Interactive commands: full terminal passthrough so user can see prompts and type
+  // Interactive commands: full terminal passthrough with activity-aware timeout
   if (isInteractive) {
     return new Promise((resolve, reject) => {
       const isWindows = process.platform === "win32"
@@ -249,43 +272,120 @@ export async function runCommandTool(command: string, cwd: string = process.cwd(
 
       console.log("") // blank line before interactive output
 
+      // Use pipe for stdout/stderr to track activity, but mirror to console
       const child = spawn(shell, shellArgs, {
         cwd,
-        stdio: "inherit",
+        stdio: ["inherit", "pipe", "pipe"],
         env: { ...process.env, FORCE_COLOR: "1" }
       })
 
-      // Safety timeout: if command runs longer than 10 minutes, it's probably stuck
-      const safetyTimer = setTimeout(() => {
-        console.log("\n  (command exceeded 10 minutes — stopping)")
+      let lastActivityTime = Date.now()
+      let resolved = false
+      let capturedStdout = ""
+      let capturedStderr = ""
+
+      // Mirror output to console AND track activity
+      child.stdout?.on("data", (d: Buffer) => {
+        lastActivityTime = Date.now()
+        const text = d.toString()
+        capturedStdout += text
+        process.stdout.write(text)
+      })
+      child.stderr?.on("data", (d: Buffer) => {
+        lastActivityTime = Date.now()
+        const text = d.toString()
+        capturedStderr += text
+        process.stderr.write(text)
+      })
+
+      const ACTIVITY_CHECK_INTERVAL = 60_000  // check every 60s
+      const IDLE_KILL_THRESHOLD = 180_000      // kill if no output for 3 min
+      const MAX_TOTAL_TIME = 900_000           // hard cap at 15 min
+
+      const startTime = Date.now()
+
+      // Activity monitor: check every 60s if command is still producing output
+      const activityChecker = setInterval(() => {
+        if (resolved) { clearInterval(activityChecker); return }
+
+        const elapsed = Date.now() - startTime
+        const idleTime = Date.now() - lastActivityTime
+        const elapsedMin = Math.round(elapsed / 60_000)
+        const idleSec = Math.round(idleTime / 1000)
+
+        // Hard cap
+        if (elapsed > MAX_TOTAL_TIME) {
+          console.log(`\n  (command exceeded 15 minutes — force stopping)`)
+          killChild()
+          return
+        }
+
+        // Idle check — no output for 3 minutes
+        if (idleTime > IDLE_KILL_THRESHOLD) {
+          console.log(`\n  (no output for ${idleSec}s — command appears stuck, stopping)`)
+          killChild()
+          return
+        }
+
+        // Progress indicator every 60s
+        if (elapsed > 60_000) {
+          console.log(`  (still running... ${elapsedMin}m elapsed, last activity ${idleSec}s ago)`)
+        }
+      }, ACTIVITY_CHECK_INTERVAL)
+
+      function killChild(): void {
+        if (resolved) return
+        resolved = true
+        clearInterval(activityChecker)
+
         if (isWindows) {
           spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" })
         } else {
           child.kill("SIGTERM")
         }
-        resolve({
-          stdout: "",
-          stderr: "",
-          timedOut: true,
-          interactive: true,
-          message: "Interactive command exceeded 10 minutes and was stopped."
-        })
-      }, 600_000)
+
+        // Check if the command actually succeeded despite timeout
+        // by looking for expected output (Success!, Created, etc.)
+        const output = capturedStdout + capturedStderr
+        const looksSuccessful = /success|created|initialized|done/i.test(output)
+
+        if (looksSuccessful) {
+          console.log(`  (command was stopped but output suggests it completed successfully)`)
+          resolve({
+            stdout: capturedStdout.slice(-4000),
+            stderr: capturedStderr.slice(-2000),
+            timedOut: true,
+            interactive: true,
+            message: "Command was stopped due to timeout but output indicates it completed. The project was likely created successfully. Continue with the next step."
+          })
+        } else {
+          resolve({
+            stdout: capturedStdout.slice(-4000),
+            stderr: capturedStderr.slice(-2000),
+            timedOut: true,
+            interactive: true,
+            message: `Command timed out. Partial output captured. Check if the project directory was created. If it exists, continue — otherwise retry or create files manually.`
+          })
+        }
+      }
 
       child.on("close", (code) => {
-        clearTimeout(safetyTimer)
+        if (resolved) return
+        resolved = true
+        clearInterval(activityChecker)
+
         console.log("") // blank line after interactive output
         if (code !== 0 && code !== null) {
           resolve({
-            stdout: "",
-            stderr: `Exited with code ${code}`,
+            stdout: capturedStdout.slice(-4000),
+            stderr: capturedStderr.slice(-2000) || `Exited with code ${code}`,
             interactive: true,
             message: `Command finished with exit code ${code}. Check the output above for details.`
           })
         } else {
           resolve({
-            stdout: "",
-            stderr: "",
+            stdout: capturedStdout.slice(-4000),
+            stderr: capturedStderr.slice(-2000),
             interactive: true,
             message: "Command completed successfully."
           })
@@ -293,7 +393,9 @@ export async function runCommandTool(command: string, cwd: string = process.cwd(
       })
 
       child.on("error", (err) => {
-        clearTimeout(safetyTimer)
+        if (resolved) return
+        resolved = true
+        clearInterval(activityChecker)
         reject(err)
       })
     })
