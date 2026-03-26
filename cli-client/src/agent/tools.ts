@@ -146,6 +146,27 @@ export async function runCommandTool(command: string, cwd: string = process.cwd(
   })
 }
 
+// ─── Indexed file search ───
+
+import { getOrBuildIndex, searchIndex, searchByGlob } from "./indexer.js"
+import { getSysbasePath } from "../lib/sysbase.js"
+
+export async function searchFilesTool(query: string, glob?: string): Promise<string> {
+  const index = await getOrBuildIndex(process.cwd(), getSysbasePath())
+
+  if (glob) {
+    const results = searchByGlob(index, glob)
+    if (results.length === 0) return `No files matching glob: ${glob}`
+    return results.join("\n")
+  }
+
+  const results = searchIndex(index, query, 30)
+  if (results.length === 0) return `No files matching: ${query}`
+  return results.map((r) => r.path).join("\n")
+}
+
+// ─── Diff ───
+
 export function computeLineDiff(oldContent: string | null, newContent: string): { added: number; removed: number } {
   const oldLines = oldContent ? oldContent.split("\n") : []
   const newLines = newContent ? newContent.split("\n") : []
