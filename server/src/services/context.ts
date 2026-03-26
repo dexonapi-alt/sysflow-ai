@@ -2,6 +2,9 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { getProjectMemories } from "../store/memory.js"
 import { getToolResults } from "../store/tool-results.js"
+import { getRelevantPatterns } from "./pattern-index.js"
+
+// ─── Fix files loader ───
 
 async function loadFixFiles(sysbasePath: string | undefined): Promise<string | null> {
   if (!sysbasePath) return null
@@ -25,6 +28,25 @@ async function loadFixFiles(sysbasePath: string | undefined): Promise<string | n
   }
 }
 
+// ─── Catelis knowledge base loader (indexed) ───
+
+async function loadCatelisKnowledge(cwd: string, prompt: string): Promise<string | null> {
+  const matches = await getRelevantPatterns(cwd, prompt, 8)
+  if (matches.length === 0) return null
+
+  const sections: string[] = []
+  for (const match of matches) {
+    const label = match.file.replace(".md", "").toUpperCase()
+    const stripped = match.content.replace(/^---[\s\S]*?---\n*/, "").trim()
+    const truncated = stripped.length > 500 ? stripped.slice(0, 500) + "..." : stripped
+    sections.push(`[${label}]\n${truncated}`)
+  }
+
+  return "═══ CATELIS KNOWLEDGE BASE ═══\n\n" + sections.join("\n\n---\n\n")
+}
+
+// ─── Public API ───
+
 interface LoadProjectContextParams {
   projectId: string
   command?: string
@@ -38,6 +60,7 @@ interface LoadProjectContextParams {
 export async function loadProjectContext({ projectId, command, prompt, model, cwd, sysbasePath, task }: LoadProjectContextParams): Promise<Record<string, unknown>> {
   const memories = await getProjectMemories(projectId)
   const fixes = await loadFixFiles(sysbasePath)
+  const catelisKnowledge = await loadCatelisKnowledge(cwd, prompt)
 
   const projectMemory: unknown[] = memories.length > 0
     ? memories
@@ -48,6 +71,10 @@ export async function loadProjectContext({ projectId, command, prompt, model, cw
 
   if (fixes) {
     projectMemory.push(fixes)
+  }
+
+  if (catelisKnowledge) {
+    projectMemory.push(catelisKnowledge)
   }
 
   return {

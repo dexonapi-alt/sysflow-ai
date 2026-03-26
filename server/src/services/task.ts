@@ -1,4 +1,5 @@
 import { saveTask } from "../store/tasks.js"
+import type { TaskStep } from "../types.js"
 
 interface CreateTaskParams {
   taskId: string
@@ -16,7 +17,7 @@ interface TaskRecord {
   model: string
   title: string
   goal: string
-  steps: string[]
+  steps: TaskStep[]
   status: string
   createdAt: string
 }
@@ -56,18 +57,36 @@ function buildTaskGoal({ prompt, command }: { prompt: string; command?: string }
   return prompt
 }
 
-function buildInitialTaskSteps({ command }: { prompt: string; command?: string }): string[] {
+function toSteps(labels: string[]): TaskStep[] {
+  return labels.map((label, i) => ({
+    id: `step_${i}`,
+    label,
+    status: i === 0 ? "in_progress" as const : "pending" as const
+  }))
+}
+
+function buildInitialTaskSteps({ command }: { prompt: string; command?: string }): TaskStep[] {
   if (command === "/plan") {
-    return ["Inspect project context", "Generate plan", "Write plan into sysbase", "Complete task"]
+    return toSteps(["Inspect project context", "Retrieve relevant patterns", "Generate plan", "Write plan into sysbase", "Complete task"])
   }
   if (command === "/implement") {
-    return ["Load referenced plan", "Inspect relevant repo structure", "Implement required files and changes", "Update project knowledge", "Complete task"]
+    return toSteps(["Load referenced plan", "Retrieve relevant patterns", "Inspect relevant repo structure", "Detect unknowns and validate", "Implement required files and changes", "Verify implementation", "Extract learnings", "Complete task"])
   }
   if (command === "/pull") {
-    return ["Fetch shared sysbase data", "Write local sysbase files", "Complete task"]
+    return toSteps(["Fetch shared sysbase data", "Write local sysbase files", "Complete task"])
   }
   if (command === "/stash") {
-    return ["Locate target sysbase content", "Move content to archive", "Complete task"]
+    return toSteps(["Locate target sysbase content", "Move content to archive", "Complete task"])
   }
-  return ["Inspect repository state", "Determine required file, folder, and command actions", "Execute implementation steps", "Update project knowledge", "Complete task"]
+  // Default: Catelis feature pipeline
+  return toSteps([
+    "Inspect codebase and read relevant files",
+    "Retrieve patterns and knowledge from context",
+    "Analyze requirements and detect unknowns",
+    "Plan implementation steps",
+    "Execute implementation",
+    "Verify and test",
+    "Extract learnings",
+    "Complete task"
+  ])
 }
