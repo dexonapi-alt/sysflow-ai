@@ -2,6 +2,7 @@ import "dotenv/config"
 import Fastify from "fastify"
 import cors from "@fastify/cors"
 import { agentRunRoute } from "./routes/agent.js"
+import { agentStreamRoute } from "./routes/agent-stream.js"
 import { authRoutes } from "./routes/auth.js"
 import { chatRoutes } from "./routes/chats.js"
 import { stripeRoutes } from "./routes/billing.js"
@@ -31,6 +32,7 @@ await fastify.register(authRoutes)
 await fastify.register(chatRoutes)
 await fastify.register(stripeRoutes)
 await fastify.register(agentRunRoute)
+await fastify.register(agentStreamRoute)
 
 fastify.get("/health", async () => {
   return { status: "ok", timestamp: new Date().toISOString() }
