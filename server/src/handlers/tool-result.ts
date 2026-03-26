@@ -49,13 +49,15 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     }
   }
 
-  // Record actions for each tool
+  // Record actions for each tool AND feed results to action planner
   if (isBatch) {
     for (const tr of body.toolResults!) {
       recordRunAction(body.runId, tr.tool, tr.result, run.projectId)
     }
+    actionPlanner.recordBatchResults(body.runId, body.toolResults!.map((tr) => ({ tool: tr.tool, result: tr.result })))
   } else {
     recordRunAction(body.runId, body.tool, body.result, run.projectId)
+    actionPlanner.recordResult(body.runId, body.tool, body.result)
   }
 
   // ─── Process verification results from client-side auto-verify ───

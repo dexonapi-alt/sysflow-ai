@@ -1,6 +1,6 @@
 import { getAuthToken } from "./sysbase.js"
 
-const SERVER_URL = process.env.SYS_SERVER_URL || "http://localhost:3000"
+const SERVER_URL = process.env.SYS_SERVER_URL || "http://localhost:4000"
 
 interface ServerError extends Error {
   code?: string
