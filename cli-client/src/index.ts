@@ -1,3 +1,4 @@
+import fs from "node:fs"
 import { parseCliInput } from "./cli/parser.js"
 import { ensureSysbase, setSelectedModel } from "./lib/sysbase.js"
 import { runAgent } from "./agent/agent.js"
@@ -7,8 +8,40 @@ import { handleLogin, handleRegister, handleLogout, handleWhoami } from "./comma
 import { showChats, deleteActiveChat } from "./commands/chats.js"
 import { showPlanPicker, showUsage } from "./commands/billing.js"
 
+function readStdin(): Promise<string> {
+  return new Promise((resolve) => {
+    let data = ""
+    process.stdin.setEncoding("utf8")
+    process.stdin.on("data", (chunk) => { data += chunk })
+    process.stdin.on("end", () => resolve(data.trim()))
+  })
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2)
+
+  // Support: sys -f prompt.txt
+  const fileIdx = args.indexOf("-f")
+  if (fileIdx !== -1 && args[fileIdx + 1]) {
+    const filePath = args[fileIdx + 1]
+    try {
+      const content = fs.readFileSync(filePath, "utf8").trim()
+      await runAgent({ prompt: content, command: null })
+      return
+    } catch (err) {
+      console.error(`  error: Cannot read file ${filePath}: ${(err as Error).message}`)
+      process.exit(1)
+    }
+  }
+
+  // Support: echo "prompt" | sys  OR  cat prompt.txt | sys
+  if (!process.stdin.isTTY && args.length === 0) {
+    const piped = await readStdin()
+    if (piped) {
+      await runAgent({ prompt: piped, command: null })
+      return
+    }
+  }
 
   if (args.length === 0) {
     await startUi()
