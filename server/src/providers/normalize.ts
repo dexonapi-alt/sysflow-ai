@@ -40,6 +40,14 @@ export function mapNormalizedResponseToClient(runId: string, normalized: Normali
         error: normalized.error
       }
 
+    case "rate_limited":
+      // Should be caught by adapter retry/fallback — if it leaks here, map to failed
+      return {
+        status: "failed",
+        runId,
+        error: normalized.error || "Rate limited — all fallback models exhausted"
+      }
+
     default:
       return {
         status: "failed",
