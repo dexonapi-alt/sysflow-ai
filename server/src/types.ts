@@ -61,7 +61,7 @@ export interface TokenUsage {
 }
 
 export interface NormalizedResponse {
-  kind: "needs_tool" | "completed" | "failed" | "waiting_for_user"
+  kind: "needs_tool" | "completed" | "failed" | "waiting_for_user" | "rate_limited"
   content?: string
   reasoning?: string | null
   tool?: string
