@@ -11,6 +11,8 @@ import { loadRunContext } from "../services/context.js"
 import { callModelAdapter } from "../providers/adapter.js"
 import { mapNormalizedResponseToClient } from "../providers/normalize.js"
 import { validateCompletion, buildRejectionPayload, analyzeTaskComplexity } from "../services/completion-guard.js"
+import { recordVerificationResult, shouldBlockCompletion, buildVerificationFixPayload, getVerificationState, clearVerificationState } from "../services/verification-guard.js"
+import { actionPlanner } from "../services/action-planner.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 /** Track how many times completion was rejected per run (prevent infinite loops) */
@@ -54,6 +56,23 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     }
   } else {
     recordRunAction(body.runId, body.tool, body.result, run.projectId)
+  }
+
+  // ─── Process verification results from client-side auto-verify ───
+  if (isBatch) {
+    for (const tr of body.toolResults!) {
+      if (tr.tool === "_verification") {
+        const passed = tr.result.passed === true
+        const errors = (tr.result.errors || []) as string[]
+        const warnings = (tr.result.warnings || []) as string[]
+        recordVerificationResult(body.runId, passed, errors, warnings)
+      }
+    }
+  } else if (body.tool === "_verification") {
+    const passed = body.result.passed === true
+    const errors = (body.result.errors || []) as string[]
+    const warnings = (body.result.warnings || []) as string[]
+    recordVerificationResult(body.runId, passed, errors, warnings)
   }
 
   const task = await getTask(run.taskId)
@@ -103,6 +122,9 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     userId: run.userId || null
   })
 
+  // ─── ACTION PLANNER: fix broken tools, detect loops, transform actions ───
+  normalized = actionPlanner.intercept(body.runId, normalized)
+
   // ─── COMPLETION GUARD: reject premature completion ───
   if (normalized.kind === "completed") {
     const rejectionCount = completionRejections.get(body.runId) || 0
@@ -141,9 +163,30 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     }
   }
 
-  // Clean up rejection counter on terminal states
+  // ─── VERIFICATION GUARD: block completion if code has errors ───
+  if (normalized.kind === "completed") {
+    const verBlock = shouldBlockCompletion(body.runId)
+    if (verBlock.block) {
+      const verState = getVerificationState(body.runId)!
+      const fixPayload = buildVerificationFixPayload(verState)
+      console.log(`[verification-guard] Blocking completion: ${verState.lastErrors.length} unresolved errors`)
+
+      normalized = {
+        kind: "needs_tool",
+        tool: fixPayload.tool,
+        args: fixPayload.args,
+        content: fixPayload.content,
+        reasoning: `Verification found errors. Reading files to fix them before completing.`,
+        usage: normalized.usage
+      }
+    }
+  }
+
+  // Clean up state on terminal states
   if (normalized.kind === "completed" || normalized.kind === "failed") {
     completionRejections.delete(body.runId)
+    clearVerificationState(body.runId)
+    actionPlanner.clear(body.runId)
   }
 
   // Handle step transitions

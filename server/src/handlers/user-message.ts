@@ -8,6 +8,7 @@ import { buildContextForPrompt } from "../store/context.js"
 import { callModelAdapter } from "../providers/adapter.js"
 import { mapNormalizedResponseToClient } from "../providers/normalize.js"
 import { analyzeTaskComplexity } from "../services/completion-guard.js"
+import { actionPlanner } from "../services/action-planner.js"
 import type { ClientResponse } from "../types.js"
 
 interface UserMessageBody {
@@ -66,10 +67,20 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     context.projectKnowledge = projectContext
   }
 
-  if (body.command === "/continue") {
+  // ─── Smart context loading: not just for /continue ───
+  // Load continuation context when:
+  // 1. Explicit /continue command
+  // 2. New prompt that looks like a fix/debug request for the same project
+  // 3. New prompt in a chat that has recent sessions (project already in progress)
+
+  const isExplicitContinue = body.command === "/continue"
+  const isFixRequest = /\b(fix|error|bug|issue|broken|wrong|fail|crash|not working|doesn't work|doesn't compile)\b/i.test(body.content)
+  const lastSession = await getLastSession(body.projectId, body.chatId)
+  const hasRecentWork = lastSession && lastSession.filesModified.length > 0
+
+  if (isExplicitContinue || (isFixRequest && hasRecentWork) || (hasRecentWork && body.chatId)) {
     const continueCtx = await buildContinueContext(body.projectId, body.chatId)
     if (continueCtx) {
-      // Also check for stale continue context
       const currentFiles = (body.directoryTree || []).map((e) => e.name)
       if (currentFiles.length <= 2 && continueCtx.includes("Files already created:")) {
         context.continueContext = `⚠️ FRESH START: Previous files were deleted. Start from scratch. Current directory: ${currentFiles.join(", ") || "(empty)"}`
@@ -77,9 +88,15 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
         context.continueContext = continueCtx
       }
     }
-    const lastSession = await getLastSession(body.projectId, body.chatId)
+
     if (lastSession) {
       context.continueFrom = lastSession
+    }
+
+    // For fix requests: add explicit instruction to use the context
+    if (isFixRequest && !isExplicitContinue) {
+      context.continueContext = (context.continueContext || "") +
+        `\n\n═══ FIX REQUEST CONTEXT ═══\nThe user is asking you to fix an error in the project you previously built. Use the continuation context above to understand what was created. Read the affected files, fix the issue, and continue completing any unfinished work from the original task.`
     }
   }
 
@@ -97,7 +114,7 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     status: "running"
   })
 
-  const normalized = await callModelAdapter({
+  let normalized = await callModelAdapter({
     model: body.model,
     runId,
     task: task as never,
@@ -119,8 +136,10 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     isNewPrompt: true
   })
 
+  // Action planner: fix broken tools, detect loops
+  normalized = actionPlanner.intercept(runId, normalized)
+
   // Layer 3: Guard against AI completing on the FIRST call (before any tools run)
-  // For complex tasks, the AI should NEVER say "completed" without running any tools
   if (normalized.kind === "completed") {
     const analysis = analyzeTaskComplexity(body.content)
     if (analysis.complexity !== "simple") {
