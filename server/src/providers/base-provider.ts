@@ -105,6 +105,8 @@ export abstract class BaseProvider {
   clearRunState(runId: string): void {
     this.runState.delete(runId)
     this.runTasks.delete(runId)
+    this.runFileCount.delete(runId)
+    this.runToolCount.delete(runId)
   }
 
   /** Store the original task for this run */
@@ -139,9 +141,56 @@ export abstract class BaseProvider {
     clearRateLimit(this.name)
   }
 
-  /** Build tool result message with original task reminder */
+  /**
+   * Provider-level completion validation.
+   * If the AI says "completed" but hasn't done enough work, override to "needs_tool"
+   * with a list_directory call to force continuation.
+   *
+   * This is Layer 2 of the anti-premature-completion system.
+   * It runs BEFORE the handler sees the response.
+   */
+  protected validateCompletionResponse(runId: string, normalized: NormalizedResponse): NormalizedResponse {
+    if (normalized.kind !== "completed") return normalized
+
+    const filesWritten = this.runFileCount.get(runId) || 0
+    const toolCalls = this.runToolCount.get(runId) || 0
+    const content = (normalized.content || "").toLowerCase()
+
+    // Detect weak completions — AI said "Done" with almost no work
+    const isWeakCompletion =
+      // Very short content (just "Done." or similar)
+      (content.length < 100 && !content.includes("files created") && !content.includes("summary")) ||
+      // No files written at all
+      (filesWritten === 0 && toolCalls <= 3) ||
+      // Fewer than 5 files for what looks like a multi-file task
+      (filesWritten < 5 && toolCalls > 0 && toolCalls <= 5)
+
+    if (isWeakCompletion) {
+      console.log(`[${this.name}] WEAK COMPLETION DETECTED: ${filesWritten} files, ${toolCalls} tools, content: "${(normalized.content || "").slice(0, 80)}"`)
+      console.log(`[${this.name}] Overriding to needs_tool — forcing continuation`)
+
+      return {
+        kind: "needs_tool",
+        tool: "list_directory",
+        args: { path: "." },
+        content: "Checking project state to continue implementation...",
+        reasoning: "My previous response was premature. I need to continue creating all required files.",
+        usage: normalized.usage
+      }
+    }
+
+    return normalized
+  }
+
+  /** Track files written per run for continuation awareness */
+  protected runFileCount = new Map<string, number>()
+  protected runToolCount = new Map<string, number>()
+
+  /** Build tool result message with original task reminder and continuation enforcement */
   protected buildToolResultMessage(payload: ProviderPayload): string {
     let toolMsg: string
+    const tools = payload.toolResults || (payload.toolResult ? [{ id: "0", tool: payload.toolResult.tool, result: payload.toolResult.result }] : [])
+
     if (payload.toolResults && payload.toolResults.length > 0) {
       const batchStr = payload.toolResults
         .map((r) => `[${r.id}] ${r.tool}: ${JSON.stringify(r.result)}`)
@@ -154,16 +203,56 @@ export abstract class BaseProvider {
       })}`
     }
 
+    // Track progress
+    const fileCount = this.runFileCount.get(payload.runId) || 0
+    const toolCount = this.runToolCount.get(payload.runId) || 0
+    const newWrites = tools.filter((t) => t.tool === "write_file" || t.tool === "edit_file").length
+    const newCommands = tools.filter((t) => t.tool === "run_command").length
+    this.runFileCount.set(payload.runId, fileCount + newWrites)
+    this.runToolCount.set(payload.runId, toolCount + tools.length)
+
+    const totalFiles = fileCount + newWrites
+    const totalTools = toolCount + tools.length
+
+    // Detect scaffold-only results (commands returned but no files written yet)
+    const isScaffoldResult = newCommands > 0 && totalFiles === 0
+    const hasInteractive = tools.some((t) =>
+      t.tool === "run_command" && (
+        JSON.stringify(t.result).includes("interactive") ||
+        JSON.stringify(t.result).includes("scaffold") ||
+        JSON.stringify(t.result).includes("CREATE") ||
+        JSON.stringify(t.result).includes("Success!")
+      )
+    )
+
     // Append original task reminder — from memory or from payload
     const originalTask = this.runTasks.get(payload.runId) || payload.userMessage
     if (originalTask && originalTask !== "continue" && originalTask !== "continue the previous task") {
-      toolMsg += `\n\n═══ REMINDER: ORIGINAL TASK ═══\n${originalTask}\n═══ END REMINDER ═══\nYou are NOT done until the ENTIRE task above is fully implemented. Continue with the next action needed to complete it.`
+      toolMsg += `\n\n═══ REMINDER: ORIGINAL TASK ═══\n${originalTask}\n═══ END REMINDER ═══`
+
+      // Scaffold-aware enforcement
+      if (isScaffoldResult || hasInteractive) {
+        toolMsg += `\n\n⚠️⚠️⚠️ CRITICAL: SCAFFOLDING IS COMPLETE BUT THE TASK IS NOT DONE ⚠️⚠️⚠️`
+        toolMsg += `\nThe scaffolding commands above only created EMPTY project skeletons.`
+        toolMsg += `\nYou MUST now create ALL source files with write_file:`
+        toolMsg += `\n- ALL backend modules (controller + service + DTOs + module for EACH: products, orders, customers, auth)`
+        toolMsg += `\n- Database schema (prisma/schema.prisma with ALL models)`
+        toolMsg += `\n- ALL frontend pages (product listing, cart, order creation, customer management, order history)`
+        toolMsg += `\n- Shared components, layouts, API client, types`
+        toolMsg += `\n- Config files (.env, app.module wiring, etc.)`
+        toolMsg += `\nExpect 25-60 more write_file calls. DO NOT respond with "completed". Respond with "needs_tool".`
+      } else if (totalFiles < 15 && totalTools > 2) {
+        toolMsg += `\n\nPROGRESS: ${totalFiles} files created so far. For a full-stack project, you need 25-60 files total. Keep going with "needs_tool".`
+      }
+
+      toolMsg += `\nYou are NOT done until the ENTIRE task above is fully implemented. Respond with "needs_tool" to continue.`
     } else {
       toolMsg += "\n\nContinue with the next action needed to complete the task."
     }
 
     return toolMsg
   }
+
 
   buildInitialUserMessage(payload: ProviderPayload): string {
     let msg = ""
