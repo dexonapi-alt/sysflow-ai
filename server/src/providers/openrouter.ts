@@ -38,23 +38,10 @@ export class OpenRouterProvider extends BaseProvider {
           { role: "user", content: this.buildInitialUserMessage(payload) }
         ]
         this.runState.set(payload.runId, history)
+        this.setRunTask(payload.runId, payload.userMessage)
       } else {
         // Continuation — add tool result(s) to history
-        let toolMsg: string
-
-        if (payload.toolResults && payload.toolResults.length > 0) {
-          // Batch results
-          const batchStr = payload.toolResults
-            .map((r) => `[${r.id}] ${r.tool}: ${JSON.stringify(r.result)}`)
-            .join("\n")
-          toolMsg = `Tool results (parallel):\n${batchStr}\n\nDecide the next action.`
-        } else {
-          // Single result
-          toolMsg = `Tool result:\n${JSON.stringify({
-            tool: payload.toolResult!.tool,
-            result: payload.toolResult!.result
-          })}\n\nDecide the next action.`
-        }
+        const toolMsg = this.buildToolResultMessage(payload)
 
         if (!history) {
           history = [
@@ -89,7 +76,7 @@ export class OpenRouterProvider extends BaseProvider {
               messages: history,
               response_format: { type: "json_object" },
               temperature: 0.1,
-              max_tokens: 8192
+              max_tokens: this.getAdaptiveMaxTokens(32768)
             }),
             signal: controller.signal
           })
@@ -114,11 +101,13 @@ export class OpenRouterProvider extends BaseProvider {
         const status = response.status
         console.error(`[openrouter] HTTP ${status}:`, errBody)
 
+        // Rate limit — DON'T clear run state, signal for retry/fallback
+        if (status === 429) {
+          return this.rateLimitedResponse(`OpenRouter rate limit (429). Details: ${errBody.slice(0, 200)}`)
+        }
+
         this.clearRunState(payload.runId)
 
-        if (status === 429) {
-          return this.failedResponse(`OpenRouter rate limit (429). Try again in a minute. Details: ${errBody.slice(0, 200)}`)
-        }
         if (status === 401 || status === 403) {
           return this.failedResponse(`OpenRouter auth error (${status}). Check your OPENROUTER_API_KEY.`)
         }
@@ -143,6 +132,7 @@ export class OpenRouterProvider extends BaseProvider {
 
       const normalized = this.parseJsonResponse(assistantMessage)
       normalized.usage = usage
+      this.onSuccessfulCall()
 
       if (normalized.kind === "completed" || normalized.kind === "failed") {
         this.clearRunState(payload.runId)
