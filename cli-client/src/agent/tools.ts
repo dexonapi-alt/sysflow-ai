@@ -2,6 +2,92 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { spawn } from "node:child_process"
 
+// ─── Web Search ───
+
+interface SearchResult {
+  title: string
+  snippet: string
+  url: string
+}
+
+export async function webSearchTool(query: string): Promise<SearchResult[]> {
+  const encoded = encodeURIComponent(query)
+  const url = `https://html.duckduckgo.com/html/?q=${encoded}`
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 10_000)
+
+  try {
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; SysflowBot/1.0)"
+      },
+      signal: controller.signal
+    })
+
+    const html = await res.text()
+
+    // Parse DuckDuckGo HTML results
+    const results: SearchResult[] = []
+    const resultBlocks = html.split(/class="result\s/)
+
+    for (const block of resultBlocks.slice(1, 8)) { // top 7 results
+      // Extract title
+      const titleMatch = block.match(/class="result__a"[^>]*>([\s\S]*?)<\/a>/)
+      const title = titleMatch ? titleMatch[1].replace(/<[^>]+>/g, "").trim() : ""
+
+      // Extract snippet
+      const snippetMatch = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\//)
+      const snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, "").trim() : ""
+
+      // Extract URL
+      const urlMatch = block.match(/class="result__url"[^>]*>([\s\S]*?)<\//)
+      const resultUrl = urlMatch ? urlMatch[1].replace(/<[^>]+>/g, "").trim() : ""
+
+      if (title || snippet) {
+        results.push({ title, snippet, url: resultUrl })
+      }
+    }
+
+    return results
+  } catch (err) {
+    // Fallback: try npm registry search for package info
+    if (query.includes("npm") || query.includes("npx") || query.includes("install")) {
+      return await npmSearchFallback(query)
+    }
+    return [{ title: "Search failed", snippet: (err as Error).message, url: "" }]
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function npmSearchFallback(query: string): Promise<SearchResult[]> {
+  // Extract package name from query
+  const pkgMatch = query.match(/([@\w/-]+)/)
+  if (!pkgMatch) return []
+
+  const pkg = pkgMatch[1]
+  try {
+    const res = await fetch(`https://registry.npmjs.org/${pkg}`, {
+      signal: AbortSignal.timeout(5000)
+    })
+    if (!res.ok) return [{ title: `Package ${pkg} not found`, snippet: "Check the package name", url: "" }]
+
+    const data = await res.json() as Record<string, unknown>
+    const latest = (data["dist-tags"] as Record<string, string>)?.latest || "unknown"
+    const desc = (data.description as string) || ""
+    const homepage = (data.homepage as string) || ""
+
+    return [{
+      title: `${pkg}@${latest}`,
+      snippet: desc,
+      url: homepage
+    }]
+  } catch {
+    return []
+  }
+}
+
 interface DirectoryEntry {
   name: string
   type: "file" | "directory"
@@ -52,7 +138,12 @@ export async function moveFileTool(from: string, to: string): Promise<boolean> {
 }
 
 export async function deleteFileTool(filePath: string): Promise<boolean> {
-  await fs.unlink(filePath)
+  const stat = await fs.stat(filePath)
+  if (stat.isDirectory()) {
+    await fs.rm(filePath, { recursive: true, force: true })
+  } else {
+    await fs.unlink(filePath)
+  }
   return true
 }
 
@@ -78,11 +169,38 @@ export async function searchCodeTool(directory: string, pattern: string): Promis
 const LONG_RUNNING_PATTERNS = [
   /^npm\s+start/,
   /^npm\s+run\s+(dev|start|serve|watch)/,
-  /^npx\s+(nodemon|ts-node-dev|next|vite|webpack\s+serve)/,
+  /^npx\s+(nodemon|ts-node-dev|next\s+dev|vite\s+dev|webpack\s+serve)/,
   /^node\s+\S+\.(js|ts|mjs)$/,
   /^python\s+\S+\.py$/,
   /^deno\s+run/,
   /^bun\s+run/
+]
+
+// Commands that are too slow — auto-skip and tell AI user should run them
+const SLOW_COMMAND_PATTERNS = [
+  /npm\s+(install|i|ci)\b/,
+  /yarn\s+(install|add)\b/,
+  /pnpm\s+(install|i|add)\b/,
+  /npx\s+(--yes\s+)?prisma\b/,
+  /npx\s+(--yes\s+)?shadcn/
+]
+
+// Commands that need interactive terminal (scaffolding tools, prompts)
+export const INTERACTIVE_PATTERNS = [
+  /^npx\s+(--yes\s+)?create-/,
+  /^npm\s+create\s/,
+  /^npm\s+init/,
+  /^yarn\s+create/,
+  /^pnpm\s+create/,
+  /^npx\s+(--yes\s+)?@nestjs\/cli\s+new/,
+  /^npx\s+(--yes\s+)?@angular\/cli\s+new/,
+  /^npx\s+(--yes\s+)?nuxi/,
+  /^npx\s+(--yes\s+)?degit/,
+  /^npx\s+(--yes\s+)?giget/,
+  /^django-admin\s+startproject/,
+  /^rails\s+new/,
+  /^cargo\s+init/,
+  /^dotnet\s+new/
 ]
 
 const COMMAND_TIMEOUT_MS = 30_000
@@ -92,11 +210,15 @@ interface CommandResult {
   stderr: string
   skipped?: boolean
   timedOut?: boolean
+  interactive?: boolean
   message?: string
 }
 
 export async function runCommandTool(command: string, cwd: string = process.cwd()): Promise<CommandResult> {
-  const isLongRunning = LONG_RUNNING_PATTERNS.some((p) => p.test(command.trim()))
+  const trimmed = command.trim()
+  const isLongRunning = LONG_RUNNING_PATTERNS.some((p) => p.test(trimmed))
+  const isSlow = SLOW_COMMAND_PATTERNS.some((p) => p.test(trimmed))
+  const isInteractive = INTERACTIVE_PATTERNS.some((p) => p.test(trimmed))
 
   if (isLongRunning) {
     return {
@@ -107,10 +229,79 @@ export async function runCommandTool(command: string, cwd: string = process.cwd(
     }
   }
 
+  if (isSlow) {
+    return {
+      stdout: "",
+      stderr: "",
+      skipped: true,
+      message: `SKIPPED (slow command — user will run manually): ${command}\n\nDo NOT stop or complete because of this skip. CONTINUE creating all project files with write_file. Add this command to your final summary under "Next Steps". The task is NOT done — keep implementing.`
+    }
+  }
+
+  // Interactive commands: full terminal passthrough so user can see prompts and type
+  if (isInteractive) {
+    return new Promise((resolve, reject) => {
+      const isWindows = process.platform === "win32"
+      const shell = isWindows ? "cmd.exe" : "/bin/sh"
+      const shellArgs = isWindows ? ["/c", trimmed] : ["-c", trimmed]
+
+      console.log("") // blank line before interactive output
+
+      const child = spawn(shell, shellArgs, {
+        cwd,
+        stdio: "inherit",
+        env: { ...process.env, FORCE_COLOR: "1" }
+      })
+
+      // Safety timeout: if command runs longer than 10 minutes, it's probably stuck
+      const safetyTimer = setTimeout(() => {
+        console.log("\n  (command exceeded 10 minutes — stopping)")
+        if (isWindows) {
+          spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" })
+        } else {
+          child.kill("SIGTERM")
+        }
+        resolve({
+          stdout: "",
+          stderr: "",
+          timedOut: true,
+          interactive: true,
+          message: "Interactive command exceeded 10 minutes and was stopped."
+        })
+      }, 600_000)
+
+      child.on("close", (code) => {
+        clearTimeout(safetyTimer)
+        console.log("") // blank line after interactive output
+        if (code !== 0 && code !== null) {
+          resolve({
+            stdout: "",
+            stderr: `Exited with code ${code}`,
+            interactive: true,
+            message: `Command finished with exit code ${code}. Check the output above for details.`
+          })
+        } else {
+          resolve({
+            stdout: "",
+            stderr: "",
+            interactive: true,
+            message: "Command completed successfully."
+          })
+        }
+      })
+
+      child.on("error", (err) => {
+        clearTimeout(safetyTimer)
+        reject(err)
+      })
+    })
+  }
+
+  // Normal commands: capture output
   return new Promise((resolve, reject) => {
     const isWindows = process.platform === "win32"
     const shell = isWindows ? "cmd.exe" : "/bin/sh"
-    const shellArgs = isWindows ? ["/c", command] : ["-c", command]
+    const shellArgs = isWindows ? ["/c", trimmed] : ["-c", trimmed]
 
     const child = spawn(shell, shellArgs, { cwd, env: { ...process.env, FORCE_COLOR: "0" } })
 
