@@ -18,65 +18,125 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function thinkTime(): number {
-  return 800 + Math.floor(Math.random() * 1400)
+// ─── Color palette ───
+
+const colors = {
+  accent: chalk.hex("#7C6FFF"),       // purple accent
+  accentDim: chalk.hex("#5A50B8"),    // muted purple
+  success: chalk.hex("#58D68D"),      // green
+  warning: chalk.hex("#F4D03F"),      // yellow
+  error: chalk.hex("#E74C3C"),        // red
+  info: chalk.hex("#5DADE2"),         // blue
+  muted: chalk.hex("#7F8C8D"),       // gray
+  bright: chalk.hex("#ECF0F1"),      // off-white
+  tool: chalk.hex("#48C9B0"),        // teal for tool names
+  file: chalk.hex("#AEB6BF"),        // silver for paths
+  bar: chalk.hex("#34495E"),         // dark bar color
 }
 
-async function typeReasoning(text: string): Promise<void> {
-  const prefix = chalk.dim("    ")
-  process.stdout.write(prefix)
+// ─── Box drawing helpers ───
 
-  const words = text.split(" ")
-  for (let i = 0; i < words.length; i++) {
-    const word = words[i]
-    for (const char of word) {
-      process.stdout.write(chalk.dim(char))
-      await sleep(18 + Math.floor(Math.random() * 30))
-    }
-    if (i < words.length - 1) {
-      process.stdout.write(chalk.dim(" "))
-      if (word.endsWith(",") || word.endsWith(".") || word.endsWith("--")) {
-        await sleep(80 + Math.floor(Math.random() * 120))
-      } else {
-        await sleep(10 + Math.floor(Math.random() * 20))
-      }
+const BOX = {
+  tl: "╭", tr: "╮", bl: "╰", br: "╯",
+  h: "─", v: "│",
+  lt: "├", rt: "┤",
+  dot: "●", ring: "○", arrow: "▸", check: "✔", cross: "✖", dash: "─",
+} as const
+
+function boxLine(width: number): string {
+  return colors.bar(BOX.h.repeat(width))
+}
+
+function boxTop(label: string, width = 40): string {
+  const inner = ` ${label} `
+  const pad = Math.max(0, width - inner.length - 2)
+  return colors.bar(BOX.tl + BOX.h) + colors.accent.bold(inner) + colors.bar(BOX.h.repeat(pad) + BOX.tr)
+}
+
+function boxMid(content: string, width = 40): string {
+  return colors.bar(BOX.v) + " " + content
+}
+
+function boxBot(width = 40): string {
+  return colors.bar(BOX.bl + BOX.h.repeat(width) + BOX.br)
+}
+
+// ─── Reasoning: instant display with sweep reveal animation ───
+
+async function revealReasoning(text: string): Promise<void> {
+  const lines = text.split("\n")
+  const allLines: string[] = []
+
+  for (const line of lines) {
+    allLines.push(`    ${colors.muted(BOX.v)} ${colors.muted(line)}`)
+  }
+
+  // Print all lines instantly but dim
+  const totalLines = allLines.length
+  for (const line of allLines) {
+    process.stdout.write(chalk.dim(line) + "\n")
+  }
+
+  // Sweep animation: re-render each line brighter with a short cascade delay
+  if (totalLines > 0 && totalLines <= 20) {
+    // Move cursor back up
+    process.stdout.write(`\x1b[${totalLines}A`)
+    for (let i = 0; i < totalLines; i++) {
+      process.stdout.write("\r\x1b[K") // clear line
+      process.stdout.write(allLines[i] + "\n")
+      await sleep(25 + Math.floor(Math.random() * 15))
     }
   }
-  process.stdout.write("\n")
-  await sleep(300 + Math.floor(Math.random() * 200))
+  await sleep(80)
 }
+
+// ─── Tool label formatting ───
 
 function formatToolLabel(tool: string, args: Record<string, unknown>): string | null {
   switch (tool) {
     case "read_file":
-      return chalk.blue("read") + " " + args.path
+      return colors.tool("read") + " " + colors.file(args.path as string)
     case "batch_read":
       return null
     case "write_file":
-      return chalk.blue("create") + " " + args.path
+      return colors.tool("create") + " " + colors.file(args.path as string)
     case "edit_file":
-      return chalk.blue("edit") + " " + args.path
+      return colors.tool("edit") + " " + colors.file(args.path as string)
     case "create_directory":
-      return chalk.blue("mkdir") + " " + args.path
+      return colors.tool("mkdir") + " " + colors.file(args.path as string)
     case "move_file":
-      return chalk.blue("move") + " " + args.from + " -> " + args.to
+      return colors.tool("move") + " " + colors.file(args.from as string) + colors.muted(" → ") + colors.file(args.to as string)
     case "delete_file":
-      return chalk.blue("delete") + " " + args.path
+      return colors.tool("delete") + " " + colors.file(args.path as string)
     case "file_exists":
-      return chalk.blue("check") + " " + args.path
+      return colors.tool("check") + " " + colors.file(args.path as string)
     case "search_code":
-      return chalk.blue("search") + ` "${args.pattern}"`
+      return colors.tool("search") + " " + colors.bright(`"${args.pattern}"`)
     case "search_files":
-      return chalk.blue("find") + ` "${args.query || args.glob}"`
+      return colors.tool("find") + " " + colors.bright(`"${args.query || args.glob}"`)
     case "run_command":
-      return chalk.blue("run") + " " + args.command
+      return colors.tool("run") + " " + colors.bright(args.command as string)
     default:
-      return chalk.blue(tool) + " " + JSON.stringify(args)
+      return colors.tool(tool) + " " + colors.muted(JSON.stringify(args))
   }
 }
 
 function isHiddenStep(tool: string): boolean {
   return tool === "list_directory"
+}
+
+// ─── Step icon helpers ───
+
+function stepIcon(status: string | undefined): string {
+  if (status === "completed") return colors.success(BOX.check)
+  if (status === "in_progress") return colors.accent(BOX.arrow)
+  return colors.muted(BOX.ring)
+}
+
+function stepLabel(label: string, status: string | undefined): string {
+  if (status === "completed") return colors.success(label)
+  if (status === "in_progress") return colors.accent.bold(label)
+  return colors.muted(label)
 }
 
 function resolveFileMentions(prompt: string, cwd: string): { prompt: string; mentions: Array<{ path: string; absolute: string }> } {
@@ -101,9 +161,9 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   const authToken = await getAuthToken()
   if (!authToken) {
     console.log("")
-    console.log(chalk.yellow("  ⚠ You must be logged in to use Sysflow"))
+    console.log(colors.warning("  ⚠ You must be logged in to use Sysflow"))
     console.log("")
-    console.log(chalk.dim("  Run ") + chalk.cyan("sys login") + chalk.dim(" or ") + chalk.cyan("sys register") + chalk.dim(" to get started"))
+    console.log(colors.muted("  Run ") + colors.accent("sys login") + colors.muted(" or ") + colors.accent("sys register") + colors.muted(" to get started"))
     console.log("")
     return
   }
@@ -114,8 +174,8 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   const chatUid = await ensureActiveChat()
   if (!chatUid) {
     console.log("")
-    console.log(chalk.yellow("  ⚠ Could not establish a chat session"))
-    console.log(chalk.dim("  Check your connection and try again, or run ") + chalk.cyan("sys chat") + chalk.dim(" to select one"))
+    console.log(colors.warning("  ⚠ Could not establish a chat session"))
+    console.log(colors.muted("  Check your connection and try again, or run ") + colors.accent("sys chat") + colors.muted(" to select one"))
     console.log("")
     return
   }
@@ -138,10 +198,10 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   console.log("")
 
   const spinner = ora({
-    text: chalk.dim("thinking..."),
-    prefixText: " ",
+    text: colors.muted("thinking..."),
+    prefixText: "  ",
     spinner: "dots",
-    color: "cyan"
+    color: "magenta"
   }).start()
 
   let response: Record<string, unknown>
@@ -163,9 +223,9 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
     spinner.stop()
     if ((err as ServerError).code === "USAGE_LIMIT") {
       console.log("")
-      console.log(chalk.yellow("  ⚠ " + (err as Error).message))
+      console.log(colors.warning("  ⚠ " + (err as Error).message))
       console.log("")
-      console.log(chalk.dim("  Run ") + chalk.cyan("sys billing") + chalk.dim(" to upgrade your plan"))
+      console.log(colors.muted("  Run ") + colors.accent("sys billing") + colors.muted(" to upgrade your plan"))
       console.log("")
       return
     }
@@ -186,52 +246,55 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         spinner.stop()
 
         if (hasReasoning && response.reasoning) {
-          await typeReasoning(response.reasoning as string)
+          await revealReasoning(response.reasoning as string)
         }
 
         console.log("")
 
         const summary = response.summary as Record<string, unknown> | null
         if (summary && summary.memoryUpdated) {
-          console.log(chalk.dim("  ───────────────────────────────────"))
-          console.log(chalk.yellow.bold("  MEMORY SAVED"))
+          console.log("  " + boxTop("MEMORY", 36))
           if (summary.patternSaved) {
-            console.log(chalk.white(`  Pattern: ${summary.patternSaved}`))
+            console.log("  " + boxMid(colors.bright(`Pattern: ${summary.patternSaved}`)))
           }
-          console.log(chalk.dim("  This is now shared with the whole team."))
+          console.log("  " + boxMid(colors.muted("Shared with the whole team.")))
+          console.log("  " + boxBot(36))
           console.log("")
         }
 
         if (taskSteps.length > 0) {
-          console.log(chalk.dim("  ───────────────────────────────────"))
-          console.log(chalk.white.bold(`  ${completedSteps.size}/${taskSteps.length} steps completed`))
-          console.log("")
+          console.log("  " + boxTop(`${completedSteps.size}/${taskSteps.length} COMPLETE`, 36))
           for (const s of taskSteps) {
-            if (completedSteps.has(s.id)) {
-              console.log(chalk.green(`  [x] ${s.label}`))
-            } else {
-              console.log(chalk.dim(`  [ ] ${s.label}`))
-            }
+            const done = completedSteps.has(s.id)
+            console.log("  " + boxMid(`${done ? stepIcon("completed") : stepIcon(undefined)} ${done ? stepLabel(s.label, "completed") : stepLabel(s.label, undefined)}`))
           }
+          console.log("  " + boxBot(36))
           console.log("")
         }
 
-        console.log(chalk.green(`  done.`) + chalk.dim(` ${stepCount} steps`))
+        // Animated completion line
+        const doneText = `  ${colors.success(BOX.check)} done`
+        const stepText = colors.muted(` ${BOX.dash} ${stepCount} steps`)
+        process.stdout.write(doneText)
+        await sleep(60)
+        console.log(stepText)
         console.log("")
         return response
       }
 
       case "waiting_for_user":
         spinner.stop()
-        console.log(chalk.yellow(`\n  paused: ${response.message || "Waiting for user"}`))
+        console.log("")
+        console.log(colors.warning(`  ${BOX.ring} paused: ${response.message || "Waiting for user"}`))
+        console.log("")
         return response
 
       case "failed": {
         if (stepCount > 0 && consecutiveErrors < MAX_CONSECUTIVE_ERRORS && response.runId) {
           consecutiveErrors++
           spinner.stop()
-          console.log(chalk.red(`  ✖ ${response.error || "Model reported failure"}`))
-          spinner.start(chalk.dim("retrying..."))
+          console.log(colors.error(`  ${BOX.cross} ${response.error || "Model reported failure"}`))
+          spinner.start(colors.muted("retrying..."))
           response = await callServer({
             type: "tool_result",
             runId: response.runId,
@@ -244,7 +307,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
           })
           break
         }
-        spinner.fail(chalk.red((response.error as string) || "Agent failed"))
+        spinner.fail(colors.error((response.error as string) || "Agent failed"))
         throw new Error((response.error as string) || "Agent failed")
       }
 
@@ -268,17 +331,21 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
           spinner.stop()
           taskShown = true
           taskSteps = (task.steps || []) as Array<{ id: string; label: string; status?: string }>
+
           console.log("")
-          console.log(chalk.white.bold(`  TASK: ${task.title}`))
-          console.log(chalk.dim(`  ${task.goal}`))
-          console.log("")
-          for (const s of taskSteps) {
-            const icon = s.status === "completed" ? chalk.green("[x]") :
-                         s.status === "in_progress" ? chalk.cyan("[>]") :
-                         chalk.dim("[ ]")
-            console.log(`  ${icon} ${s.status === "completed" ? chalk.green(s.label) : s.status === "in_progress" ? chalk.cyan(s.label) : chalk.dim(s.label)}`)
+          console.log("  " + boxTop("TASK", 42))
+          console.log("  " + boxMid(colors.bright.bold(task.title as string)))
+          console.log("  " + boxMid(colors.muted(task.goal as string)))
+          console.log("  " + boxMid(""))
+
+          for (let i = 0; i < taskSteps.length; i++) {
+            const s = taskSteps[i]
+            console.log("  " + boxMid(`${stepIcon(s.status)} ${stepLabel(s.label, s.status)}`))
           }
+          console.log("  " + boxBot(42))
           console.log("")
+
+          spinner.start(colors.muted("thinking..."))
         }
 
         // Update step display from task in response
@@ -294,34 +361,52 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
           spinner.stop()
 
           if (hasReasoning && response.reasoning) {
-            await typeReasoning(response.reasoning as string)
+            await revealReasoning(response.reasoning as string)
           }
 
-          console.log(chalk.cyan("    ┌ parallel ") + chalk.dim(`(${toolCalls!.length} tools)`))
-          for (const tc of toolCalls!) {
+          // Animated parallel header
+          console.log("")
+          console.log(colors.accent(`    ${BOX.tl}${BOX.h}${BOX.h} parallel `) + colors.muted(`(${toolCalls!.length} tools)`))
+
+          // List tools with staggered reveal
+          for (let i = 0; i < toolCalls!.length; i++) {
+            const tc = toolCalls![i]
             const label = formatToolLabel(tc.tool, tc.args)
-            console.log(chalk.cyan("    │ ") + (label || `${tc.tool} ${JSON.stringify(tc.args)}`))
+            await sleep(40)
+            console.log(colors.accent(`    ${BOX.v}`) + `  ${colors.muted(BOX.ring)} ` + (label || `${tc.tool} ${JSON.stringify(tc.args)}`))
           }
 
-          spinner.start(chalk.dim(`executing ${toolCalls!.length} tools...`))
+          spinner.start(colors.muted(`  executing ${toolCalls!.length} tools...`))
 
           try {
             response = await executeToolsBatch(toolCalls!, response.runId as string)
             consecutiveErrors = 0
             spinner.stop()
-            console.log(chalk.green("    └ done"))
-            spinner.start(chalk.dim("thinking..."))
+
+            // Animated completion: mark each tool done
+            process.stdout.write(`\x1b[${toolCalls!.length}A`)
+            for (let i = 0; i < toolCalls!.length; i++) {
+              const tc = toolCalls![i]
+              const label = formatToolLabel(tc.tool, tc.args)
+              process.stdout.write("\r\x1b[K")
+              console.log(colors.accent(`    ${BOX.v}`) + `  ${colors.success(BOX.check)} ` + (label || `${tc.tool}`))
+              await sleep(50)
+            }
+
+            console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.success("done")}`)
+            console.log("")
+            spinner.start(colors.muted("thinking..."))
           } catch (batchError) {
             consecutiveErrors++
             spinner.stop()
-            console.log(chalk.red("    └ error: ") + chalk.dim((batchError as Error).message))
+            console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.error("error:")} ` + colors.muted((batchError as Error).message))
 
             if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-              console.log(chalk.red(`\n  aborted: ${MAX_CONSECUTIVE_ERRORS} consecutive errors`))
+              console.log(colors.error(`\n  aborted: ${MAX_CONSECUTIVE_ERRORS} consecutive errors`))
               throw new Error("Too many consecutive tool errors")
             }
 
-            spinner.start(chalk.dim("thinking..."))
+            spinner.start(colors.muted("thinking..."))
             response = await callServer({
               type: "tool_result",
               runId: response.runId,
@@ -340,30 +425,30 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         const isDuplicate = actionKey === lastDisplayedAction
         lastDisplayedAction = actionKey
 
-        await sleep(hasReasoning ? thinkTime() : 200 + Math.floor(Math.random() * 400))
+        await sleep(hasReasoning ? 200 : 100 + Math.floor(Math.random() * 150))
 
         if (isHiddenStep(response.tool as string)) {
-          spinner.text = chalk.dim("scanning directory...")
+          spinner.text = colors.muted("scanning directory...")
         } else if (isDuplicate) {
           spinner.stop()
-          spinner.start(chalk.dim("thinking..."))
+          spinner.start(colors.muted("thinking..."))
         } else {
           if (hasReasoning && response.reasoning) {
             spinner.stop()
-            await typeReasoning(response.reasoning as string)
+            await revealReasoning(response.reasoning as string)
           } else {
             spinner.stop()
           }
 
           if (response.tool === "batch_read") {
             const paths = (args.paths || []) as string[]
-            console.log(chalk.blue("    read") + chalk.dim(` ${paths.length} files`))
+            console.log(`    ${colors.tool("read")} ${colors.muted(`${paths.length} files`)}`)
             for (const p of paths) {
-              console.log(chalk.dim(`      ${p}`))
+              console.log(colors.muted(`      ${BOX.dot} ${p}`))
             }
           } else if (response.tool === "run_command") {
             const cmd = args.command as string
-            spinner.start(chalk.dim("  ") + chalk.white(cmd))
+            spinner.start(colors.muted("  ") + colors.bright(cmd))
           } else {
             const label = formatToolLabel(response.tool as string, args)
             const hasDiff = response.tool === "write_file" || response.tool === "edit_file"
@@ -373,17 +458,17 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
               try { oldContent = await readFileTool(args.path as string) } catch { /* new file */ }
               const { added, removed } = computeLineDiff(oldContent, newContent)
               const parts: string[] = []
-              if (added > 0) parts.push(chalk.green(`+${added}`))
-              if (removed > 0) parts.push(chalk.red(`-${removed}`))
-              const diffTag = parts.length > 0 ? " " + parts.join(chalk.dim(" ")) : ""
-              console.log(chalk.green("    + ") + label + diffTag)
+              if (added > 0) parts.push(colors.success(`+${added}`))
+              if (removed > 0) parts.push(colors.error(`-${removed}`))
+              const diffTag = parts.length > 0 ? " " + parts.join(colors.muted(" ")) : ""
+              console.log(`    ${colors.accent(BOX.arrow)} ${label}${diffTag}`)
             } else {
-              console.log(chalk.green("    + ") + label)
+              console.log(`    ${colors.accent(BOX.arrow)} ${label}`)
             }
           }
 
           if (response.tool !== "run_command") {
-            spinner.start(chalk.dim("thinking..."))
+            spinner.start(colors.muted("thinking..."))
           }
         }
 
@@ -398,13 +483,13 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
             spinner.stop()
             const toolResult = (response.result || response.lastResult) as Record<string, unknown> | undefined
             if (toolResult?.skipped) {
-              console.log(chalk.yellow("  ⚠ ") + chalk.dim(currentCmd) + chalk.yellow(" (user should run manually)"))
+              console.log(colors.warning(`  ⚠ `) + colors.muted(currentCmd) + colors.warning(" (run manually)"))
             } else if (toolResult?.timedOut) {
-              console.log(chalk.yellow("  ⏱ ") + chalk.dim(currentCmd) + chalk.yellow(" (timed out)"))
+              console.log(colors.warning(`  ⏱ `) + colors.muted(currentCmd) + colors.warning(" (timed out)"))
             } else {
-              console.log(chalk.green("  ✓ ") + chalk.dim(currentCmd))
+              console.log(`  ${colors.success(BOX.check)} ` + colors.muted(currentCmd))
             }
-            spinner.start(chalk.dim("thinking..."))
+            spinner.start(colors.muted("thinking..."))
           }
 
           if (pendingTaskStep && taskSteps.length > 0) {
@@ -415,18 +500,18 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
           consecutiveErrors++
           spinner.stop()
           if (currentTool === "run_command") {
-            console.log(chalk.red("  ✖ ") + chalk.dim(currentCmd) + chalk.red(` — ${(toolError as Error).message}`))
+            console.log(colors.error(`  ${BOX.cross} `) + colors.muted(currentCmd) + colors.error(` — ${(toolError as Error).message}`))
           } else {
-            console.log(chalk.red(`    x ${(toolError as Error).message}`))
+            console.log(colors.error(`    ${BOX.cross} ${(toolError as Error).message}`))
           }
 
           if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-            console.log(chalk.red(`\n  aborted: ${MAX_CONSECUTIVE_ERRORS} consecutive errors`))
+            console.log(colors.error(`\n  aborted: ${MAX_CONSECUTIVE_ERRORS} consecutive errors`))
             console.log("")
             throw new Error("Too many consecutive tool errors")
           }
 
-          spinner.start(chalk.dim("thinking..."))
+          spinner.start(colors.muted("thinking..."))
           response = await callServer({
             type: "tool_result",
             runId: response.runId,
