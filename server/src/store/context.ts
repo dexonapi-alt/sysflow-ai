@@ -36,14 +36,68 @@ interface QueryContextOpts {
 // sync_pattern, bugfix_pattern, architecture_pattern, operational_pattern,
 // memory, fix, pattern, preference, general
 
+/**
+ * Save a context entry with superseding logic.
+ * If an existing entry in the same project+category has a similar title,
+ * UPDATE it instead of creating a duplicate.
+ */
 export async function saveContext({ projectId, userId, category, title, content, tags, confidence, lifecycle }: SaveContextParams): Promise<{ id: number; title: string; category: string }> {
+  const cat = category || "general"
+  const builtContent = buildPatternContent(content, confidence, lifecycle)
+
+  // ─── Supersede check: look for existing entry with similar title in same category ───
+  const existing = await query(
+    `SELECT id, title, content FROM context_entries
+     WHERE project_id = $1 AND category = $2
+     AND (title = $3 OR title LIKE $4)
+     ORDER BY updated_at DESC LIMIT 1`,
+    [projectId, cat, title, `${title.slice(0, 40)}%`]
+  )
+
+  if (existing.rows.length > 0) {
+    const old = existing.rows[0]
+    // Update the existing entry instead of creating a duplicate
+    const res = await query(
+      `UPDATE context_entries
+       SET content = $1, tags = $2, updated_at = NOW()
+       WHERE id = $3
+       RETURNING id, title, category`,
+      [builtContent, tags || [], old.id]
+    )
+    console.log(`[context] Superseded entry #${old.id} "${old.title.slice(0, 50)}" with updated content`)
+    return res.rows[0]
+  }
+
+  // ─── No existing entry — create new ───
   const res = await query(
     `INSERT INTO context_entries (project_id, user_id, category, title, content, tags)
      VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING id, title, category`,
-    [projectId, userId || null, category || "general", title, buildPatternContent(content, confidence, lifecycle), tags || []]
+    [projectId, userId || null, cat, title, builtContent, tags || []]
   )
   return res.rows[0]
+}
+
+/**
+ * Deprecate old context entries that haven't been updated recently.
+ * Call this periodically (e.g., at start of each new run) to prevent context rot.
+ */
+export async function deprecateStaleEntries(projectId: string, maxAgeDays: number = 30): Promise<number> {
+  const res = await query(
+    `UPDATE context_entries
+     SET content = REPLACE(content, 'lifecycle: verified', 'lifecycle: deprecated')
+     WHERE project_id = $1
+       AND updated_at < NOW() - INTERVAL '1 day' * $2
+       AND content LIKE '%lifecycle: verified%'
+       AND content NOT LIKE '%lifecycle: deprecated%'
+     RETURNING id`,
+    [projectId, maxAgeDays]
+  )
+
+  if (res.rows.length > 0) {
+    console.log(`[context] Deprecated ${res.rows.length} stale entries older than ${maxAgeDays} days`)
+  }
+  return res.rows.length
 }
 
 function buildPatternContent(content: string, confidence?: string, lifecycle?: string): string {
@@ -103,58 +157,86 @@ export async function getAllContext(projectId: string): Promise<ContextEntry[]> 
 export async function buildContextForPrompt(projectId: string, userPrompt: string): Promise<string | null> {
   const keywords = extractKeywords(userPrompt)
 
-  // Load patterns by categories — verified first, then candidates
-  const patterns = await queryContext(projectId, { category: "pattern", limit: 5 })
-  const preferences = await queryContext(projectId, { category: "preference", limit: 3 })
-
-  // Load structured patterns (api, db, migration, etc.)
-  const apiPatterns = await queryContext(projectId, { category: "api_pattern", limit: 3 })
-  const dbPatterns = await queryContext(projectId, { category: "db_pattern", limit: 3 })
-  const archPatterns = await queryContext(projectId, { category: "architecture_pattern", limit: 3 })
-  const bugfixPatterns = await queryContext(projectId, { category: "bugfix_pattern", limit: 3 })
-
-  let fixes: ContextEntry[] = []
-  let memories: ContextEntry[] = []
+  // ─── Relevance-first loading: only fetch what matches the current task ───
+  // Instead of loading from 8 categories, prioritize keyword-matched entries
+  let relevant: ContextEntry[] = []
 
   if (keywords.length > 0) {
-    fixes = await queryContext(projectId, { category: "fix", tags: keywords, limit: 5 })
-    memories = await queryContext(projectId, { category: "memory", tags: keywords, limit: 5 })
+    // First: get entries that match the task keywords (most relevant)
+    relevant = await queryContext(projectId, { tags: keywords, limit: 10 })
   }
 
-  if (fixes.length === 0) {
-    fixes = await queryContext(projectId, { category: "fix", limit: 3 })
+  // Supplement with verified patterns if we don't have enough relevant context
+  if (relevant.length < 5) {
+    const verified = await queryContext(projectId, { lifecycle: "verified", limit: 8 })
+    // Only add entries not already in relevant
+    const seenIds = new Set(relevant.map((e) => e.id))
+    for (const entry of verified) {
+      if (!seenIds.has(entry.id)) {
+        relevant.push(entry)
+        seenIds.add(entry.id)
+      }
+    }
   }
-  if (memories.length === 0) {
-    memories = await queryContext(projectId, { category: "memory", limit: 3 })
+
+  // Add bugfix patterns (high value, always useful)
+  const bugfixes = await queryContext(projectId, { category: "bugfix_pattern", limit: 3 })
+  const seenIds = new Set(relevant.map((e) => e.id))
+  for (const entry of bugfixes) {
+    if (!seenIds.has(entry.id)) {
+      relevant.push(entry)
+      seenIds.add(entry.id)
+    }
   }
 
-  const all = [
-    ...apiPatterns, ...dbPatterns, ...archPatterns, ...bugfixPatterns,
-    ...patterns, ...preferences, ...fixes, ...memories
-  ]
-  if (all.length === 0) return null
+  if (relevant.length === 0) return null
 
-  const seen = new Set<number>()
-  const unique = all.filter((e) => {
-    if (seen.has(e.id)) return false
-    seen.add(e.id)
-    return true
-  })
+  // Deduplicate by title similarity (not just by ID)
+  const deduped = deduplicateByTitle(relevant)
 
-  // Sort: verified patterns first, then by recency
-  unique.sort((a, b) => {
+  // Cap at 12 entries to prevent context bloat
+  const capped = deduped.slice(0, 12)
+
+  // Sort: verified first, then by recency
+  capped.sort((a, b) => {
     const aVerified = a.content.includes("lifecycle: verified") ? 0 : 1
     const bVerified = b.content.includes("lifecycle: verified") ? 0 : 1
     if (aVerified !== bVerified) return aVerified - bVerified
-    return 0 // preserve existing order (already sorted by updated_at DESC)
+    return 0
   })
 
-  const lines = ["═══ LEARNED PATTERNS AND CONTEXT ═══"]
-  for (const entry of unique) {
-    lines.push(`[${entry.category}] ${entry.title}: ${entry.content.slice(0, 200)}`)
+  const lines = ["═══ LEARNED PATTERNS (from previous runs — verify before relying on these) ═══"]
+  for (const entry of capped) {
+    const staleTag = entry.content.includes("lifecycle: verified") ? "✓" : "?"
+    lines.push(`  ${staleTag} [${entry.category}] ${entry.title}: ${entry.content.slice(0, 150)}`)
   }
 
   return lines.join("\n")
+}
+
+/** Deduplicate context entries by title similarity */
+function deduplicateByTitle(entries: ContextEntry[]): ContextEntry[] {
+  const seen = new Map<string, ContextEntry>()
+  for (const entry of entries) {
+    // Normalize title for comparison: lowercase, strip prefixes like "Fixed:", "Task completed:"
+    const normalized = entry.title.toLowerCase()
+      .replace(/^(fixed|task completed|failed|error):?\s*/i, "")
+      .slice(0, 50)
+
+    const existing = seen.get(normalized)
+    if (!existing) {
+      seen.set(normalized, entry)
+    } else {
+      // Keep the newer one (entries are already sorted by updated_at DESC)
+      // But prefer verified over candidate
+      const existingVerified = existing.content.includes("lifecycle: verified")
+      const newVerified = entry.content.includes("lifecycle: verified")
+      if (newVerified && !existingVerified) {
+        seen.set(normalized, entry)
+      }
+    }
+  }
+  return [...seen.values()]
 }
 
 function extractKeywords(prompt: string): string[] {

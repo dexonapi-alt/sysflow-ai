@@ -210,35 +210,70 @@ export async function buildSessionSummary(projectId: string, chatId?: string | n
   const recent = await getRecentSessions(projectId, chatId)
   if (recent.length === 0) return null
 
-  const lines = ["Previous actions in this project (most recent last):"]
+  // ─── Compressed session summary ───
+  // Instead of dumping every action from 20 sessions, we compress to:
+  // 1. One-line-per-session overview (last 5 in detail, older ones just counted)
+  // 2. Aggregate file state (all files touched, marked unverified)
+  // 3. User decisions extracted
+  // 4. Last error
 
-  for (const session of recent) {
-    const outcomeTag = session.outcome === "completed" ? "✓" : session.outcome === "failed" ? "✗" : session.outcome === "interrupted" ? "⚡" : "?"
-    const errorNote = session.error ? ` Error: ${session.error.slice(0, 100)}` : ""
+  const lines: string[] = []
 
-    lines.push(`[${outcomeTag}] "${session.prompt}"${errorNote}`)
+  // Older sessions: just count them
+  const older = recent.slice(0, -5)
+  const recentFive = recent.slice(-5)
+  if (older.length > 0) {
+    const olderCompleted = older.filter((s) => s.outcome === "completed").length
+    const olderFailed = older.filter((s) => s.outcome !== "completed").length
+    lines.push(`Previous sessions (${older.length} older): ${olderCompleted} completed, ${olderFailed} failed/interrupted`)
+  }
 
-    for (const a of session.actions) {
-      if (a.tool === "write_file" || a.tool === "edit_file") {
-        lines.push(`  - ${a.tool} ${a.path}`)
-      } else if (a.tool === "read_file") {
-        lines.push(`  - read ${a.path}`)
-      } else if (a.tool === "run_command") {
-        const outputSnippet = a.output ? ` → ${a.output.trim().slice(-150)}` : ""
-        const skippedNote = a.skipped ? " (skipped: long-running)" : ""
-        lines.push(`  - run "${a.command}"${skippedNote}${outputSnippet}`)
-      } else if (a.tool === "create_directory") {
-        lines.push(`  - mkdir ${a.path}`)
-      } else if (a.tool === "delete_file") {
-        lines.push(`  - delete ${a.path}`)
-      } else {
-        lines.push(`  - ${a.tool}${a.path ? " " + a.path : ""}`)
+  // Recent sessions: one line each with key actions only (writes, commands — skip reads)
+  if (recentFive.length > 0) {
+    lines.push("Recent sessions:")
+    for (const session of recentFive) {
+      const tag = session.outcome === "completed" ? "✓" : session.outcome === "failed" ? "✗" : "⚡"
+      const errNote = session.error ? ` — FAILED: ${session.error.slice(0, 120)}` : ""
+      lines.push(`  ${tag} "${session.prompt.slice(0, 100)}"${errNote}`)
+
+      // Only show write/edit/command actions (skip reads — they're noise)
+      const keyActions = session.actions.filter((a) =>
+        a.tool === "write_file" || a.tool === "edit_file" || a.tool === "run_command" ||
+        a.tool === "create_directory" || a.tool === "delete_file" || a.tool === "_user_response"
+      )
+      if (keyActions.length > 0) {
+        const actionStr = keyActions.slice(0, 8).map((a) => {
+          if (a.tool === "run_command") return `run "${(a.command || "").slice(0, 50)}"`
+          if (a.tool === "_user_response") return `user answered`
+          return `${a.tool.replace("_file", "")} ${a.path || ""}`
+        }).join(", ")
+        lines.push(`    → ${actionStr}${keyActions.length > 8 ? ` +${keyActions.length - 8} more` : ""}`)
       }
     }
+  }
 
-    if (session.filesModified.length > 0) {
-      lines.push(`  Files: ${session.filesModified.join(", ")}`)
+  // Aggregate files touched (unverified)
+  const allFiles = new Set<string>()
+  for (const s of recent) {
+    for (const f of s.filesModified) allFiles.add(f)
+  }
+  if (allFiles.size > 0) {
+    const fileList = [...allFiles].slice(0, 25).join(", ")
+    lines.push(`\nFiles from history (UNVERIFIED — may be deleted/changed): ${fileList}${allFiles.size > 25 ? ` +${allFiles.size - 25} more` : ""}`)
+  }
+
+  // User decisions
+  const decisions: string[] = []
+  for (const s of recent) {
+    for (const a of s.actions) {
+      const answer = (a as Record<string, unknown>).answer as string | undefined
+      if (a.tool === "_user_response" && answer && !decisions.includes(answer)) {
+        decisions.push(answer)
+      }
     }
+  }
+  if (decisions.length > 0) {
+    lines.push(`\nUser decisions (do NOT re-ask): ${decisions.map((d) => `"${d}"`).join(", ")}`)
   }
 
   return lines.join("\n")
@@ -248,60 +283,88 @@ export async function buildContinueContext(projectId: string, chatId?: string | 
   const recent = await getRecentSessions(projectId, chatId, 10)
   if (recent.length === 0) return null
 
+  // ─── Compressed continuation context ───
+  // Extract ONLY what matters for continuing:
+  // 1. Original task
+  // 2. What files exist (unverified)
+  // 3. User decisions
+  // 4. Last error
+  // 5. What was completed vs. what's remaining
+  // Skip: read_file actions, raw command output, per-step breakdowns
+
   const allFilesCreated = new Set<string>()
-  const allFilesModified = new Set<string>()
   const userDecisions: string[] = []
   let lastError: string | null = null
+  const completedTasks: string[] = []
+  const failedTasks: string[] = []
+  let scaffoldDir: string | null = null
 
-  const lines: string[] = []
-  lines.push("=== CONTINUATION CONTEXT — Full history of this chat ===")
+  // Scaffold command patterns for directory extraction
+  const scaffoldCmdPatterns = [
+    /create-vite\S*\s+(\S+)/, /create-next-app\S*\s+(\S+)/,
+    /create-react-app\S*\s+(\S+)/, /@nestjs\/cli\s+new\s+(\S+)/,
+    /@angular\/cli\s+new\s+(\S+)/, /nuxi\S*\s+init\s+(\S+)/,
+  ]
 
   for (const session of recent) {
-    const outcomeTag = session.outcome === "completed" ? "COMPLETED" : session.outcome === "failed" ? "FAILED" : "INTERRUPTED"
-    lines.push(`\nRun [${outcomeTag}]: "${session.prompt}"`)
+    for (const f of session.filesModified) allFilesCreated.add(f)
 
-    if (session.actions.length > 0) {
-      lines.push("  Steps taken:")
-      for (const a of session.actions) {
-        if (a.tool === "_user_response") {
-          const answer = (a as Record<string, unknown>).answer || (a as Record<string, unknown>).output || ""
-          lines.push(`    - USER ANSWERED: "${answer}"`)
-          userDecisions.push(String(answer))
-        } else if (a.tool === "write_file") {
-          lines.push(`    - Created file: ${a.path}`)
-          if (a.path) allFilesCreated.add(a.path)
-        } else if (a.tool === "edit_file") {
-          lines.push(`    - Edited file: ${a.path}`)
-          if (a.path) allFilesModified.add(a.path)
-        } else if (a.tool === "read_file") {
-          lines.push(`    - Read file: ${a.path}`)
-        } else if (a.tool === "run_command") {
-          lines.push(`    - Ran command: ${a.command}`)
-        } else if (a.tool === "create_directory") {
-          lines.push(`    - Created directory: ${a.path}`)
-        } else if (a.tool === "delete_file") {
-          lines.push(`    - Deleted file: ${a.path}`)
-        } else {
-          lines.push(`    - ${a.tool}${a.path ? " " + a.path : ""}`)
+    for (const a of session.actions) {
+      const answer = (a as Record<string, unknown>).answer as string | undefined
+      if (a.tool === "_user_response" && answer && !userDecisions.includes(answer)) {
+        userDecisions.push(answer)
+      }
+      // Detect scaffold commands to find the scaffold directory
+      if (a.tool === "run_command" && a.command) {
+        for (const pat of scaffoldCmdPatterns) {
+          const m = a.command.match(pat)
+          if (m && m[1] && m[1] !== "." && !m[1].startsWith("-")) {
+            scaffoldDir = m[1]
+          }
         }
       }
     }
 
-    if (session.filesModified.length > 0) {
-      lines.push(`  Files modified: ${session.filesModified.join(", ")}`)
-    }
+    if (session.error) lastError = session.error
 
-    if (session.error) {
-      lines.push(`  Error: ${session.error.slice(0, 300)}`)
-      lastError = session.error
+    if (session.outcome === "completed") {
+      completedTasks.push(session.prompt.slice(0, 80))
+    } else if (session.outcome === "failed") {
+      failedTasks.push(`${session.prompt.slice(0, 60)}: ${(session.error || "unknown error").slice(0, 80)}`)
     }
   }
 
-  // Find the ORIGINAL task prompt (first run in this chat)
   const originalPrompt = recent.length > 0 ? recent[recent.length - 1].prompt : null
   const lastPrompt = recent[0]?.prompt || null
 
-  lines.push("\n=== ORIGINAL TASK ===")
+  // Detect working directory from file paths
+  const allFiles = [...allFilesCreated]
+  let workingDir = "."
+  if (allFiles.length > 0) {
+    // Find the most common top-level directory prefix
+    const prefixCounts = new Map<string, number>()
+    for (const f of allFiles) {
+      const parts = f.replace(/\\/g, "/").split("/")
+      if (parts.length > 1 && parts[0] !== "src" && parts[0] !== "public" && !parts[0].includes(".")) {
+        const prefix = parts[0]
+        prefixCounts.set(prefix, (prefixCounts.get(prefix) || 0) + 1)
+      } else {
+        prefixCounts.set(".", (prefixCounts.get(".") || 0) + 1)
+      }
+    }
+    // If most files are in a subdirectory, that's the working dir
+    let maxCount = 0
+    for (const [prefix, count] of prefixCounts) {
+      if (count > maxCount) {
+        maxCount = count
+        workingDir = prefix
+      }
+    }
+  }
+
+  const lines: string[] = []
+  lines.push("=== CONTINUATION CONTEXT ===")
+
   if (originalPrompt) {
     lines.push(`ORIGINAL GOAL: "${originalPrompt}"`)
   }
@@ -309,20 +372,64 @@ export async function buildContinueContext(projectId: string, chatId?: string | 
     lines.push(`MOST RECENT PROMPT: "${lastPrompt}"`)
   }
 
-  if (userDecisions.length > 0) {
-    lines.push("\n=== USER DECISIONS (from previous questions) ===")
-    for (const decision of userDecisions) {
-      lines.push(`- "${decision}"`)
-    }
-    lines.push("IMPORTANT: These are the user's confirmed choices. Do NOT ask about these again. Use them directly.")
+  // Detect scaffold conflict: scaffold created a subdirectory but files are at root
+  const hasScaffoldConflict = scaffoldDir && workingDir === "." && allFiles.some((f) => {
+    const norm = f.replace(/\\/g, "/")
+    return !norm.startsWith(scaffoldDir + "/")
+  })
+
+  // Working directory + scaffold conflict warning
+  if (hasScaffoldConflict) {
+    lines.push(`\n⚠️ SCAFFOLD CONFLICT: A scaffolding command created the "${scaffoldDir}/" directory, but the AI abandoned it and created files at the project ROOT instead.`)
+    lines.push(`WORKING DIRECTORY: project root (.) — This is where the actual files are. IGNORE the "${scaffoldDir}/" directory completely. Do NOT read, write, or reference any files inside "${scaffoldDir}/".`)
+    lines.push(`Continue working at the project root (src/, public/, package.json, etc).`)
+  } else if (workingDir !== ".") {
+    lines.push(`\nWORKING DIRECTORY: "${workingDir}/" — All previous files were created inside this directory. Continue working here. Do NOT create a new project or switch directories.`)
+  } else {
+    lines.push(`\nWORKING DIRECTORY: project root (.) — Files were created at the root level (src/, public/, etc). Continue working here. Do NOT create a new subdirectory or scaffold a new project.`)
   }
 
-  lines.push("\n=== PROGRESS SUMMARY ===")
-  if (allFilesCreated.size > 0) lines.push(`Files already created: ${[...allFilesCreated].join(", ")}`)
-  if (allFilesModified.size > 0) lines.push(`Files already modified: ${[...allFilesModified].join(", ")}`)
-  if (lastError) lines.push(`Last error: ${lastError.slice(0, 300)}`)
-  lines.push("")
-  lines.push("INSTRUCTION: Your goal is to COMPLETE THE ORIGINAL TASK above. The user's technology choices are listed above — use them, do NOT ask again. Review what has been done and continue from where the last run left off. Do NOT re-read files you already created. Do NOT redo completed steps. Do NOT ask clarifying questions — all decisions are already made. Just implement.")
+  // Completed work
+  if (completedTasks.length > 0) {
+    lines.push(`\nCompleted runs (${completedTasks.length}): ${completedTasks.slice(-3).join("; ")}`)
+  }
+
+  // Files state (unverified)
+  if (allFilesCreated.size > 0) {
+    const fileList = [...allFilesCreated].slice(0, 30).join(", ")
+    lines.push(`\nFiles previously created (UNVERIFIED — verify before assuming they exist): ${fileList}${allFilesCreated.size > 30 ? ` +${allFilesCreated.size - 30} more` : ""}`)
+  }
+
+  // User decisions
+  if (userDecisions.length > 0) {
+    lines.push(`\nUser decisions (confirmed — do NOT re-ask): ${userDecisions.map((d) => `"${d}"`).join(", ")}`)
+  }
+
+  // Last error — this is CRITICAL for /continue to work properly
+  if (lastError) {
+    const lastFailedSession = [...recent].reverse().find((s) => s.outcome === "failed" || s.outcome === "interrupted")
+    if (lastFailedSession) {
+      lines.push(`\n⚠️ PREVIOUS RUN FAILED:`)
+      lines.push(`  Error: ${lastError.slice(0, 300)}`)
+      lines.push(`  The run was interrupted at this point. Pick up from where it stopped.`)
+      if (lastFailedSession.filesModified.length > 0) {
+        lines.push(`  Files created before failure: ${lastFailedSession.filesModified.slice(0, 15).join(", ")}`)
+      }
+      // Show what actions were taken in the failed run so the AI knows where to resume
+      const lastActions = lastFailedSession.actions.slice(-5)
+      if (lastActions.length > 0) {
+        const actionStr = lastActions.map((a) => {
+          if (a.tool === "run_command") return `run "${(a.command || "").slice(0, 50)}"`
+          return `${a.tool} ${a.path || ""}`
+        }).join(", ")
+        lines.push(`  Last actions before failure: ${actionStr}`)
+      }
+    } else {
+      lines.push(`\nLast error: ${lastError.slice(0, 200)}`)
+    }
+  }
+
+  lines.push(`\nINSTRUCTION: Continue the original task from where the previous run stopped. Do NOT redo completed work. Do NOT re-ask decided questions. Verify files exist before assuming they do.`)
 
   return lines.join("\n")
 }

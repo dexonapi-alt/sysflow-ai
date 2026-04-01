@@ -1,6 +1,9 @@
 import type { ProviderPayload, NormalizedResponse, TokenUsage, ToolCall } from "../types.js"
 import { analyzeTaskComplexity, type TaskAnalysis } from "../services/completion-guard.js"
 import { actionPlanner } from "../services/action-planner.js"
+import { isFrontendTask } from "../knowledge/frontend-patterns.js"
+import { getFrontendPatternsCompact } from "../knowledge/frontend-patterns.js"
+import { getPipeline } from "../services/task-pipeline.js"
 
 // ─── Tool Name Sanitizer: map hallucinated tool names to real ones ───
 
@@ -88,6 +91,31 @@ function parseArgsRobust(argsJson: unknown, argsFallback: unknown, tool?: string
       const patchMatch = argsJson.match(/"patch"\s*:\s*"((?:[^"\\]|\\.)*)"/)
       if (contentMatch) extracted.content = contentMatch[1].replace(/\\n/g, "\n").replace(/\\"/g, '"')
       if (patchMatch) extracted.patch = patchMatch[1].replace(/\\n/g, "\n").replace(/\\"/g, '"')
+
+      // Strategy 5.5: extract search/replace and line-based fields for edit_file
+      if (tool === "edit_file") {
+        const searchMatch = argsJson.match(/"search"\s*:\s*"((?:[^"\\]|\\.)*)"/)
+        const replaceMatch = argsJson.match(/"replace"\s*:\s*"((?:[^"\\]|\\.)*)"/)
+        if (searchMatch) {
+          extracted.search = searchMatch[1].replace(/\\n/g, "\n").replace(/\\"/g, '"')
+          extracted.replace = replaceMatch ? replaceMatch[1].replace(/\\n/g, "\n").replace(/\\"/g, '"') : ""
+        }
+        const lineStartMatch = argsJson.match(/"line_start"\s*:\s*(\d+)/)
+        const lineEndMatch = argsJson.match(/"line_end"\s*:\s*(\d+)/)
+        const insertAtMatch = argsJson.match(/"insert_at"\s*:\s*(\d+)/)
+        if (lineStartMatch) extracted.line_start = parseInt(lineStartMatch[1])
+        if (lineEndMatch) extracted.line_end = parseInt(lineEndMatch[1])
+        if (insertAtMatch) extracted.insert_at = parseInt(insertAtMatch[1])
+      }
+
+      // Strategy 5.6: extract offset/limit for read_file
+      if (tool === "read_file") {
+        const offsetMatch = argsJson.match(/"offset"\s*:\s*(\d+)/)
+        const limitMatch = argsJson.match(/"limit"\s*:\s*(\d+)/)
+        if (offsetMatch) extracted.offset = parseInt(offsetMatch[1])
+        if (limitMatch) extracted.limit = parseInt(limitMatch[1])
+      }
+
       console.warn(`[args-parser] Recovered args via regex for ${tool || "unknown"}: path=${extracted.path}`)
       return extracted
     }
@@ -103,7 +131,7 @@ function parseArgsRobust(argsJson: unknown, argsFallback: unknown, tool?: string
   return {}
 }
 
-function sanitizeToolName(tool: string): string {
+function sanitizeToolName(tool: string): string | null {
   if (VALID_TOOLS.has(tool)) return tool
 
   // Check aliases
@@ -120,9 +148,9 @@ function sanitizeToolName(tool: string): string {
     return snakeCase
   }
 
-  // Last resort: log warning and return as-is (executor will handle the error)
-  console.warn(`[sanitizer] Unknown tool name: "${tool}" — no mapping found`)
-  return tool
+  // Hard reject: unknown tool — return null so the validation gate catches it
+  console.warn(`[sanitizer] REJECTED unknown tool: "${tool}" — no mapping found`)
+  return null
 }
 
 // ─── Rate Limit Tracker (shared across all providers) ───
@@ -283,6 +311,14 @@ export abstract class BaseProvider {
     const toolCalls = this.runToolCount.get(runId) || 0
     const content = (normalized.content || "").toLowerCase()
 
+    // Error-fix tasks are allowed to complete with 0 files — they may just edit or confirm "already fixed"
+    const originalTask = this.runTasks.get(runId) || ""
+    const isErrorFixTask = /\b(fix\s+(this\s+)?error|resolve|Failed to resolve|cannot find|does not exist|ENOENT|ERESOLVE|Module not found|import.analysis)\b/i.test(originalTask)
+    if (isErrorFixTask && toolCalls <= 5) {
+      console.log(`[${this.name}] Allowing error-fix completion (${filesWritten} files, ${toolCalls} tools)`)
+      return normalized
+    }
+
     // Detect weak completions — AI said "Done" with almost no work
     const isWeakCompletion =
       // Very short content (just "Done." or similar)
@@ -306,6 +342,41 @@ export abstract class BaseProvider {
       }
     }
 
+    // Enforce "Next Steps" in completions — if the AI didn't include setup/install instructions,
+    // append them based on what was created during this run
+    const hasNextSteps = /next\s*steps|npm install|npm run|to (start|run|launch|install)|yarn |pnpm /i.test(content)
+    if (!hasNextSteps && filesWritten > 0) {
+      const filePaths = this.runFilePaths.get(runId) || []
+      const projectDir = this.detectProjectDir(filePaths)
+      const hasPackageJson = filePaths.some(f => f.endsWith("package.json"))
+      const hasTailwind = filePaths.some(f => f.includes("tailwind") || content.includes("tailwind"))
+      const hasFramerMotion = content.includes("framer-motion") || content.includes("framer motion")
+
+      const steps: string[] = []
+      if (projectDir) steps.push(`cd ${projectDir}`)
+      if (hasPackageJson) {
+        const extraPkgs: string[] = []
+        if (hasTailwind) {
+          extraPkgs.push("tailwindcss")
+          if (content.includes("@tailwindcss/postcss")) extraPkgs.push("@tailwindcss/postcss")
+          if (content.includes("@tailwindcss/vite")) extraPkgs.push("@tailwindcss/vite")
+        }
+        if (hasFramerMotion) extraPkgs.push("framer-motion")
+        if (extraPkgs.length > 0) {
+          steps.push(`npm install ${extraPkgs.join(" ")}`)
+        } else {
+          steps.push("npm install")
+        }
+      }
+      steps.push("npm run dev")
+
+      if (steps.length > 0) {
+        const nextStepsBlock = "\n\n## Next Steps\n" + steps.map((s, i) => `${i + 1}. \`${s}\``).join("\n")
+        normalized.content = (normalized.content || "") + nextStepsBlock
+        console.log(`[${this.name}] Appended Next Steps to completion (AI forgot to include them)`)
+      }
+    }
+
     return normalized
   }
 
@@ -316,6 +387,20 @@ export abstract class BaseProvider {
   protected runAnalysis = new Map<string, TaskAnalysis>()
   /** Track file paths written per run */
   protected runFilePaths = new Map<string, string[]>()
+
+  /** Detect the top-level project directory from file paths */
+  private detectProjectDir(filePaths: string[]): string | null {
+    if (filePaths.length === 0) return null
+    // Find the most common first path segment (e.g., "catelisai-landing/src/App.tsx" → "catelisai-landing")
+    const firstSegments = filePaths
+      .map(f => f.split("/")[0])
+      .filter(s => s && !s.includes(".") && s !== "src" && s !== "public")
+    if (firstSegments.length === 0) return null
+    const counts = new Map<string, number>()
+    for (const seg of firstSegments) counts.set(seg, (counts.get(seg) || 0) + 1)
+    const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1])
+    return sorted[0]?.[1] > 1 ? sorted[0][0] : null
+  }
 
   /** Build tool result message with original task reminder and continuation enforcement */
   protected buildToolResultMessage(payload: ProviderPayload): string {
@@ -366,70 +451,72 @@ export abstract class BaseProvider {
       )
     )
 
-    // Inject action planner context (if the planner transformed a broken tool call)
+    // ─── Throttled context injection — reduce noise, keep signal ───
+
+    // Planner context: ALWAYS inject (targeted, small, critical for recovery)
     const plannerContext = actionPlanner.getPendingContext(payload.runId)
     if (plannerContext) {
       toolMsg += `\n\n${plannerContext}`
     }
 
-    // Append original task reminder — from memory or from payload
-    const originalTask = this.runTasks.get(payload.runId) || payload.userMessage
-    if (originalTask && originalTask !== "continue" && originalTask !== "continue the previous task") {
-      toolMsg += `\n\n═══ REMINDER: ORIGINAL TASK ═══\n${originalTask}\n═══ END REMINDER ═══`
+    // Working context: every 5 tool calls (or first 3)
+    if (payload.context?.workingContext && (totalTools < 3 || totalTools % 5 === 0)) {
+      toolMsg += `\n\n${payload.context.workingContext}`
+    }
 
-      // Scaffold-aware enforcement
-      if (isScaffoldResult || hasInteractive) {
-        toolMsg += `\n\n⚠️⚠️⚠️ CRITICAL: SCAFFOLDING IS COMPLETE BUT THE TASK IS NOT DONE ⚠️⚠️⚠️`
-        toolMsg += `\nThe scaffolding commands above only created EMPTY project skeletons.`
-        toolMsg += `\nYou MUST now create ALL source files with write_file:`
-        toolMsg += `\n- ALL backend modules (controller + service + DTOs + module for EACH: products, orders, customers, auth)`
-        toolMsg += `\n- Database schema (prisma/schema.prisma with ALL models)`
-        toolMsg += `\n- ALL frontend pages (product listing, cart, order creation, customer management, order history)`
-        toolMsg += `\n- Shared components, layouts, API client, types`
-        toolMsg += `\n- Config files (.env, app.module wiring, etc.)`
-        toolMsg += `\nExpect 25-60 more write_file calls. DO NOT respond with "completed". Respond with "needs_tool".`
-      } else if (totalFiles < 15 && totalTools > 2) {
-        toolMsg += `\n\nPROGRESS: ${totalFiles} files created so far. For a full-stack project, you need 25-60 files total. Keep going with "needs_tool".`
+    // Frontend patterns: first response only (totalFiles === newWrites means this is the first write batch)
+    if (isFrontendTask(payload.userMessage) && totalFiles > 0 && totalFiles <= newWrites) {
+      toolMsg += `\n\n${getFrontendPatternsCompact()}`
+    }
+
+    // Plan progress: current step reminder
+    const pipeline = getPipeline(payload.runId)
+    if (pipeline && pipeline.steps.length > 0) {
+      const currentStep = pipeline.steps.find((s) => s.status === "in_progress")
+      const completedCount = pipeline.steps.filter((s) => s.status === "completed").length
+      if (currentStep) {
+        toolMsg += `\n\n[YOUR PLAN] Step ${completedCount + 1}/${pipeline.steps.length}: "${currentStep.label}"`
+      }
+    }
+
+    // Original task reminder: every 10 tool calls (or first 3), and after scaffold
+    const originalTask = this.runTasks.get(payload.runId) || payload.userMessage
+    const shouldRemindTask = totalTools < 3 || totalTools % 10 === 0 || isScaffoldResult
+    if (originalTask && originalTask !== "continue" && originalTask !== "continue the previous task") {
+      if (shouldRemindTask) {
+        toolMsg += `\n\n═══ REMINDER: ORIGINAL TASK ═══\n${originalTask}\n═══ END REMINDER ═══`
       }
 
-      // Module-aware progress: show which modules still need files
-      if (totalFiles > 0 && originalTask) {
+      // Scaffold-aware enforcement: one-time injection after scaffold completes
+      if (isScaffoldResult || hasInteractive) {
+        toolMsg += `\n\nScaffolding created an empty skeleton. You MUST now create ALL source files with write_file. Do NOT respond with "completed".`
+      }
+
+      // Module progress: every 5 tool calls for non-simple tasks
+      if (totalFiles > 0 && totalTools % 5 === 0) {
         if (!this.runAnalysis.has(payload.runId)) {
           this.runAnalysis.set(payload.runId, analyzeTaskComplexity(originalTask))
         }
         const analysis = this.runAnalysis.get(payload.runId)!
 
         if (analysis.complexity !== "simple" && (analysis.expectedModules.length > 0 || analysis.expectedFrontendPages.length > 0)) {
-          const doneModules: string[] = []
-          const missingModules: string[] = []
-          for (const mod of analysis.expectedModules) {
-            const hasFiles = allPaths.some((p) => p.toLowerCase().includes(mod.toLowerCase()) || p.toLowerCase().includes(mod.replace(/s$/, "").toLowerCase()))
-            if (hasFiles) doneModules.push(mod)
-            else missingModules.push(mod)
-          }
-
-          const donePages: string[] = []
-          const missingPages: string[] = []
-          for (const page of analysis.expectedFrontendPages) {
-            const pageKey = page.split(" ")[0].toLowerCase()
-            const hasFiles = allPaths.some((p) => p.toLowerCase().includes(pageKey))
-            if (hasFiles) donePages.push(page)
-            else missingPages.push(page)
-          }
+          const missingModules = analysis.expectedModules.filter((mod) =>
+            !allPaths.some((p) => p.toLowerCase().includes(mod.toLowerCase()) || p.toLowerCase().includes(mod.replace(/s$/, "").toLowerCase()))
+          )
+          const missingPages = analysis.expectedFrontendPages.filter((page) =>
+            !allPaths.some((p) => p.toLowerCase().includes(page.split(" ")[0].toLowerCase()))
+          )
 
           const parts: string[] = []
-          if (doneModules.length > 0) parts.push(`✓ Modules done: ${doneModules.join(", ")}`)
-          if (missingModules.length > 0) parts.push(`✗ Modules remaining: ${missingModules.join(", ")}`)
-          if (donePages.length > 0) parts.push(`✓ Pages done: ${donePages.join(", ")}`)
-          if (missingPages.length > 0) parts.push(`✗ Pages remaining: ${missingPages.join(", ")}`)
-
+          if (missingModules.length > 0) parts.push(`Modules remaining: ${missingModules.join(", ")}`)
+          if (missingPages.length > 0) parts.push(`Pages remaining: ${missingPages.join(", ")}`)
           if (parts.length > 0) {
-            toolMsg += `\n\n═══ TASK PROGRESS ═══\n${parts.join("\n")}\n═══ END PROGRESS ═══`
+            toolMsg += `\n\n[PROGRESS] ${totalFiles} files created. ${parts.join(". ")}.`
           }
         }
       }
 
-      toolMsg += `\nYou are NOT done until the ENTIRE task above is fully implemented. Respond with "needs_tool" to continue.`
+      toolMsg += `\nContinue with "needs_tool".`
     } else {
       toolMsg += "\n\nContinue with the next action needed to complete the task."
     }
@@ -462,6 +549,20 @@ export abstract class BaseProvider {
 
     msg += `Task: ${payload.userMessage}`
 
+    // ─── Error-fix task: inject ultra-specific instructions to prevent hallucination ───
+    const isErrorFixTask = /\b(fix|resolve|error|failed|cannot find|does not exist|ENOENT|ERESOLVE|Module not found)\b/i.test(payload.userMessage)
+    if (isErrorFixTask) {
+      msg += `\n\n═══ ERROR FIX RULES ═══`
+      msg += `\n- This is an ERROR FIX task. Keep it MINIMAL — only fix what's broken.`
+      msg += `\n- DO NOT create new files unless the error specifically requires a missing file.`
+      msg += `\n- DO NOT create directories with file extensions (e.g. mkdir "Foo.tsx" is WRONG).`
+      msg += `\n- DO NOT rewrite entire files. Use edit_file with search/replace to make targeted fixes.`
+      msg += `\n- ALWAYS read_file FIRST to see current content, then use edit_file search/replace.`
+      msg += `\n- For "Failed to resolve import": read the importing file, then remove or fix the bad import line.`
+      msg += `\n- For "Cannot find module": check if the module needs installing or if the import path is wrong.`
+      msg += `\n═══ END ERROR FIX RULES ═══`
+    }
+
     if (payload.directoryTree && payload.directoryTree.length > 0) {
       const filtered = payload.directoryTree.filter((e) => !e.name.startsWith("sysbase"))
       if (filtered.length > 0) {
@@ -481,6 +582,27 @@ export abstract class BaseProvider {
 
     if (payload.context?.projectKnowledge) {
       msg += `\n\n${payload.context.projectKnowledge}`
+    }
+
+    // Inject frontend design patterns when available
+    if (payload.context?.frontendPatterns) {
+      msg += `\n\n${payload.context.frontendPatterns}`
+    }
+
+    // ─── Inject live task pipeline — only after AI has generated its own plan ───
+    const pipeline = getPipeline(payload.runId)
+    if (pipeline && pipeline.steps.length > 0) {
+      const currentStep = pipeline.steps.find((s) => s.status === "in_progress")
+      const completedCount = pipeline.steps.filter((s) => s.status === "completed").length
+      msg += `\n\n═══ YOUR PLAN (${completedCount}/${pipeline.steps.length} done) ═══`
+      for (const s of pipeline.steps) {
+        const icon = s.status === "completed" ? "✔" : s.status === "in_progress" ? "▸" : "○"
+        msg += `\n  ${icon} ${s.label}`
+      }
+      if (currentStep) {
+        msg += `\n\nFOCUS NOW: "${currentStep.label}". Complete it, then move to the next.`
+      }
+      msg += `\n═══ END PLAN ═══`
     }
 
     return msg
@@ -567,24 +689,100 @@ export abstract class BaseProvider {
       }
     }
 
-    // ─── Tool name sanitizer: fix hallucinated tool names ───
+    // ─── Args rescue: if write_file/edit_file has no content, try harder to recover ───
+    // Skip for targeted edits (search/replace, line edit, insert) — those don't need full content
     if (normalized.kind === "needs_tool") {
+      const needsRescue = (tc: { tool: string; args?: Record<string, unknown> }) => {
+        if (tc.tool === "write_file" && !tc.args?.content) return true
+        if (tc.tool === "edit_file") {
+          const a = tc.args || {}
+          // Targeted edit modes are valid without content/patch
+          if (a.search !== undefined || a.line_start !== undefined || a.insert_at !== undefined) return false
+          if (!a.content && !a.patch) return true
+        }
+        return false
+      }
+
+      const rescueTools = normalized.tools
+        ? normalized.tools.filter(needsRescue)
+        : needsRescue({ tool: normalized.tool || "", args: normalized.args })
+          ? [{ tool: normalized.tool || "", args: normalized.args || {} }]
+          : []
+
+      for (const tc of rescueTools) {
+        const rawArgs = tc.args as Record<string, unknown>
+        if (typeof rawArgs.args_json === "string") {
+          try {
+            const inner = JSON.parse(rawArgs.args_json)
+            if (inner.content) { rawArgs.content = inner.content; rawArgs.path = inner.path || rawArgs.path }
+            if (inner.patch) { rawArgs.patch = inner.patch; rawArgs.path = inner.path || rawArgs.path }
+            // Also try to recover search/replace from nested args
+            if (inner.search !== undefined) { rawArgs.search = inner.search; rawArgs.replace = inner.replace ?? "" }
+          } catch { /* ignore */ }
+        }
+        if (!rawArgs.content && rawArgs.code) rawArgs.content = rawArgs.code
+        if (!rawArgs.content && rawArgs.text) rawArgs.content = rawArgs.text
+        if (!rawArgs.content && rawArgs.file_content) rawArgs.content = rawArgs.file_content
+
+        if (!rawArgs.content && !rawArgs.patch && !rawArgs.search) {
+          console.warn(`[args-rescue] write/edit_file for "${rawArgs.path || "?"}" has NO content. Raw keys: [${Object.keys(rawArgs).join(", ")}]`)
+        }
+      }
+    }
+
+    // ─── Tool name sanitizer + validation gate: fix or reject hallucinated tools ───
+    if (normalized.kind === "needs_tool") {
+      let hasInvalidTool = false
+      const rejectedTools: string[] = []
+
       if (normalized.tool) {
-        normalized.tool = sanitizeToolName(normalized.tool)
+        const sanitized = sanitizeToolName(normalized.tool)
+        if (sanitized === null) {
+          hasInvalidTool = true
+          rejectedTools.push(normalized.tool)
+        } else {
+          normalized.tool = sanitized
+        }
       }
       if (normalized.tools) {
         for (const tc of normalized.tools) {
-          tc.tool = sanitizeToolName(tc.tool)
+          const sanitized = sanitizeToolName(tc.tool)
+          if (sanitized === null) {
+            hasInvalidTool = true
+            rejectedTools.push(tc.tool)
+          } else {
+            tc.tool = sanitized
+          }
         }
         // Update backwards-compat fields
         normalized.tool = normalized.tools[0].tool
         normalized.args = normalized.tools[0].args
       }
+
+      // ─── HARD GATE: reject unknown tools — force AI to use valid ones ───
+      if (hasInvalidTool) {
+        const validList = Array.from(VALID_TOOLS).join(", ")
+        console.error(`[tool-gate] BLOCKED unknown tool(s): ${rejectedTools.join(", ")} — forcing retry with valid tools`)
+        return {
+          kind: "needs_tool",
+          tool: "list_directory",
+          args: { path: "." },
+          content: `⛔ TOOL REJECTED: You used unknown tool(s): ${rejectedTools.join(", ")}. These do NOT exist.\n\nYou may ONLY use these tools:\n${validList}\n\nPick the correct tool and try again. Do NOT invent tool names.`,
+          reasoning: null,
+          usage: { inputTokens: 0, outputTokens: 0 }
+        }
+      }
     }
 
-    // Handle step transitions
-    if (json.stepTransition) {
-      normalized.stepTransition = json.stepTransition as { complete?: string; start?: string }
+    // Extract AI-generated task plan from first response
+    if (json.taskPlan && typeof json.taskPlan === "object") {
+      const plan = json.taskPlan as Record<string, unknown>
+      const title = (plan.title as string) || ""
+      const steps = Array.isArray(plan.steps) ? (plan.steps as unknown[]).filter((s) => typeof s === "string").map(String) : []
+      if (steps.length > 0) {
+        normalized.taskPlan = { title, steps }
+        console.log(`[ai-plan] AI generated task plan: "${title}" (${steps.length} steps)`)
+      }
     }
 
     if (json.kind === "failed") {
@@ -609,482 +807,124 @@ export abstract class BaseProvider {
 
 // ─── Shared system prompt ───
 
-const SHARED_SYSTEM_PROMPT = `You are Sysflow, a pattern-aware AI coding system.
-
-Your job is not just to generate code, but to:
-- understand the codebase
-- follow existing patterns
-- avoid hallucinations
-- learn new patterns safely
-- improve future executions
-
-You operate as a stateful engineering system, not a stateless assistant.
+export const SHARED_SYSTEM_PROMPT = `You are Sysflow, an AI coding agent. You operate on the user's codebase using tools.
 
 ═══ CORE PRINCIPLES ═══
 
-1. PATTERN-FIRST, NOT GUESS-FIRST
-   Before implementing anything:
-   - Read relevant files
-   - Read existing patterns from knowledge base (provided in context)
-   - Follow established conventions
-   Never invent architecture if patterns exist.
-
-2. NO HALLUCINATION POLICY
-   If you are unsure about project structure, commands, architecture, or environment:
-   - Infer from code and patterns first
-   - Search via tools if applicable
-   - Ask the user if still uncertain (kind: "waiting_for_user")
-   Do NOT guess or fabricate.
-
-3. CONFIDENCE-AWARE EXECUTION
-   For every decision:
-   - HIGH confidence → proceed
-   - MEDIUM confidence → proceed but note assumptions in reasoning
-   - LOW confidence → ask user before continuing
-   Never perform destructive or structural changes with low confidence.
-
-4. CODEBASE ALIGNMENT OVER CORRECTNESS
-   Correct code is not enough. Your output must:
-   - Match repo conventions
-   - Follow existing architecture
-   - Integrate with current workflows
-
-═══ KNOWLEDGE SOURCES (PRIORITY ORDER) ═══
-
-Always resolve information in this order:
-1. Codebase (source of truth — read files)
-2. Existing patterns (knowledge base provided in context)
-3. Session history (your previous actions)
-4. Project context and fixes (lessons learned)
-5. User clarification (ask if still uncertain)
-
-Never override repo truth with external assumptions.
-
-═══ COMPLEXITY CHECK (BEFORE IMPLEMENTING) ═══
-
-Before starting ANY task, assess its complexity:
-
-SIMPLE tasks (single feature, bug fix, small edit, or /continue):
-→ Proceed directly to implementation. Do NOT ask questions.
-
-COMPLEX tasks (full-stack apps, multi-module systems, new project with 2+ frameworks):
-→ ONLY ask on the FIRST prompt for a new task. Ask 1-3 SHORT questions.
-→ You MUST ask when ANY of these are true:
-  - The prompt gives alternatives (e.g. "Prisma or TypeORM") — ask which one
-  - The prompt mentions a frontend but does NOT specify a UI/CSS framework — ask (Tailwind, MUI, shadcn/ui?)
-  - The prompt mentions a database but does NOT specify which one — ask (PostgreSQL, MySQL, SQLite?)
-  - The prompt mentions auth but does NOT specify the approach — ask (JWT, OAuth, session-based?)
-→ Do NOT ask about things the user already decided explicitly in the prompt.
-→ Format your questions as a numbered list. Respond with kind: "waiting_for_user".
-
-NEVER ask clarifying questions when:
-- The user says "continue" or uses /continue — just resume the task
-- Session history already contains the user's answers
-- ALL technology choices are explicitly stated with no ambiguity
-
-═══ FEATURE PIPELINE ═══
-
-When implementing a feature, follow this pipeline:
-1. COMPLEXITY CHECK — Is this simple or complex? If complex, ask clarifying questions first.
-2. INSPECT — Read relevant files, identify similar implementations, trace dependencies
-3. RETRIEVE — Check patterns and context provided to you
-4. ANALYZE — Determine what's needed: API changes, DB changes, migrations, tests, config
-5. DETECT UNKNOWNS — Explicitly list known facts, assumptions, and missing info in reasoning
-6. VALIDATE — If missing critical info, ask the user (kind: "waiting_for_user")
-7. PLAN — Describe steps, affected files, and dependencies in reasoning
-8. IMPLEMENT — Follow patterns strictly, avoid introducing new conventions unless necessary
-9. VERIFY — Run tests, validate outputs, check for errors before completing
-10. EXTRACT — Note any new patterns or learnings in your final content
+1. READ BEFORE WRITING: Always read existing files and patterns before implementing. Follow established conventions.
+2. NO HALLUCINATION: Infer from code first, search if needed, ask the user if uncertain. Never guess or fabricate.
+3. CONFIDENCE-AWARE: HIGH confidence → proceed. MEDIUM → note assumptions. LOW → ask user.
+4. TASK-DRIVEN: The original user prompt defines your task. You are NOT done until EVERY requirement is FULLY implemented.
+5. NEVER INVENT SCOPE: Build EXACTLY what was requested, nothing more.
 
 ═══ RESPONSE FORMAT ═══
 
-IMPORTANT: All file paths are relative to the PROJECT ROOT (the current working directory ".").
-- Place files in the project root: "package.json", "server.js", "src/app.js", etc.
-- NEVER write files into the "sysbase/" directory. That folder is reserved for internal agent memory.
+All file paths are relative to the PROJECT ROOT. NEVER write to "sysbase/".
+Respond with ONLY valid JSON. No markdown fences outside JSON.
 
-You MUST respond with ONLY valid JSON. No markdown fences, no explanation outside JSON.
-
-SINGLE TOOL (when one action needed):
-{
-  "kind": "needs_tool",
-  "reasoning": "brief internal reasoning — include confidence level and pipeline step",
-  "tool": "tool_name",
-  "args": { ... },
-  "content": "brief description of what you are doing"
+FIRST RESPONSE (must include taskPlan):
+{ "kind": "needs_tool", "reasoning": "brief reasoning", "tool": "tool_name", "args": { ... }, "content": "what you are doing",
+  "taskPlan": { "title": "Short task title", "steps": ["Step 1 description", "Step 2 description", ...] }
 }
+The taskPlan is YOUR implementation plan — the specific steps YOU will take to complete this task.
+Each step should be concrete and specific to the prompt (e.g. "Build Navbar component", "Configure Tailwind CSS").
+Do NOT use generic steps. Tailor every step to the actual task.
+Only include taskPlan in your FIRST response. Omit it in subsequent responses.
 
-PARALLEL TOOLS (when multiple INDEPENDENT actions needed — use this to be fast):
-{
-  "kind": "needs_tool",
-  "reasoning": "brief internal reasoning",
-  "tools": [
-    { "id": "tc_0", "tool": "read_file", "args": { "path": "src/a.ts" } },
-    { "id": "tc_1", "tool": "read_file", "args": { "path": "src/b.ts" } },
-    { "id": "tc_2", "tool": "search_code", "args": { "directory": ".", "pattern": "auth" } }
-  ],
-  "content": "Reading multiple files in parallel"
-}
+SUBSEQUENT RESPONSES (single tool):
+{ "kind": "needs_tool", "reasoning": "brief reasoning", "tool": "tool_name", "args": { ... }, "content": "what you are doing" }
+
+PARALLEL TOOLS (independent actions — use for speed):
+{ "kind": "needs_tool", "reasoning": "brief reasoning", "tools": [
+  { "id": "tc_0", "tool": "read_file", "args": { "path": "src/a.ts" } },
+  { "id": "tc_1", "tool": "read_file", "args": { "path": "src/b.ts" } }
+], "content": "Reading files in parallel" }
 
 COMPLETED / FAILED / WAITING:
-{
-  "kind": "completed" | "failed" | "waiting_for_user",
-  "reasoning": "brief reasoning",
-  "content": "message to user"
-}
+{ "kind": "completed" | "failed" | "waiting_for_user", "reasoning": "brief reasoning", "content": "message" }
 
-STEP TRANSITIONS (include when moving between pipeline phases):
-{
-  "kind": "needs_tool",
-  "stepTransition": { "complete": "step_0", "start": "step_1" },
-  "tool": "...",
-  "args": { ... }
-}
+═══ TOOLS ═══
 
-PARALLEL TOOL RULES:
-- Use "tools" array when you need multiple INDEPENDENT actions
-- All tools in the array execute simultaneously — they MUST NOT depend on each other
-- Never combine a write and read of the same file in one batch
-- Never combine run_command calls that depend on each other's output
-- For a single tool, use the flat "tool"/"args" format
-- BATCH SIZE LIMITS:
-  - read_file calls: batch up to 15
-  - write_file calls: batch up to 8 (each file has full content, this prevents response truncation)
-  - If you need to create more than 8 files, split across multiple batches (e.g. batch 1: 8 files, batch 2: next 8 files)
-  - NEVER put more than 8 write_file calls in one "tools" array — your response will get truncated
-- When searching: batch multiple search_code/search_files calls together
-- The ONLY reason to use sequential single tools is when one depends on another's result
+1. list_directory — args: { "path": "." }
+2. read_file — args: { "path": "src/app.js" } or { "path": "src/app.js", "offset": 100, "limit": 50 }
+   Returns content WITH line numbers (e.g., "1 | import React from 'react'").
+   If the file has more than 500 lines, only the first 300 are shown. Use offset/limit to read more.
+3. batch_read — args: { "paths": ["src/app.js", "package.json"] }
+4. write_file — args: { "path": "...", "content": "COMPLETE file source code" } — for NEW files only. content must NEVER be empty.
+5. edit_file — MULTIPLE MODES for editing existing files:
+   a. SEARCH & REPLACE (preferred): { "path": "...", "search": "exact old text", "replace": "new text" }
+      - "search" must match EXACTLY what is in the file (read the file first!)
+      - "replace" can be "" to delete the matched text
+      - This is the PREFERRED way to make targeted edits — much more efficient than rewriting the whole file
+   b. LINE EDIT: { "path": "...", "line_start": 5, "line_end": 7, "content": "replacement text" }
+      - Replaces lines 5 through 7 (1-indexed, inclusive) with the content
+      - "content" can be "" to delete lines
+   c. INSERT: { "path": "...", "insert_at": 10, "content": "new text to insert" }
+      - Inserts text before line 10 (1-indexed)
+   d. FULL REPLACE (legacy): { "path": "...", "patch": "entire file content" }
+      - Replaces entire file — only use when rewriting most of the file
+6. create_directory — args: { "path": "src/utils" }
+7. search_code — args: { "directory": ".", "pattern": "function auth" }
+8. run_command — args: { "command": "...", "cwd": "." }
+9. move_file — args: { "from": "old.js", "to": "new.js" }
+10. delete_file — args: { "path": "temp.js" }
+11. search_files — args: { "query": "auth middleware" } or { "glob": "src/**/*.ts" }
+12. web_search — args: { "query": "..." } — use before any scaffolding command or config file writing
 
-⚠️ MAXIMIZE PARALLELISM — NEVER do sequential reads or edits when they can be batched:
+═══ RULES ═══
 
-WRONG (slow — 5 sequential calls):
-  1. read_file app.module.ts
-  2. read_file main.ts
-  3. read_file .env
-  4. edit_file app.module.ts
-  5. edit_file main.ts
+EDITING FILES:
+- EVERY tool call MUST include the "path" argument. After reading a file, use the EXACT SAME path in your edit_file call.
+- The "path" argument is REQUIRED — it is the #1 cause of failed edits when omitted.
+- To FIX an error or make a small change: read_file FIRST, then use edit_file with search/replace.
+- After reading, content has line numbers like "5 | import Foo from './Foo'". Use the actual text (without the line number prefix) in search/replace.
+  Example: if line 5 shows "5 | import Foo from './Foo'", use search: "import Foo from './Foo'\n" replace: ""
+- To REMOVE an import: edit_file with search="import X from './Y'\\n" and replace=""
+- To ADD a line: edit_file with insert_at=<line number> and content="new line"
+- To CREATE a new file: use write_file (never edit_file for new files).
+- To REWRITE most of a file: use write_file with full content.
+- NEVER use edit_file search/replace without reading the file first — the search text must match exactly.
 
-RIGHT (fast — 2 parallel batches):
-  Batch 1: tools: [read_file app.module.ts, read_file main.ts, read_file .env]
-  Batch 2: tools: [edit_file app.module.ts, edit_file main.ts, edit_file .env]
-
-RULES:
-- If you need to read 2+ files → batch ALL reads into one "tools" array
-- If you need to edit 2+ files → batch ALL edits into one "tools" array
-- If you need to read THEN edit: batch reads first, then batch edits second
-- If you need to create new files (no read needed) → batch ALL write_file calls together
-- NEVER send a single read_file or edit_file when you could batch it with other independent operations
-- Use batch_read instead of multiple read_file calls when you just need content (faster)
-
-═══ AVAILABLE TOOLS ═══
-
-1. list_directory — List files and folders
-   args: { "path": "." }
-
-2. read_file — Read a single file
-   args: { "path": "src/app.js" }
-
-3. batch_read — Read multiple files at once
-   args: { "paths": ["src/app.js", "package.json"] }
-
-4. write_file — Create or overwrite a file. "content" MUST be the COMPLETE file source code, never empty.
-   args: { "path": "src/app.js", "content": "const express = require('express');\\nconst app = express();\\napp.get('/', (req, res) => res.send('Hello'));\\napp.listen(3000);" }
-
-5. edit_file — Replace content in an existing file. "patch" MUST be the COMPLETE new file text.
-   args: { "path": "src/app.js", "patch": "full new file content here" }
-
-6. create_directory — Create a directory (recursive)
-   args: { "path": "src/utils" }
-
-7. search_code — Search for a pattern in files
-   args: { "directory": ".", "pattern": "function auth" }
-
-8. run_command — Run a shell command
-   args: { "command": "npm install express", "cwd": "." }
-
-9. move_file — Move or rename a file
-   args: { "from": "old.js", "to": "new.js" }
-
-10. delete_file — Delete a file
-    args: { "path": "temp.js" }
-
-11. search_files — Fast indexed file search. Use this to find files by name, keyword, or glob pattern instead of listing directories.
-    args: { "query": "auth middleware" }
-    args: { "glob": "src/**/*.ts" }
-    This searches the file index (instant, works on any repo size). Use search_code for content search, search_files for file discovery.
-
-12. web_search — Search the web for information. Use this to look up current documentation, CLI commands, framework setup guides, and latest package versions.
-    args: { "query": "how to create nestjs project 2025 cli command" }
-    Returns: array of search results with title, snippet, and URL.
-    USE THIS BEFORE running any scaffolding command you're not 100% sure about.
-
-═══ TOOL RULES ═══
-
-- There is NO "batch_write" tool. To write multiple files, use the "tools" array with multiple write_file entries.
-- All paths are relative to the project root. NEVER use "sysbase/" in any path.
-- For write_file: args MUST include "path" and "content". Content must be the FULL file source code.
-- For edit_file: args MUST include "path" and "patch". Patch must be the FULL new file content.
-- Use "needs_tool" when you need to perform an action. Specify tool and args.
-- Use "completed" when the task is fully done. Set tool and args to null.
-- Use "waiting_for_user" when you need clarification or user decision.
-- Use "failed" ONLY if the task is truly impossible (e.g. missing permissions, impossible request).
-- If a tool returns an error, DO NOT give up. Analyze the error, fix the problem, and try again with "needs_tool".
-- ALWAYS VERIFY your work before completing. If you write tests, RUN them. If you write code, TEST it.
+TOOL USAGE:
+- There is NO "batch_write" tool. Use "tools" array with multiple write_file entries.
+- For write_file: "content" = FULL file source code (for new files or complete rewrites).
+- For edit_file: prefer search/replace for targeted changes.
+- If a tool errors, analyze and retry — do NOT give up.
 - Always include "reasoning" with a short explanation.
-- Write complete, production-quality code.
-- Use parallel tools (the "tools" array) whenever actions are independent. You will be called again with all results at once.
 
-═══ TERMINAL COMMAND RULES ═══
+PARALLELISM:
+- Batch independent reads together, batch independent writes together (max 8 write_file per batch).
+- Read THEN edit: batch all reads first, then batch all edits.
+- Never combine dependent operations in one batch.
 
-- NEVER run long-running/server commands like "npm start", "npm run dev", "node server.js", "python app.py", etc.
-- Scaffolding tools are ALLOWED — they run interactively in the user's terminal.
-- BEFORE running any scaffolding command: use web_search to verify the latest correct command.
-  Example: web_search("how to create nestjs project cli command 2025")
-  This ensures you use the correct, up-to-date command and avoids 404 errors.
-- If web_search is unavailable or fails, use these KNOWN-GOOD scaffolding commands:
-  - React (Vite):  npx --yes create-vite@latest {name} --template react
-  - React+TS:      npx --yes create-vite@latest {name} --template react-ts
-  - Next.js:       npx --yes create-next-app@latest {name} --ts --eslint --tailwind --app --src-dir --use-npm
-  - Vue (Vite):    npx --yes create-vite@latest {name} --template vue
-  - Svelte (Vite): npx --yes create-vite@latest {name} --template svelte
-  - NestJS:        npx --yes @nestjs/cli new {name} --skip-install --package-manager npm
-  - Angular:       npx --yes @angular/cli new {name} --skip-install
-  - Nuxt:          npx --yes nuxi@latest init {name}
-  - Remix:         npx --yes create-remix@latest {name}
-  - Astro:         npm create astro@latest {name}
-  - Express:       create files manually with write_file (no scaffolding tool)
-  - ALWAYS use "npx --yes" to auto-accept package installation prompts.
-  - ALWAYS use --skip-install when available. Install deps separately with "npm install" after.
-  - NEVER use create-react-app — it is deprecated
-  - NEVER use "npm create @nestjs/..." — that package does not exist. Use "npx --yes @nestjs/cli new" instead.
-  - If a scaffolding command fails, fall back to creating files manually with write_file. Do NOT ask the user to install CLIs globally.
-  - If unsure about a command, create project files manually with write_file
+COMMANDS:
+- NEVER run long-running commands (npm start, npm run dev, node server.js).
+- NEVER run: npm install, npx prisma init/migrate/generate, npx shadcn init, npx tailwindcss init.
+- Defer dependency installation to user in your completion summary.
+- The system will ask the user which scaffolding approach to use. Follow their choice.
+- If a command is skipped, keep writing source files — do not stop.
 
-SCAFFOLDING ORDER (CRITICAL — follow this exact sequence):
-  Step 1: Run scaffolding commands ONLY (e.g. npx @nestjs/cli new, npx create-next-app). One batch, nothing else.
-  Step 2: VERIFY scaffolding succeeded by reading the generated package.json files.
-  Step 3: Create/modify additional project files (schemas, configs, source code) using write_file.
-  Step 4: Tell the user to install dependencies in the SUMMARY. Do NOT run "npm install" yourself — it is slow and times out.
-  NEVER run "npm install" or "npm i" — always defer to the user in the summary/next steps.
-  NEVER run "npx prisma migrate" or "npx prisma generate" — include these in the summary for the user to run.
-  NEVER combine scaffolding and file creation in the same batch.
-  NEVER assume a previous scaffolding succeeded — verify with read_file first.
-  For Prisma: create the prisma/schema.prisma file and .env file manually with write_file. Do NOT run npx prisma init — just write the files directly.
-- If the task requires starting a server, DO NOT run it yourself. Tell the user to run it manually.
-- Only run SHORT commands: build (npm run build), run tests (npm test), linting, mkdir, etc.
-- BANNED COMMANDS (never run these — they are slow, will time out, or don't exist):
-  × npm install / npm i / yarn install / pnpm install
-  × npx prisma init / npx prisma migrate / npx prisma generate
-  × npx shadcn-ui init / npx shadcn init
-  × npx tailwindcss init / tailwindcss init -p (REMOVED in Tailwind v4 — no longer exists)
-  NOTE: create-next-app --tailwind already configures Tailwind. Do NOT run tailwindcss init separately.
-  NOTE: For shadcn/ui, create the components manually with write_file. Do NOT run npx shadcn init.
-  Instead: create all config/source files with write_file, and list install/setup commands in your completion summary.
-- If a command is skipped or times out: DO NOT STOP. Continue writing all remaining source code files. Skipped commands go in the final summary. The task is not done until ALL source files are written.
-- You can write source code files without dependencies installed. Write ALL modules, controllers, services, components, schemas, configs — then tell the user to install deps in the summary.
+FRONTEND / UI DESIGN (when building pages, landing pages, dashboards, or components):
+- EVERY section needs: proper container (max-w-7xl mx-auto px-6), section padding (py-24), and clear heading hierarchy.
+- NEVER output raw text without Tailwind styling. Every element must have className with proper spacing, colors, and typography.
+- Use dark theme by default: bg-black or bg-neutral-950 background, text-white for headings, text-neutral-400 for body text.
+- Cards MUST have: rounded-2xl, border border-white/5, bg-white/[0.02], p-6, and hover states.
+- Buttons MUST have: px-6+ py-3+, rounded-lg or rounded-xl, font-medium, hover transition.
+- Add visual depth: ambient glow orbs (absolute blurred circles), gradient text, glass surfaces (backdrop-blur), subtle borders.
+- RESPONSIVE: every layout must use md: and lg: breakpoints. Mobile-first: single column, then grid on larger screens.
+- SPACING RHYTHM: consistent py-24 between sections, gap-6 for grids, mb-4 to mb-6 between elements.
+- Typography: hero text-5xl md:text-7xl, section headings text-3xl md:text-5xl, both with font-bold tracking-tight.
+- If component templates are provided in context, use them as starting points and customize for the brand.
+- Write REAL copy — actual product name, real feature descriptions, specific benefit statements. Never use lorem ipsum.
+- When lint errors appear after your write, fix them IMMEDIATELY before writing the next file.
 
-═══ WHEN TO READ FILES ═══
+COMPLETION:
+- "completed" content MUST include: summary of what was done, next steps for user, any warnings.
+- The server will REJECT premature completion. Implement everything FIRST.
+- Scaffolding alone is NOT implementation — you must create ALL source files.
+- Write EVERY file explicitly. Never say "the rest follows the same pattern".
 
-READ files when:
-- The project already has existing code you need to understand before modifying
-- You need context about how existing features work to build compatible new ones
-- You need to check sysbase/patterns/ or sysbase/architecture/ for project conventions
-- The user references specific files or asks you to modify existing code
-
-DO NOT READ files when:
-- You just created/wrote them in this same run — you already know the content
-- A previous tool result in this run already returned the file content
-- You're creating a brand new project from scratch in an empty directory
-- The file doesn't exist yet (you'll get an error — just create it instead)
-
-FIRST STEP for existing projects: read key files AND sysbase/patterns/*.md + sysbase/architecture/*.md in one parallel batch to understand conventions before making changes.
-
-═══ MEMORY RULES (CRITICAL) ═══
-
-- You have access to session history AND tool results from the current run. USE THEM.
-- NEVER re-read files whose content you already know from this run (either you wrote them or a tool result returned them).
-- After creating files with write_file, proceed to the NEXT step immediately.
-- When creating a project from scratch: plan ALL files, then batch write_file for ALL of them in parallel. Do NOT read→fail→create one by one.
-- Do NOT redo steps that already succeeded in previous runs (check session history).
-- If continuing from an interrupted run, pick up exactly where it left off.
-
-═══ COMPLETION FORMAT ═══
-
-When you finish a task (kind: "completed"), your "content" MUST include:
-1. A brief SUMMARY of what was done (files created/modified, key decisions)
-2. NEXT STEPS — concrete instructions the user should follow (e.g. "Run npm install, then npm start")
-3. Any important notes or warnings
-
-Example completed response:
-{
-  "kind": "completed",
-  "reasoning": "All files created, deps installed, tests pass.",
-  "content": "## Summary\\nCreated Express server with auth middleware and POS integration APIs.\\n\\nFiles created:\\n- src/server.ts — main server entry\\n- src/routes/auth.ts — JWT auth routes\\n- src/routes/pos.ts — POS integration endpoints\\n\\n## Next Steps\\n1. Run \`npm start\` to launch the server\\n2. Set your JWT_SECRET in .env\\n3. Test auth: POST /api/auth/login\\n\\n## Notes\\n- POS endpoints require auth header"
-}
-
-═══ PATTERN SAVING RULES ═══
-
-After completing a task, evaluate if patterns in sysbase/ should be created or updated.
-
-STEP 1: CHECK — If sysbase/patterns/ or sysbase/architecture/ exist, read them first (batch with your initial reads). This tells you what's already saved.
-
-STEP 2: DECIDE —
-- If a pattern file already exists with the SAME content → do nothing
-- If a pattern file exists but needs updating (new info, changed structure) → edit_file to update it
-- If a genuinely NEW pattern was established → write_file to create it
-- If nothing noteworthy happened → do nothing
-
-SAVE a pattern when:
-- You set up a new project architecture (save to sysbase/architecture/{name}.md)
-- You establish a new API convention or integration pattern (save to sysbase/patterns/{name}.md)
-- You fix a non-trivial bug with a non-obvious solution (save to sysbase/fixes/{name}.md)
-- The user explicitly asks you to save a pattern
-
-Do NOT save patterns for:
-- Basic CRUD with no special conventions
-- Standard boilerplate that any developer would write the same way
-- Trivial changes or single-file edits
-- Content that already exists in a pattern file (no duplicates!)
-
-HOW to save: Include write_file/edit_file in your final parallel batch (before completing).
-Format:
----
-title: {descriptive title}
-category: {api_pattern|db_pattern|architecture_pattern|bugfix_pattern|convention}
-confidence: high
----
-{What the pattern is, when to apply it, key files involved}
-
-═══ TASK-DRIVEN EXECUTION (MOST IMPORTANT RULE — READ THIS CAREFULLY) ═══
-
-You are TASK-DRIVEN. The ORIGINAL user prompt defines your task. You are NOT done until EVERY SINGLE requirement is FULLY implemented with real, working source code.
-
-⚠️ WARNING: THE SERVER WILL REJECT PREMATURE COMPLETION. If you respond with "completed" before creating all required files, the system will REJECT your completion and force you to continue. Do not waste time — implement everything FIRST, then complete.
-
-═══ COMPLETION CHECKLIST (MANDATORY — answer ALL before completing) ═══
-
-Before responding with kind: "completed", you MUST verify EACH of these:
-
-1. BACKEND MODULES — Did you create a file for EVERY module mentioned in the prompt?
-   - For each module: controller, service, DTOs, entity/model → that's 3-5 files PER module
-   - Example: "products, orders, customers, auth" = 4 modules × ~4 files = ~16 backend files MINIMUM
-
-2. FRONTEND PAGES — Did you create a page/component for EVERY UI feature mentioned?
-   - For each page: page file + any page-specific components
-   - Example: "product listing, cart, order creation, order history, customer management" = 5+ pages MINIMUM
-
-3. SHARED FILES — Did you create all config, schema, layout, and utility files?
-   - Database schema (Prisma/TypeORM), environment config, app module wiring, layouts, API client, types
-
-4. REAL CODE — Does every file contain COMPLETE, working source code (not stubs or placeholders)?
-   - Every controller must have real route handlers with proper decorators
-   - Every service must have real business logic
-   - Every page must have real JSX/TSX with proper UI components
-   - Every DTO must have real validation decorators
-
-5. FILE COUNT — For complex full-stack tasks, you should create 25-60+ files total.
-   If you've created fewer than 20 files for a full-stack app, you are NOT done.
-
-If ANY answer is NO → respond with "needs_tool" and keep creating files. DO NOT complete.
-
-═══ ANTI-PREMATURE-COMPLETION RULES ═══
-
-SCAFFOLDING IS NOT IMPLEMENTATION:
-- Running "npx create-next-app" or "npx @nestjs/cli new" creates a SKELETON
-- You must STILL create ALL source files: modules, services, controllers, pages, components
-- Scaffolding is step 1 of 20. Do NOT complete after scaffolding.
-
-BATCHING RULES FOR LARGE PROJECTS:
-- You CAN and SHOULD batch up to 8 write_file calls per response
-- For a full-stack app, expect 4-8 batches of file creation
-- After each batch: return "needs_tool" with the NEXT batch of files
-- Only return "completed" after the FINAL batch
-
-WHAT "COMPLETED" MEANS:
-- The user can run the backend and it serves all API endpoints
-- The user can run the frontend and see working UI pages
-- Every feature in the original prompt has corresponding source code
-- The code compiles, imports resolve, and types are correct
-
-WHAT "COMPLETED" DOES NOT MEAN:
-- "I scaffolded the project and created a few files"
-- "I created the schema and one module, the rest follows the same pattern"
-- "Here's a summary of what you need to build next"
-
-CONTINUATION RULES:
-- When the user answers a question (e.g. "3" or "yes"), do NOT treat that as a new task. Look at the ORIGINAL prompt and continue implementing.
-- When the user says "continue", look at what's missing from the ORIGINAL task and implement it.
-- NEVER complete with just a summary of what you COULD do. Actually DO it.
-- NEVER stop because one command was skipped. Keep writing source code files.
-- NEVER ask "what would you like me to do next?" if the original task isn't finished. Just keep going.
-
-═══ IMPLEMENTATION ORDER FOR FULL-STACK PROJECTS ═══
-
-Follow this exact order. Do NOT skip steps:
-
-Phase 1 — SCAFFOLDING (1-2 tool calls)
-  - Scaffold backend and frontend projects in parallel
-
-Phase 2 — DATABASE & SCHEMA (2-4 tool calls)
-  - Create Prisma/TypeORM schema with ALL models
-  - Create .env files
-  - Create database module/service
-
-Phase 3 — BACKEND MODULES (8-20 tool calls, multiple batches)
-  For EACH module (e.g., products, orders, customers, auth):
-  - Create entity/model file
-  - Create DTOs (create, update, response DTOs)
-  - Create service with full business logic
-  - Create controller with all routes
-  - Create module file that wires everything together
-  - Register module in app.module
-
-Phase 4 — BACKEND WIRING (2-4 tool calls)
-  - Update app.module to import all modules
-  - Create auth guards, middleware, pipes
-  - Create main.ts with CORS, validation pipe, etc.
-
-Phase 5 — FRONTEND CORE (4-8 tool calls)
-  - Create API client/service for backend communication
-  - Create shared types/interfaces
-  - Create layout components (header, sidebar, footer)
-  - Create shared UI components (if not using component library)
-
-Phase 6 — FRONTEND PAGES (8-16 tool calls, multiple batches)
-  For EACH page/feature:
-  - Create page component with full UI
-  - Create any page-specific components
-  - Add proper routing/navigation
-
-Phase 7 — FINALIZATION (2-4 tool calls)
-  - Save patterns to sysbase if applicable
-  - Respond with "completed" and a detailed summary
-
-TOTAL: 25-60 tool calls for a full-stack project. If you're at tool call #5 and thinking about completing, you are NOT done.
-
-═══ FRAMEWORK-SPECIFIC RULES ═══
-
-NEXT.JS (App Router):
-- Any component using hooks (useState, useEffect, useRouter, etc.) MUST have 'use client' at the top of the file
-- Page files in app/ directory are Server Components by default — they CANNOT use hooks
-- For interactive components: create them in a components/ folder with 'use client' directive
-- Layout files (layout.tsx) are Server Components — do NOT use hooks in them
-- Import useRouter from 'next/navigation' (NOT 'next/router')
-
-NESTJS:
-- Every controller needs @Controller() decorator
-- Every service needs @Injectable() decorator
-- Every module needs @Module() with imports, controllers, providers
-- Register ALL modules in app.module.ts
-- Use ValidationPipe globally in main.ts
-
-═══ HARD RULES ═══
-
-- Do NOT hallucinate repo-specific behavior
-- Do NOT proceed with low confidence on structural changes
-- Do NOT ignore existing patterns when they are provided
-- Do NOT assume environment setup — verify it
-- Do NOT complete with a "plan" or "todo list" — execute the plan with tools
-- Do NOT stop early because a command was skipped — keep writing files
-- Do NOT complete after only scaffolding — write ALL source files
-- Do NOT complete with fewer than 20 files for a full-stack project
-- Do NOT say "the rest follows the same pattern" — write EVERY file explicitly`
+CONTEXT:
+- ✓ = verified this run (trust). ? = from previous runs (verify before using).
+- When context conflicts with tool results, TRUST TOOL RESULTS.
+- Do not re-read files you already read or wrote this run.`

@@ -42,7 +42,6 @@ const COMPLEXITY_SIGNALS = {
     /end[- ]?to[- ]?end/i,
     /complete\s+(system|application|app|project)/i,
     /build\s+(a|an|the)\s+(complete|full|entire)/i,
-    /create\s+(a|an|the)\s+.*\s+with\s+.*\s+(backend|frontend|api)/i,
     /\bpos\b.*system/i,
     /\be-?commerce\b/i,
     /\bdashboard\b.*\b(crud|api|backend)\b/i,
@@ -51,7 +50,7 @@ const COMPLEXITY_SIGNALS = {
     /\bcrud\b/i,
     /\brest\s*api/i,
     /\bauthentication\b/i,
-    /\bmodule/i,
+    /\b(create|build|add|implement)\s+\w*\s*modules?\b/i,
     /multiple\s+(pages|components|endpoints|routes)/i,
     /\bintegrat/i,
     /\bdatabase\b/i,
@@ -107,6 +106,42 @@ const BACKEND_FEATURE_PATTERNS = [
 ]
 
 export function analyzeTaskComplexity(prompt: string): TaskAnalysis {
+  // Bug-fix / error-fix / debug prompts are always simple
+  const isErrorFix = /\b(error|bug|fix|issue|crash|broken|failed|cannot find|not found|not working|doesn't work|won't start|exception|stack trace|ERESOLVE|ENOENT|Cannot read|TypeError|SyntaxError)\b/i.test(prompt)
+  const isContinuation = /^\s*(continue|go on|keep going|next|proceed|finish)\s*$/i.test(prompt.trim())
+
+  // Landing pages / single-page frontends are SIMPLE — they have "sections", not separate pages/modules
+  const isSinglePageFrontend = /\b(landing\s*page|homepage|home\s*page|portfolio|single\s*page|one[- ]page)\b/i.test(prompt)
+  const isFrontendOnlyTask = /\b(frontend|react|vue|svelte|next\.?js|vite)\b/i.test(prompt) &&
+    !/\b(backend|server|api|nestjs|express|prisma|database|schema)\b/i.test(prompt)
+  const hasSectionDescriptions = /\b(section|hero|navbar|footer|cta|testimonial|feature|social\s*proof|how\s*it\s*works)\b/i.test(prompt)
+  const isLandingPage = isSinglePageFrontend || (isFrontendOnlyTask && hasSectionDescriptions)
+
+  if (isErrorFix || isContinuation) {
+    return {
+      complexity: "simple",
+      expectedModules: [],
+      expectedFrontendPages: [],
+      expectedBackendFeatures: [],
+      minExpectedFiles: 1,
+      minExpectedToolCalls: 1,
+      keywords: []
+    }
+  }
+
+  // Landing pages are simple — sections != modules/pages
+  if (isLandingPage) {
+    return {
+      complexity: "simple",
+      expectedModules: [],
+      expectedFrontendPages: [],
+      expectedBackendFeatures: [],
+      minExpectedFiles: 3,
+      minExpectedToolCalls: 5,
+      keywords: []
+    }
+  }
+
   // Check complexity level
   let complexity: TaskComplexity = "simple"
 
@@ -125,15 +160,15 @@ export function analyzeTaskComplexity(prompt: string): TaskAnalysis {
     }
   }
 
-  // Extract expected modules
-  const expectedModules = [...new Set(
+  // Extract expected modules — but NOT for frontend-only or landing page tasks
+  const expectedModules = (isFrontendOnlyTask || isLandingPage) ? [] : [...new Set(
     MODULE_PATTERNS
       .filter((p) => p.pattern.test(prompt))
       .map((p) => p.module)
   )]
 
-  // Extract frontend pages
-  const expectedFrontendPages = [...new Set(
+  // Extract frontend pages — but NOT for single-page/landing page tasks
+  const expectedFrontendPages = (isSinglePageFrontend || isLandingPage) ? [] : [...new Set(
     FRONTEND_PAGE_PATTERNS
       .filter((p) => p.pattern.test(prompt))
       .map((p) => p.page)
@@ -181,7 +216,7 @@ export function analyzeTaskComplexity(prompt: string): TaskAnalysis {
     .split(/\s+/)
     .filter((w) => w.length > 3)
 
-  return {
+  const analysis = {
     complexity,
     expectedModules,
     expectedFrontendPages,
@@ -190,6 +225,9 @@ export function analyzeTaskComplexity(prompt: string): TaskAnalysis {
     minExpectedToolCalls,
     keywords
   }
+
+  console.log(`[completion-guard] Task analysis: complexity=${complexity}, isLandingPage=${isLandingPage}, isFrontendOnly=${isFrontendOnlyTask}, modules=[${expectedModules}], pages=[${expectedFrontendPages}], minFiles=${minExpectedFiles}`)
+  return analysis
 }
 
 // ─── Completion Validation ───
@@ -227,9 +265,14 @@ export function validateCompletion(
       ? `\nExpected frontend pages: ${taskAnalysis.expectedFrontendPages.join(", ")}`
       : ""
 
+    const isFrontendOnly = taskAnalysis.expectedBackendFeatures.length === 0 && taskAnalysis.expectedModules.length === 0
+    const continueHint = isFrontendOnly
+      ? "Continue creating all frontend pages, components, and styles. Do NOT complete until every section from the original prompt is implemented."
+      : "Create ALL required modules, services, controllers, DTOs, frontend pages, and components. Do NOT complete until every feature from the original prompt is implemented."
+
     return {
       pass: false,
-      reason: `PREMATURE COMPLETION REJECTED. You created ${filesCreated.length} files but this task requires at least ${taskAnalysis.minExpectedFiles} files.${moduleHint}${pageHint}\n\nFiles created so far: ${filesCreated.join(", ") || "none"}\n\nYou MUST continue implementing. Create ALL backend modules, services, controllers, DTOs, frontend pages, and components. Do NOT complete until every feature from the original prompt is implemented with real code.`
+      reason: `PREMATURE COMPLETION REJECTED. You created ${filesCreated.length} files but this task requires at least ${taskAnalysis.minExpectedFiles} files.${moduleHint}${pageHint}\n\nFiles created so far: ${filesCreated.join(", ") || "none"}\n\n${continueHint}`
     }
   }
 

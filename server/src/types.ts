@@ -44,6 +44,10 @@ export interface ProviderContext {
   continueContext?: string
   projectMemory?: string[] | string
   projectKnowledge?: string
+  /** Managed working context from ContextManager — compressed, verified facts only */
+  workingContext?: string
+  /** Frontend design patterns injected when a frontend task is detected */
+  frontendPatterns?: string
 }
 
 export interface ContinueFrom {
@@ -74,6 +78,8 @@ export interface NormalizedResponse {
   taskStep?: string | null
   stepTransition?: { complete?: string; start?: string }
   pendingAction?: unknown
+  /** AI-generated task plan from first response */
+  taskPlan?: { title: string; steps: string[] } | null
 }
 
 // ─── Task ───

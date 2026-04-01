@@ -2,7 +2,7 @@ import readline from "node:readline"
 import chalk from "chalk"
 import { getAuthToken } from "../lib/sysbase.js"
 
-const SERVER_URL = process.env.SYS_SERVER_URL || "http://localhost:3000"
+const SERVER_URL = process.env.SYS_SERVER_URL || "http://localhost:4000"
 
 const BOX_W = 56
 const B = chalk.magenta

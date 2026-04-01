@@ -30,10 +30,76 @@ export async function startUi(): Promise<void> {
 
   rl.prompt()
 
-  rl.on("line", async (line) => {
+  // ─── Robust multi-line paste handling ───
+  //
+  // Problem: readline fires "line" per newline. When pasting multi-line text,
+  // only the first line gets processed and the rest is dropped (working=true).
+  //
+  // Solution: Two-layer paste detection:
+  //
+  // 1. Bracket paste mode (modern terminals): stdin sends \x1b[200~ before paste
+  //    and \x1b[201~ after. We detect these to know exactly when a paste starts/ends.
+  //
+  // 2. Fallback debounce: Buffer all lines and wait 150ms of silence before processing.
+  //    150ms is long enough to catch even slow terminal paste delivery, but short enough
+  //    that a human pressing Enter won't notice the delay.
+
+  let lineBuffer: string[] = []
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null
+  let isPasting = false
+
+  // Enable bracket paste mode — tells the terminal to wrap pastes in escape sequences
+  if (process.stdin.isTTY) {
+    process.stdout.write("\x1b[?2004h")
+  }
+
+  // Listen on raw stdin data for bracket paste escape sequences
+  // This fires BEFORE readline processes the data into "line" events
+  process.stdin.on("data", (chunk: Buffer) => {
+    const str = chunk.toString()
+    if (str.includes("\x1b[200~")) {
+      isPasting = true
+      // Clear any pending debounce — we'll wait for paste end instead
+      if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null }
+    }
+    if (str.includes("\x1b[201~")) {
+      isPasting = false
+      // Paste ended — flush after a tiny delay to let final "line" events arrive
+      if (debounceTimer) clearTimeout(debounceTimer)
+      debounceTimer = setTimeout(flushLineBuffer, 30)
+    }
+  })
+
+  const PASTE_DEBOUNCE_MS = 150  // fallback for terminals without bracket paste
+
+  function flushLineBuffer(): void {
+    debounceTimer = null
+    const fullInput = lineBuffer.join("\n").trim()
+    lineBuffer = []
+    if (!fullInput) {
+      rl.prompt()
+      return
+    }
+    processInput(fullInput)
+  }
+
+  rl.on("line", (line) => {
     if (working) return
 
-    const parsed = parseUiLine(line)
+    lineBuffer.push(line)
+
+    if (isPasting) {
+      // Inside a bracket paste — don't flush yet, wait for paste end
+      return
+    }
+
+    // Debounce: wait for more lines (handles terminals without bracket paste)
+    if (debounceTimer) clearTimeout(debounceTimer)
+    debounceTimer = setTimeout(flushLineBuffer, PASTE_DEBOUNCE_MS)
+  })
+
+  async function processInput(fullInput: string): Promise<void> {
+    const parsed = parseUiLine(fullInput)
 
     if (!parsed) {
       rl.prompt()
@@ -41,6 +107,8 @@ export async function startUi(): Promise<void> {
     }
 
     if (parsed.mode === "exit") {
+      // Disable bracket paste mode before exiting
+      if (process.stdin.isTTY) process.stdout.write("\x1b[?2004l")
       console.log(chalk.dim("  bye"))
       rl.close()
       return
@@ -132,9 +200,11 @@ export async function startUi(): Promise<void> {
     console.log("")
     rl.resume()
     rl.prompt()
-  })
+  }
 
   rl.on("close", () => {
+    // Disable bracket paste mode on exit
+    if (process.stdin.isTTY) process.stdout.write("\x1b[?2004l")
     process.exit(0)
   })
 }

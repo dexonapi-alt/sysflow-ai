@@ -18,9 +18,13 @@ import {
   webSearchTool,
   recoverFromCommandError,
   searchForCommandFix,
+  setBatchWritePaths,
+  clearBatchWritePaths,
   INTERACTIVE_PATTERNS
 } from "./tools.js"
 import { runVerification } from "./verifier.js"
+import { createSnapshot, cleanupSnapshot, rollback, getSnapshot, detectGit } from "./git.js"
+import { lintFile, lintFiles, displayLintErrors, resetTscCache } from "./lint.js"
 
 interface ToolResponse {
   tool: string
@@ -37,7 +41,7 @@ interface ToolCallEntry {
 
 // ─── Local tool execution (no server call) ───
 
-export async function executeToolLocally(tool: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+export async function executeToolLocally(tool: string, args: Record<string, unknown>, runId?: string): Promise<Record<string, unknown>> {
   // ─── Arg validation: catch undefined/null args before they cause cryptic errors ───
   if (!args) args = {}
 
@@ -52,8 +56,11 @@ export async function executeToolLocally(tool: string, args: Record<string, unkn
   if (tool === "write_file" && (!args.path || !args.content)) {
     return { error: `write_file requires "path" and "content" args. Got path=${args.path}, content=${args.content ? "present" : "missing"}`, success: false }
   }
-  if (tool === "edit_file" && (!args.path || !args.patch)) {
-    return { error: `edit_file requires "path" and "patch" args. Got path=${args.path}, patch=${args.patch ? "present" : "missing"}`, success: false }
+  if (tool === "edit_file" && !args.path) {
+    return { error: `edit_file requires "path" arg. Got path=${args.path}`, success: false }
+  }
+  if (tool === "edit_file" && !args.search && !args.line_start && !args.insert_at && !args.patch && !args.content) {
+    return { error: `edit_file requires one of: search+replace, line_start+content, insert_at+content, patch, or content. None provided.`, success: false }
   }
 
   switch (tool) {
@@ -73,16 +80,20 @@ export async function executeToolLocally(tool: string, args: Record<string, unkn
     }
 
     case "read_file": {
-      const content = await readFileTool(args.path as string)
-      return { path: args.path, content }
+      const result = await readFileTool(
+        args.path as string,
+        args.offset as number | undefined,
+        args.limit as number | undefined
+      )
+      return { path: args.path, content: result.content, totalLines: result.totalLines, truncated: result.truncated, startLine: result.startLine }
     }
 
     case "batch_read": {
-      const results: Array<{ path: string; content?: string; error?: string; success: boolean }> = []
+      const results: Array<{ path: string; content?: string; totalLines?: number; truncated?: boolean; error?: string; success: boolean }> = []
       for (const filePath of args.paths as string[]) {
         try {
-          const content = await readFileTool(filePath)
-          results.push({ path: filePath, content, success: true })
+          const result = await readFileTool(filePath)
+          results.push({ path: filePath, content: result.content, totalLines: result.totalLines, truncated: result.truncated, success: true })
         } catch (err) {
           results.push({ path: filePath, error: (err as Error).message, success: false })
         }
@@ -91,13 +102,53 @@ export async function executeToolLocally(tool: string, args: Record<string, unkn
     }
 
     case "write_file": {
-      await writeFileTool(args.path as string, args.content as string)
-      return { path: args.path, success: true }
+      const writeResult = await writeFileTool(args.path as string, args.content as string, runId)
+      const writeReturn: Record<string, unknown> = {
+        path: args.path,
+        success: true,
+        diffAdded: writeResult.diff?.added || 0,
+        diffRemoved: writeResult.diff?.removed || 0
+      }
+
+      // Per-file lint check
+      const writeLint = await lintFile(args.path as string, process.cwd())
+      if (!writeLint.passed) {
+        const lintMessages = displayLintErrors([writeLint])
+        writeReturn.lint = { passed: false, errors: lintMessages.slice(0, 10) }
+      }
+
+      return writeReturn
     }
 
     case "edit_file": {
-      await editFileTool(args.path as string, args.patch as string)
-      return { path: args.path, success: true }
+      const editResult = await editFileTool({
+        path: args.path as string,
+        search: args.search as string | undefined,
+        replace: args.replace as string | undefined,
+        line_start: args.line_start as number | undefined,
+        line_end: args.line_end as number | undefined,
+        insert_at: args.insert_at as number | undefined,
+        content: args.content as string | undefined,
+        patch: args.patch as string | undefined,
+      }, runId)
+      if (!editResult.success) {
+        return { path: args.path, success: false, error: editResult.error }
+      }
+      const editReturn: Record<string, unknown> = {
+        path: args.path,
+        success: true,
+        diffAdded: editResult.diff?.added || 0,
+        diffRemoved: editResult.diff?.removed || 0
+      }
+
+      // Per-file lint check
+      const editLint = await lintFile(args.path as string, process.cwd())
+      if (!editLint.passed) {
+        const lintMessages = displayLintErrors([editLint])
+        editReturn.lint = { passed: false, errors: lintMessages.slice(0, 10) }
+      }
+
+      return editReturn
     }
 
     case "move_file": {
@@ -124,7 +175,10 @@ export async function executeToolLocally(tool: string, args: Record<string, unkn
     }
 
     case "run_command": {
-      const cmd = args.command as string
+      const cmd = (args.command as string) || ""
+      if (!cmd) {
+        return { error: `run_command requires a "command" argument but received undefined.`, success: false }
+      }
       const cmdCwd = (args.cwd as string) || process.cwd()
       const output = await runCommandTool(cmd, cmdCwd)
 
@@ -172,8 +226,19 @@ export async function executeToolLocally(tool: string, args: Record<string, unkn
       return { files: results, totalWritten: results.filter((r) => r.success).length }
     }
 
-    default:
-      throw new Error(`Unknown tool: ${tool}`)
+    default: {
+      const KNOWN_TOOLS = [
+        "list_directory", "read_file", "batch_read", "write_file",
+        "edit_file", "create_directory", "search_code", "search_files",
+        "run_command", "move_file", "delete_file", "web_search",
+        "file_exists", "batch_write"
+      ]
+      return {
+        error: `Unknown tool: "${tool}". This tool does not exist. Valid tools are: ${KNOWN_TOOLS.join(", ")}. Use one of these instead.`,
+        success: false,
+        rejectedTool: tool
+      }
+    }
   }
 }
 
@@ -184,7 +249,7 @@ export async function executeTool(
   onPhase?: (label: string) => void
 ): Promise<Record<string, unknown>> {
   const { tool, args, runId } = response
-  const result = await executeToolLocally(tool, args)
+  const result = await executeToolLocally(tool, args, runId)
   const payload = { type: "tool_result", runId, tool, result }
 
   let serverResponse: Record<string, unknown>
@@ -226,16 +291,38 @@ export async function executeToolsBatch(
   const parallelTools = tools.filter((tc) => tc.tool !== "run_command")
   const commandTools = tools.filter((tc) => tc.tool === "run_command")
 
+  // ─── Git snapshot: create before write/edit batches (only if git repo with commits) ───
+  const hasWrites = tools.some((tc) => tc.tool === "write_file" || tc.tool === "edit_file" || tc.tool === "delete_file")
+  if (hasWrites) {
+    try {
+      const snap = await createSnapshot(process.cwd(), runId)
+      if (snap) {
+        console.log(chalk.hex("#5DADE2")(`    ⊟ snapshot: ${snap.strategy === "tag" ? snap.ref.slice(0, 8) : "stashed"} (${snap.dirtyFiles.length} dirty)`))
+      }
+    } catch {
+      // Snapshot failure is non-blocking
+    }
+  }
+
   const allResults: Array<{ id: string; tool: string; result: Record<string, unknown> }> = []
 
   // Execute non-command tools in parallel (read, write, mkdir, search, etc.)
   if (parallelTools.length > 0) {
+    // Tell import sanitizer about all files being written in this batch
+    const writePaths = parallelTools
+      .filter(tc => tc.tool === "write_file" || tc.tool === "edit_file")
+      .map(tc => (tc.args.path as string) || "")
+      .filter(Boolean)
+    if (writePaths.length > 0) setBatchWritePaths(writePaths)
+
     const settled = await Promise.allSettled(
       parallelTools.map(async (tc) => {
-        const result = await executeToolLocally(tc.tool, tc.args)
+        const result = await executeToolLocally(tc.tool, tc.args, runId)
         return { id: tc.id, tool: tc.tool, result }
       })
     )
+
+    if (writePaths.length > 0) clearBatchWritePaths()
 
     for (let i = 0; i < settled.length; i++) {
       const r = settled[i]
@@ -245,7 +332,7 @@ export async function executeToolsBatch(
         allResults.push({
           id: parallelTools[i].id,
           tool: parallelTools[i].tool,
-          result: { error: (r.reason as Error).message, success: false }
+          result: { error: (r.reason as Error).message, success: false, path: parallelTools[i].args.path }
         })
       }
     }
@@ -260,7 +347,7 @@ export async function executeToolsBatch(
 
     while (!result) {
       try {
-        const r = await executeToolLocally(tc.tool, tc.args)
+        const r = await executeToolLocally(tc.tool, tc.args, runId)
         // Check if the command actually failed (non-zero exit)
         if (r.stderr && !r.interactive) {
           throw new Error(r.stderr as string)
@@ -371,6 +458,36 @@ export async function executeToolsBatch(
     })
     .filter(Boolean)
 
+  // ─── Lint check: run on ALL written files (fast per-file + optional tsc) ───
+  if (writtenFiles.length > 0) {
+    try {
+      resetTscCache() // Force fresh tsc check for batches
+      const lintResults = await lintFiles(writtenFiles, process.cwd())
+      const failedLints = lintResults.filter(r => !r.passed)
+
+      if (failedLints.length > 0) {
+        console.log(chalk.hex("#E74C3C")(`    ── lint: ${failedLints.flatMap(r => r.errors).length} error(s) in ${failedLints.length} file(s) ──`))
+        const lintMessages = displayLintErrors(failedLints)
+
+        // Append lint result so the AI sees the errors and can fix them
+        allResults.push({
+          id: `lint_${allResults.length}`,
+          tool: "_lint",
+          result: {
+            passed: false,
+            errors: lintMessages.slice(0, 20),
+            fileCount: failedLints.length,
+            success: false
+          }
+        })
+      } else {
+        console.log(chalk.hex("#58D68D")(`    ── lint: ${writtenFiles.length} file(s) OK ──`))
+      }
+    } catch {
+      // Lint failed to run — don't block the flow
+    }
+  }
+
   if (writtenFiles.length >= 3) {
     // Run verification silently — only report if errors found
     try {
@@ -388,10 +505,44 @@ export async function executeToolsBatch(
             success: false
           }
         })
+
+        // ─── Offer rollback if git snapshot exists and verification failed badly ───
+        const snap = getSnapshot(runId)
+        const errorCount = report.checks.flatMap((c) => c.errors).length
+        if (snap && errorCount >= 5) {
+          console.log("")
+          console.log(chalk.hex("#E74C3C")(`    ⚠ Verification found ${errorCount} errors`))
+          console.log(chalk.hex("#7F8C8D")(`    Snapshot available: ${snap.id.slice(0, 20)}`))
+          console.log(chalk.hex("#7F8C8D")(`    Press 'r' to rollback, or Enter to let AI fix`))
+          const answer = await askPrompt("    > ")
+          if (answer.toLowerCase() === "r" || answer.toLowerCase() === "rollback") {
+            const success = await rollback(process.cwd(), runId)
+            if (success) {
+              console.log(chalk.hex("#58D68D")("    ✓ Rolled back to snapshot"))
+              allResults.push({
+                id: `rollback_${allResults.length}`,
+                tool: "_rollback",
+                result: {
+                  rolledBack: true,
+                  message: "User rolled back changes due to verification errors. All writes from this batch were reverted. Try a different approach.",
+                  success: false
+                }
+              })
+            } else {
+              console.log(chalk.hex("#E74C3C")("    ✗ Rollback failed — continuing normally"))
+            }
+          }
+        }
+      } else {
+        // Verification passed — clean up the snapshot
+        cleanupSnapshot(process.cwd(), runId).catch(() => {})
       }
     } catch {
       // Verification failed to run — don't block the flow
     }
+  } else if (hasWrites) {
+    // Small batch, no verification — clean up snapshot silently
+    cleanupSnapshot(process.cwd(), runId).catch(() => {})
   }
 
   const payload = {

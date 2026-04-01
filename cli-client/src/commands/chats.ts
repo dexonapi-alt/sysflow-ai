@@ -3,7 +3,7 @@ import readline from "node:readline"
 import path from "node:path"
 import { getAuthToken, saveActiveChat, getActiveChatInfo, clearActiveChat } from "../lib/sysbase.js"
 
-const SERVER_URL = process.env.SYS_SERVER_URL || "http://localhost:3000"
+const SERVER_URL = process.env.SYS_SERVER_URL || "http://localhost:4000"
 
 async function apiGet(endpoint: string): Promise<Record<string, unknown>> {
   const token = await getAuthToken()

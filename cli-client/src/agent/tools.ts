@@ -115,20 +115,411 @@ export async function createDirectoryTool(dirPath: string): Promise<boolean> {
   return true
 }
 
-export async function readFileTool(filePath: string): Promise<string> {
-  return fs.readFile(filePath, "utf8")
+export interface ReadFileResult {
+  content: string
+  totalLines: number
+  truncated: boolean
+  startLine: number
 }
 
-export async function writeFileTool(filePath: string, content: string): Promise<boolean> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true })
-  await fs.writeFile(filePath, content, "utf8")
-  return true
+const READ_FILE_AUTO_LIMIT = 300   // lines shown when no offset/limit given
+const READ_FILE_THRESHOLD = 500    // auto-truncate files larger than this
+
+export async function readFileTool(filePath: string, offset?: number, limit?: number): Promise<ReadFileResult> {
+  const raw = await fs.readFile(filePath, "utf8")
+  const allLines = raw.split("\n")
+  const totalLines = allLines.length
+
+  let startLine: number  // 1-indexed
+  let selectedLines: string[]
+  let truncated = false
+
+  if (offset != null || limit != null) {
+    // Explicit range requested
+    startLine = Math.max(1, offset ?? 1)
+    const count = limit ?? READ_FILE_AUTO_LIMIT
+    const startIdx = startLine - 1
+    selectedLines = allLines.slice(startIdx, startIdx + count)
+    truncated = (startIdx + count) < totalLines
+  } else if (totalLines > READ_FILE_THRESHOLD) {
+    // Large file — auto-truncate
+    startLine = 1
+    selectedLines = allLines.slice(0, READ_FILE_AUTO_LIMIT)
+    truncated = true
+  } else {
+    // Small file — return everything
+    startLine = 1
+    selectedLines = allLines
+    truncated = false
+  }
+
+  // Format with line numbers: "  1 | code here"
+  const maxLineNum = startLine + selectedLines.length - 1
+  const padWidth = String(maxLineNum).length
+  const formatted = selectedLines
+    .map((line, i) => `${String(startLine + i).padStart(padWidth)} | ${line}`)
+    .join("\n")
+
+  const content = truncated
+    ? `${formatted}\n\n... (${totalLines - (startLine - 1 + selectedLines.length)} more lines. ${totalLines} total. Use offset/limit to read more.)`
+    : formatted
+
+  return { content, totalLines, truncated, startLine }
 }
 
-export async function editFileTool(filePath: string, patch: string): Promise<boolean> {
+export async function writeFileTool(filePath: string, content: string, runId?: string): Promise<{ success: boolean; diff?: import("./diff.js").DiffResult; pkgProtected?: boolean }> {
   await fs.mkdir(path.dirname(filePath), { recursive: true })
-  await fs.writeFile(filePath, patch, "utf8")
-  return true
+
+  // Read old content for diff (may not exist)
+  let oldContent: string | null = null
+  try { oldContent = await fs.readFile(filePath, "utf8") } catch { /* new file */ }
+
+  // ─── Package.json protection: prevent AI from corrupting scaffolded deps ───
+  let finalContent = content
+  let pkgProtected = false
+  if (path.basename(filePath) === "package.json" && oldContent) {
+    const merged = protectPackageJson(oldContent, content)
+    if (merged) {
+      finalContent = merged.content
+      pkgProtected = merged.protected
+    }
+  }
+
+  // ─── Import sanitizer: strip relative imports to non-existent files ───
+  const sanitized = await sanitizeImports(filePath, finalContent)
+  if (sanitized.removed.length > 0) {
+    finalContent = sanitized.content
+  }
+
+  await fs.writeFile(filePath, finalContent, "utf8")
+
+  const { computeDiff, storeDiff } = await import("./diff.js")
+  const diff = computeDiff(oldContent, finalContent)
+  if (runId && diff.changed) {
+    storeDiff(runId, filePath, diff, oldContent, finalContent)
+  }
+
+  return { success: true, diff: diff.changed ? diff : undefined, pkgProtected }
+}
+
+/**
+ * Edit file with multiple modes:
+ *
+ * Mode 1 — Search & Replace (preferred for targeted edits):
+ *   { path, search: "old text", replace: "new text" }
+ *   Finds exact `search` text in file and replaces with `replace`.
+ *   `replace` can be "" to delete the matched text.
+ *
+ * Mode 2 — Line-level edit:
+ *   { path, line_start: 5, line_end: 7, content: "replacement lines" }
+ *   Replaces lines 5-7 (1-indexed, inclusive) with `content`.
+ *   If `content` is "" or omitted, deletes the lines.
+ *
+ * Mode 3 — Insert at line:
+ *   { path, insert_at: 10, content: "new lines" }
+ *   Inserts `content` before line 10 (1-indexed).
+ *
+ * Mode 4 — Full replacement (legacy, still supported):
+ *   { path, patch: "entire file content" }
+ */
+export interface EditFileArgs {
+  path: string
+  search?: string
+  replace?: string
+  line_start?: number
+  line_end?: number
+  insert_at?: number
+  content?: string
+  patch?: string
+}
+
+export async function editFileTool(
+  args: EditFileArgs,
+  runId?: string
+): Promise<{ success: boolean; diff?: import("./diff.js").DiffResult; pkgProtected?: boolean; error?: string }> {
+  const filePath = args.path
+  await fs.mkdir(path.dirname(filePath), { recursive: true })
+
+  let oldContent: string | null = null
+  try { oldContent = await fs.readFile(filePath, "utf8") } catch { /* new file */ }
+
+  let finalContent: string
+  let pkgProtected = false
+
+  // ─── Mode 1: Search & Replace ───
+  if (args.search !== undefined && args.search !== null) {
+    if (!oldContent) {
+      return { success: false, error: `Cannot search/replace in "${filePath}" — file does not exist. Use write_file to create new files.` }
+    }
+    const searchStr = args.search
+    const replaceStr = args.replace ?? ""
+
+    if (!oldContent.includes(searchStr)) {
+      // Fuzzy match: try trimmed lines comparison for whitespace tolerance
+      const fuzzyResult = fuzzySearchReplace(oldContent, searchStr, replaceStr)
+      if (fuzzyResult) {
+        finalContent = fuzzyResult
+        console.log(`  [edit] search/replace (fuzzy match) in ${filePath}`)
+      } else {
+        return {
+          success: false,
+          error: `Search text not found in "${filePath}". The exact text:\n---\n${searchStr.slice(0, 200)}\n---\nwas not found. Read the file first to see current content, then retry with the exact text.`
+        }
+      }
+    } else {
+      finalContent = oldContent.replace(searchStr, replaceStr)
+      console.log(`  [edit] search/replace in ${filePath}`)
+    }
+  }
+  // ─── Mode 2: Line-level edit ───
+  else if (args.line_start !== undefined && args.line_start !== null) {
+    if (!oldContent) {
+      return { success: false, error: `Cannot edit lines in "${filePath}" — file does not exist. Use write_file to create new files.` }
+    }
+    const lines = oldContent.split("\n")
+    const start = Math.max(1, args.line_start) - 1 // Convert 1-indexed to 0-indexed
+    const end = Math.min(lines.length, args.line_end ?? args.line_start) // inclusive
+    const replacement = args.content ?? ""
+    const newLines = replacement === "" ? [] : replacement.split("\n")
+
+    lines.splice(start, end - start, ...newLines)
+    finalContent = lines.join("\n")
+    console.log(`  [edit] line ${args.line_start}-${args.line_end ?? args.line_start} in ${filePath}`)
+  }
+  // ─── Mode 3: Insert at line ───
+  else if (args.insert_at !== undefined && args.insert_at !== null) {
+    if (!oldContent) {
+      return { success: false, error: `Cannot insert into "${filePath}" — file does not exist. Use write_file to create new files.` }
+    }
+    const lines = oldContent.split("\n")
+    const insertIdx = Math.max(0, Math.min(lines.length, (args.insert_at ?? 1) - 1))
+    const newLines = (args.content ?? "").split("\n")
+
+    lines.splice(insertIdx, 0, ...newLines)
+    finalContent = lines.join("\n")
+    console.log(`  [edit] insert at line ${args.insert_at} in ${filePath}`)
+  }
+  // ─── Mode 4: Full replacement (legacy) ───
+  else if (args.patch) {
+    finalContent = args.patch
+    if (path.basename(filePath) === "package.json" && oldContent) {
+      const merged = protectPackageJson(oldContent, args.patch)
+      if (merged) {
+        finalContent = merged.content
+        pkgProtected = merged.protected
+      }
+    }
+  }
+  // ─── Mode fallback: content field (some models use this) ───
+  else if (args.content) {
+    finalContent = args.content
+    if (path.basename(filePath) === "package.json" && oldContent) {
+      const merged = protectPackageJson(oldContent, args.content)
+      if (merged) {
+        finalContent = merged.content
+        pkgProtected = merged.protected
+      }
+    }
+  }
+  else {
+    return { success: false, error: `edit_file requires one of: search+replace, line_start, insert_at, patch, or content. None provided.` }
+  }
+
+  // ─── Import sanitizer: strip relative imports to non-existent files ───
+  const sanitized = await sanitizeImports(filePath, finalContent)
+  if (sanitized.removed.length > 0) {
+    finalContent = sanitized.content
+  }
+
+  await fs.writeFile(filePath, finalContent, "utf8")
+
+  const { computeDiff, storeDiff } = await import("./diff.js")
+  const diff = computeDiff(oldContent, finalContent)
+  if (runId && diff.changed) {
+    storeDiff(runId, filePath, diff, oldContent, finalContent)
+  }
+
+  return { success: true, diff: diff.changed ? diff : undefined, pkgProtected }
+}
+
+/**
+ * Fuzzy search/replace: tolerates whitespace differences.
+ * Compares trimmed lines of the search string against the file content.
+ */
+function fuzzySearchReplace(content: string, search: string, replace: string): string | null {
+  const searchLines = search.split("\n").map(l => l.trim()).filter(Boolean)
+  if (searchLines.length === 0) return null
+
+  const contentLines = content.split("\n")
+
+  for (let i = 0; i <= contentLines.length - searchLines.length; i++) {
+    let match = true
+    for (let j = 0; j < searchLines.length; j++) {
+      if (contentLines[i + j].trim() !== searchLines[j]) {
+        match = false
+        break
+      }
+    }
+    if (match) {
+      const replaceLines = replace === "" ? [] : replace.split("\n")
+      const result = [
+        ...contentLines.slice(0, i),
+        ...replaceLines,
+        ...contentLines.slice(i + searchLines.length)
+      ]
+      return result.join("\n")
+    }
+  }
+
+  return null
+}
+
+// ─── Package.json Smart Merge ───
+// Prevents the AI from corrupting dependency versions set by scaffolding tools.
+// When the AI writes to an existing package.json, this function:
+// 1. Preserves ALL existing dependency versions (the scaffolded ones are correct)
+// 2. Allows NEW dependencies the AI adds (but strips version — user installs them)
+// 3. Merges scripts and other non-dep fields from the AI's version
+// 4. Keeps the existing structure intact
+
+const DEP_FIELDS = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] as const
+
+function protectPackageJson(existingRaw: string, newRaw: string): { content: string; protected: boolean } | null {
+  let existing: Record<string, unknown>
+  let incoming: Record<string, unknown>
+
+  try { existing = JSON.parse(existingRaw) } catch { return null }
+  try { incoming = JSON.parse(newRaw) } catch { return null }
+
+  let wasProtected = false
+  const merged = { ...existing }
+
+  // Merge top-level non-dep fields (name, version, scripts, etc.)
+  for (const key of Object.keys(incoming)) {
+    if ((DEP_FIELDS as readonly string[]).includes(key)) continue
+    // For scripts: merge new scripts into existing, don't replace
+    if (key === "scripts" && existing.scripts && incoming.scripts) {
+      merged.scripts = { ...(existing.scripts as Record<string, unknown>), ...(incoming.scripts as Record<string, unknown>) }
+    } else if (!(key in existing)) {
+      // Only add fields that don't exist yet (don't overwrite name, version, etc.)
+      merged[key] = incoming[key]
+    }
+  }
+
+  // Protect dependency fields: keep existing versions, only add genuinely new packages
+  for (const field of DEP_FIELDS) {
+    const existingDeps = (existing[field] || {}) as Record<string, string>
+    const incomingDeps = (incoming[field] || {}) as Record<string, string>
+
+    if (!incomingDeps || Object.keys(incomingDeps).length === 0) continue
+
+    const protectedDeps = { ...existingDeps }
+    let fieldModified = false
+
+    for (const [pkg, version] of Object.entries(incomingDeps)) {
+      if (pkg in existingDeps) {
+        // Package exists — KEEP the existing version, ignore AI's version
+        if (existingDeps[pkg] !== version) {
+          wasProtected = true
+          console.log(`  [pkg-guard] Blocked version change: ${pkg} "${existingDeps[pkg]}" → "${version}" (keeping original)`)
+        }
+      } else {
+        // New package — add it with "latest" instead of AI's hallucinated version
+        protectedDeps[pkg] = "latest"
+        fieldModified = true
+        console.log(`  [pkg-guard] New dependency: ${pkg} (set to "latest" — user should install)`)
+      }
+    }
+
+    if (fieldModified || wasProtected) {
+      merged[field] = protectedDeps
+    }
+  }
+
+  if (wasProtected) {
+    console.log(`  [pkg-guard] Protected package.json — preserved scaffolded dependency versions`)
+  }
+
+  return { content: JSON.stringify(merged, null, 2) + "\n", protected: wasProtected }
+}
+
+// ─── Import Sanitizer: strip bad relative imports on write ───
+
+const CODE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs"])
+
+// Batch-aware: files being written in the same batch should not be stripped
+let batchWritePaths: Set<string> = new Set()
+
+export function setBatchWritePaths(paths: string[]): void {
+  batchWritePaths = new Set(paths.map(p => path.resolve(p)))
+}
+
+export function clearBatchWritePaths(): void {
+  batchWritePaths = new Set()
+}
+
+async function sanitizeImports(filePath: string, content: string): Promise<{ content: string; removed: string[] }> {
+  const ext = path.extname(filePath).toLowerCase()
+  if (!CODE_EXTENSIONS.has(ext)) return { content, removed: [] }
+
+  const dir = path.dirname(filePath)
+  const lines = content.split("\n")
+  const cleaned: string[] = []
+  const removed: string[] = []
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    // Match: import ... from './something' or import './something'
+    const importMatch = trimmed.match(/^import\s+(?:.*?\s+from\s+)?['"](\.[^'"]+)['"]/)
+    if (!importMatch) {
+      cleaned.push(line)
+      continue
+    }
+
+    const importPath = importMatch[1]
+    // Strip Vite/bundler query params (?url, ?raw, ?inline, ?worker, etc.) before resolving
+    const cleanImportPath = importPath.split("?")[0]
+    const resolved = path.resolve(dir, cleanImportPath)
+
+    // Skip if being created in the same batch
+    const resolvedVariants = [
+      resolved,
+      resolved + ".ts", resolved + ".tsx",
+      resolved + ".js", resolved + ".jsx",
+    ]
+    if (resolvedVariants.some(v => batchWritePaths.has(v))) {
+      cleaned.push(line)
+      continue
+    }
+
+    // Check if the file exists (try with common extensions)
+    const candidates = [
+      resolved,
+      resolved + ".ts", resolved + ".tsx",
+      resolved + ".js", resolved + ".jsx",
+      path.join(resolved, "index.ts"),
+      path.join(resolved, "index.tsx"),
+      path.join(resolved, "index.js"),
+    ]
+
+    let exists = false
+    for (const candidate of candidates) {
+      try {
+        await fs.access(candidate)
+        exists = true
+        break
+      } catch { /* doesn't exist */ }
+    }
+
+    if (exists) {
+      cleaned.push(line)
+    } else {
+      removed.push(importPath)
+      console.log(`  [import-sanitizer] Stripped bad import "${importPath}" — file not found`)
+    }
+  }
+
+  return { content: cleaned.join("\n"), removed }
 }
 
 export async function moveFileTool(from: string, to: string): Promise<boolean> {
@@ -239,11 +630,29 @@ interface CommandResult {
   verified?: boolean
 }
 
+/**
+ * Pre-process commands before execution to prevent known issues.
+ * - create-vite: add --no-interactive to prevent auto install+dev-server start
+ */
+function preprocessCommand(cmd: string): string {
+  // create-vite without --no-interactive will prompt to install AND start dev server,
+  // which hangs the CLI forever. Force non-interactive scaffolding.
+  if (/^npx\s+(--yes\s+)?create-vite\b/.test(cmd) && !cmd.includes("--no-interactive")) {
+    // Insert --no-interactive right after the package name (before other flags)
+    return cmd.replace(/(create-vite(?:@\S+)?)/, "$1 --no-interactive")
+  }
+  return cmd
+}
+
 export async function runCommandTool(command: string, cwd: string = process.cwd()): Promise<CommandResult> {
-  const trimmed = command.trim()
+  if (!command) {
+    return { stdout: "", stderr: "No command provided", message: "run_command requires a command string." }
+  }
+  const trimmed = preprocessCommand(command.trim())
   const isLongRunning = LONG_RUNNING_PATTERNS.some((p) => p.test(trimmed))
   const isSlow = SLOW_COMMAND_PATTERNS.some((p) => p.test(trimmed))
-  const isInteractive = INTERACTIVE_PATTERNS.some((p) => p.test(trimmed))
+  // Commands with --no-interactive don't need terminal passthrough
+  const isInteractive = INTERACTIVE_PATTERNS.some((p) => p.test(trimmed)) && !trimmed.includes("--no-interactive")
 
   if (isLongRunning) {
     return {
@@ -263,7 +672,8 @@ export async function runCommandTool(command: string, cwd: string = process.cwd(
     }
   }
 
-  // Interactive commands: full terminal passthrough with activity-aware timeout
+  // Interactive commands: stdin inherited for prompts, stdout/stderr piped for monitoring.
+  // We forward output to the terminal AND watch for dev server startup (to auto-kill).
   if (isInteractive) {
     return new Promise((resolve, reject) => {
       const isWindows = process.platform === "win32"
@@ -272,71 +682,61 @@ export async function runCommandTool(command: string, cwd: string = process.cwd(
 
       console.log("") // blank line before interactive output
 
-      // Use pipe for stdout/stderr to track activity, but mirror to console
       const child = spawn(shell, shellArgs, {
         cwd,
         stdio: ["inherit", "pipe", "pipe"],
         env: { ...process.env, FORCE_COLOR: "1" }
       })
 
-      let lastActivityTime = Date.now()
       let resolved = false
-      let capturedStdout = ""
-      let capturedStderr = ""
-
-      // Mirror output to console AND track activity
-      child.stdout?.on("data", (d: Buffer) => {
-        lastActivityTime = Date.now()
-        const text = d.toString()
-        capturedStdout += text
-        process.stdout.write(text)
-      })
-      child.stderr?.on("data", (d: Buffer) => {
-        lastActivityTime = Date.now()
-        const text = d.toString()
-        capturedStderr += text
-        process.stderr.write(text)
-      })
-
-      const ACTIVITY_CHECK_INTERVAL = 60_000  // check every 60s
-      const IDLE_KILL_THRESHOLD = 180_000      // kill if no output for 3 min
-      const MAX_TOTAL_TIME = 900_000           // hard cap at 15 min
-
+      let stdout = ""
+      const MAX_TOTAL_TIME = 600_000 // hard cap at 10 min
       const startTime = Date.now()
 
-      // Activity monitor: check every 60s if command is still producing output
-      const activityChecker = setInterval(() => {
-        if (resolved) { clearInterval(activityChecker); return }
+      // Dev server patterns: if we see these in output, the scaffolder started a server
+      const DEV_SERVER_PATTERNS = [
+        /ready in \d+/i,
+        /Local:\s+http/i,
+        /listening on\s+(port\s+)?\d+/i,
+        /started server on/i,
+        /compiled\s+(client\s+)?successfully/i,
+        /VITE v[\d.]+ ready/i,
+        /webpack.*compiled/i,
+        /localhost:\d{4}/,
+      ]
 
-        const elapsed = Date.now() - startTime
-        const idleTime = Date.now() - lastActivityTime
-        const elapsedMin = Math.round(elapsed / 60_000)
-        const idleSec = Math.round(idleTime / 1000)
+      // Forward child output to terminal AND capture for monitoring
+      child.stdout?.on("data", (d: Buffer) => {
+        const text = d.toString()
+        stdout += text
+        process.stdout.write(d)
 
-        // Hard cap
-        if (elapsed > MAX_TOTAL_TIME) {
-          console.log(`\n  (command exceeded 15 minutes — force stopping)`)
+        if (DEV_SERVER_PATTERNS.some(p => p.test(text))) {
+          // Dev server detected — give it a moment to finish output, then kill
+          setTimeout(() => {
+            if (!resolved) {
+              console.log(`\n  (dev server detected — stopping process to continue task)`)
+              killChild("Dev server started inside scaffolder. The project was scaffolded successfully. Do NOT run dev servers — tell the user to start it manually.")
+            }
+          }, 3000)
+        }
+      })
+      child.stderr?.on("data", (d: Buffer) => {
+        process.stderr.write(d)
+      })
+
+      const timeoutChecker = setInterval(() => {
+        if (resolved) { clearInterval(timeoutChecker); return }
+        if (Date.now() - startTime > MAX_TOTAL_TIME) {
+          console.log(`\n  (command exceeded 10 minutes — force stopping)`)
           killChild()
-          return
         }
+      }, 60_000)
 
-        // Idle check — no output for 3 minutes
-        if (idleTime > IDLE_KILL_THRESHOLD) {
-          console.log(`\n  (no output for ${idleSec}s — command appears stuck, stopping)`)
-          killChild()
-          return
-        }
-
-        // Progress indicator every 60s
-        if (elapsed > 60_000) {
-          console.log(`  (still running... ${elapsedMin}m elapsed, last activity ${idleSec}s ago)`)
-        }
-      }, ACTIVITY_CHECK_INTERVAL)
-
-      function killChild(): void {
+      function killChild(msg?: string): void {
         if (resolved) return
         resolved = true
-        clearInterval(activityChecker)
+        clearInterval(timeoutChecker)
 
         if (isWindows) {
           spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" })
@@ -344,48 +744,32 @@ export async function runCommandTool(command: string, cwd: string = process.cwd(
           child.kill("SIGTERM")
         }
 
-        // Check if the command actually succeeded despite timeout
-        // by looking for expected output (Success!, Created, etc.)
-        const output = capturedStdout + capturedStderr
-        const looksSuccessful = /success|created|initialized|done/i.test(output)
-
-        if (looksSuccessful) {
-          console.log(`  (command was stopped but output suggests it completed successfully)`)
-          resolve({
-            stdout: capturedStdout.slice(-4000),
-            stderr: capturedStderr.slice(-2000),
-            timedOut: true,
-            interactive: true,
-            message: "Command was stopped due to timeout but output indicates it completed. The project was likely created successfully. Continue with the next step."
-          })
-        } else {
-          resolve({
-            stdout: capturedStdout.slice(-4000),
-            stderr: capturedStderr.slice(-2000),
-            timedOut: true,
-            interactive: true,
-            message: `Command timed out. Partial output captured. Check if the project directory was created. If it exists, continue — otherwise retry or create files manually.`
-          })
-        }
+        resolve({
+          stdout: stdout.slice(-3000),
+          stderr: "",
+          timedOut: !msg,
+          interactive: true,
+          message: msg || `Command timed out after ${Math.round((Date.now() - startTime) / 1000)}s. Check if the project directory was created. If it exists, continue — otherwise create files manually.`
+        })
       }
 
       child.on("close", (code) => {
         if (resolved) return
         resolved = true
-        clearInterval(activityChecker)
+        clearInterval(timeoutChecker)
 
         console.log("") // blank line after interactive output
         if (code !== 0 && code !== null) {
           resolve({
-            stdout: capturedStdout.slice(-4000),
-            stderr: capturedStderr.slice(-2000) || `Exited with code ${code}`,
+            stdout: stdout.slice(-3000),
+            stderr: `Exited with code ${code}`,
             interactive: true,
             message: `Command finished with exit code ${code}. Check the output above for details.`
           })
         } else {
           resolve({
-            stdout: capturedStdout.slice(-4000),
-            stderr: capturedStderr.slice(-2000),
+            stdout: stdout.slice(-3000),
+            stderr: "",
             interactive: true,
             message: "Command completed successfully."
           })
@@ -395,7 +779,7 @@ export async function runCommandTool(command: string, cwd: string = process.cwd(
       child.on("error", (err) => {
         if (resolved) return
         resolved = true
-        clearInterval(activityChecker)
+        clearInterval(timeoutChecker)
         reject(err)
       })
     })
@@ -628,22 +1012,14 @@ export async function searchForCommandFix(cmd: string, error: string): Promise<s
   }
 }
 
-// ─── Diff ───
+// ─── Diff (delegates to diff engine) ───
+
+import { computeDiff, formatDiffColored, getLastDiff, getRunDiffs, clearRunDiffs } from "./diff.js"
+export { computeDiff, formatDiffColored, getLastDiff, getRunDiffs, clearRunDiffs }
 
 export function computeLineDiff(oldContent: string | null, newContent: string): { added: number; removed: number } {
-  const oldLines = oldContent ? oldContent.split("\n") : []
-  const newLines = newContent ? newContent.split("\n") : []
-  const oldSet = new Set(oldLines)
-  const newSet = new Set(newLines)
-  let added = 0
-  let removed = 0
-  for (const line of newLines) {
-    if (!oldSet.has(line)) added++
-  }
-  for (const line of oldLines) {
-    if (!newSet.has(line)) removed++
-  }
-  return { added, removed }
+  const result = computeDiff(oldContent, newContent)
+  return { added: result.added, removed: result.removed }
 }
 
 export async function scanDirectoryTree(dirPath: string, prefix: string = ""): Promise<DirectoryEntry[]> {

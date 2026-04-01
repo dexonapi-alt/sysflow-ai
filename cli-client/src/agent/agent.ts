@@ -7,6 +7,7 @@ import { callServer, callServerStream } from "../lib/server.js"
 import { ensureSysbase, getSelectedModel, getSysbasePath, getReasoningEnabled, getAuthToken } from "../lib/sysbase.js"
 import { executeTool, executeToolsBatch } from "./executor.js"
 import { readFileTool, computeLineDiff } from "./tools.js"
+import { getLastDiff, formatDiffColored, clearRunDiffs } from "./diff.js"
 import { getOrBuildIndex, compactTree } from "./indexer.js"
 import { ensureActiveChat } from "../commands/chats.js"
 
@@ -87,43 +88,132 @@ async function revealReasoning(text: string): Promise<void> {
 
 // ─── Tool label formatting ───
 
+function extractPathFromArgs(args: Record<string, unknown>): string | null {
+  // Try to find a file path in any string arg value
+  for (const val of Object.values(args)) {
+    if (typeof val === "string" && /^[\w./-]+\.\w+$/.test(val) && val.length < 200) {
+      return val
+    }
+  }
+  // Try args_json if present (broken tool calls sometimes put path there)
+  if (typeof args.args_json === "string") {
+    try {
+      const inner = JSON.parse(args.args_json)
+      if (inner.path) return inner.path as string
+    } catch { /* ignore */ }
+  }
+  return null
+}
+
 function formatToolLabel(tool: string, args: Record<string, unknown>): string | null {
+  if (!args) args = {}
+  // Try multiple sources for the file path
+  const filePath = (args.path as string)
+    || (args.file_path as string)
+    || (args.filePath as string)
+    || extractPathFromArgs(args)
+    || "(unknown)"
+
   switch (tool) {
     case "read_file":
-      return colors.tool("read") + " " + colors.file(args.path as string)
+      return colors.tool("read") + " " + colors.file(filePath)
     case "batch_read":
       return null
     case "write_file":
-      return colors.tool("create") + " " + colors.file(args.path as string)
+      return colors.tool("create") + " " + colors.file(filePath)
     case "edit_file":
-      return colors.tool("edit") + " " + colors.file(args.path as string)
+      return colors.tool("edit") + " " + colors.file(filePath)
     case "create_directory":
-      return colors.tool("mkdir") + " " + colors.file(args.path as string)
+      return colors.tool("mkdir") + " " + colors.file(filePath)
     case "move_file":
-      return colors.tool("move") + " " + colors.file(args.from as string) + colors.muted(" → ") + colors.file(args.to as string)
+      return colors.tool("move") + " " + colors.file((args.from as string) || "?") + colors.muted(" → ") + colors.file((args.to as string) || "?")
     case "delete_file":
-      return colors.tool("delete") + " " + colors.file(args.path as string)
+      return colors.tool("delete") + " " + colors.file(filePath)
     case "file_exists":
-      return colors.tool("check") + " " + colors.file(args.path as string)
+      return colors.tool("check") + " " + colors.file(filePath)
     case "search_code":
-      return colors.tool("search") + " " + colors.bright(`"${args.pattern}"`)
+      return colors.tool("search") + " " + colors.bright(`"${args.pattern || ""}"`)
     case "search_files":
-      return colors.tool("find") + " " + colors.bright(`"${args.query || args.glob}"`)
+      return colors.tool("find") + " " + colors.bright(`"${args.query || args.glob || ""}"`)
     case "run_command":
-      return colors.tool("run") + " " + colors.bright(args.command as string)
+      return colors.tool("run") + " " + colors.bright((args.command as string) || "(no command)")
     case "web_search":
-      return colors.tool("search web") + " " + colors.bright(`"${args.query}"`)
+      return colors.tool("search web") + " " + colors.bright(`"${args.query || ""}"`)
     case "batch_write": {
       const files = (args.files || []) as Array<{ path: string }>
       return colors.tool("batch write") + " " + colors.muted(`${files.length} files`)
     }
     default:
-      return colors.tool(tool) + " " + colors.muted(JSON.stringify(args))
+      return colors.tool(tool || "unknown") + " " + colors.muted(JSON.stringify(args))
   }
 }
 
 function isHiddenStep(tool: string): boolean {
   return tool === "list_directory"
+}
+
+// ─── Diff preview system ───
+// Shows collapsed diff (+N -M) with [Tab → diff] hint.
+// When Tab is pressed during the "thinking..." spinner, expands the last diff.
+
+let pendingDiffRunId: string | null = null
+let diffExpandEnabled = false
+
+function enableDiffExpand(runId: string): void {
+  pendingDiffRunId = runId
+  diffExpandEnabled = true
+}
+
+function disableDiffExpand(): void {
+  diffExpandEnabled = false
+  pendingDiffRunId = null
+}
+
+/**
+ * Start listening for Tab keypress to expand diffs.
+ * Returns a cleanup function to stop listening.
+ */
+function startDiffKeyListener(spinner: ReturnType<typeof ora>): () => void {
+  if (!process.stdin.isTTY) return () => {}
+
+  const wasRaw = process.stdin.isRaw
+  process.stdin.setRawMode(true)
+  process.stdin.resume()
+
+  const onData = (data: Buffer) => {
+    const key = data.toString()
+
+    // Tab key
+    if (key === "\t" && diffExpandEnabled && pendingDiffRunId) {
+      const last = getLastDiff(pendingDiffRunId)
+      if (last && last.diff.changed) {
+        spinner.stop()
+        console.log("")
+        console.log(colors.muted(`    ┌── diff: ${last.path}`))
+        const diffStr = formatDiffColored(last.diff)
+        const diffLines = diffStr.split("\n").slice(0, 40) // cap at 40 lines
+        for (const line of diffLines) {
+          console.log(colors.muted("    │ ") + line)
+        }
+        if (diffStr.split("\n").length > 40) {
+          console.log(colors.muted(`    │ ... ${diffStr.split("\n").length - 40} more lines`))
+        }
+        console.log(colors.muted("    └──"))
+        console.log("")
+        spinner.start(colors.muted("thinking..."))
+      }
+      disableDiffExpand()
+    }
+  }
+
+  process.stdin.on("data", onData)
+
+  return () => {
+    process.stdin.removeListener("data", onData)
+    if (!wasRaw && process.stdin.isTTY) {
+      try { process.stdin.setRawMode(false) } catch { /* ignore */ }
+    }
+  }
 }
 
 // ─── User input prompt ───
@@ -217,6 +307,48 @@ function stepLabel(label: string, status: string | undefined): string {
   return colors.muted(label)
 }
 
+// ─── Task Pipeline Display ───
+
+function renderPipelineBox(title: string, goal: string, steps: Array<{ id: string; label: string; status?: string }>, completedSet: Set<string>): void {
+  const width = 46
+
+  console.log("  " + colors.bar(BOX.tl + BOX.h) + colors.accent.bold(` ${title} `) + colors.bar(BOX.h.repeat(Math.max(0, width - title.length - 4)) + BOX.tr))
+  console.log("  " + colors.bar(BOX.v) + " " + colors.muted(goal.length > width ? goal.slice(0, width - 3) + "..." : goal))
+  console.log("  " + colors.bar(BOX.v))
+
+  for (const s of steps) {
+    const isDone = completedSet.has(s.id) || s.status === "completed"
+    const isActive = s.status === "in_progress" && !isDone
+    let icon: string
+    let label: string
+    if (isDone) {
+      icon = colors.success(BOX.check)
+      label = colors.success(s.label)
+    } else if (isActive) {
+      icon = colors.accent(BOX.arrow)
+      label = colors.accent.bold(s.label)
+    } else {
+      icon = colors.muted(BOX.ring)
+      label = colors.muted(s.label)
+    }
+    console.log("  " + colors.bar(BOX.v) + `  ${icon} ${label}`)
+  }
+
+  console.log("  " + colors.bar(BOX.bl + BOX.h.repeat(width) + BOX.br))
+}
+
+/**
+ * Print an inline step transition message — no cursor tricks, just a clean line.
+ */
+function printStepTransition(completedLabel: string | null | undefined, startedLabel: string | null | undefined): void {
+  if (completedLabel && completedLabel !== "undefined") {
+    console.log(`  ${colors.success(BOX.check)} ${colors.success(completedLabel)}`)
+  }
+  if (startedLabel && startedLabel !== "undefined") {
+    console.log(`  ${colors.accent(BOX.arrow)} ${colors.accent.bold(startedLabel)}`)
+  }
+}
+
 function resolveFileMentions(prompt: string, cwd: string): { prompt: string; mentions: Array<{ path: string; absolute: string }> } {
   const mentions: Array<{ path: string; absolute: string }> = []
   const resolved = prompt.replace(/@([\w./-]+)/g, (_match, filePath: string) => {
@@ -263,8 +395,8 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   const mentionedFiles: Array<{ path: string; content: string }> = []
   for (const m of mentions) {
     try {
-      const content = await readFileTool(m.absolute)
-      mentionedFiles.push({ path: m.path, content })
+      const result = await readFileTool(m.absolute)
+      mentionedFiles.push({ path: m.path, content: result.content })
     } catch {
       // file doesn't exist, skip
     }
@@ -353,6 +485,13 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   const MAX_CONSECUTIVE_ERRORS = 3
   let lastDisplayedAction: string | null = null
   let lastDisplayedReasoning: string | null = null
+  const currentRunId = (response.runId as string) || ""
+
+  // ─── Task pipeline tracking ───
+  let lastPipelineStepId: string | null = null  // track which step was last shown as active
+
+  // ─── Diff preview: Tab keypress listener ───
+  const cleanupDiffListener = startDiffKeyListener(spinner)
 
   // ─── Task-driven persistence state ───
   let clientCompletionRejections = 0  // client-side completion verification
@@ -480,12 +619,15 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         }
 
         if (taskSteps.length > 0) {
-          console.log("  " + boxTop(`${completedSteps.size}/${taskSteps.length} COMPLETE`, 36))
+          // Mark all steps completed at the end
           for (const s of taskSteps) {
-            const done = completedSteps.has(s.id)
-            console.log("  " + boxMid(`${done ? stepIcon("completed") : stepIcon(undefined)} ${done ? stepLabel(s.label, "completed") : stepLabel(s.label, undefined)}`))
+            completedSteps.add(s.id)
+            s.status = "completed"
           }
-          console.log("  " + boxBot(36))
+          const completedTask = response.task as Record<string, unknown> | null
+          const title = (completedTask?.title as string) || `${completedSteps.size}/${taskSteps.length} COMPLETE`
+          const goal = (completedTask?.goal as string) || ""
+          renderPipelineBox(title, goal, taskSteps, completedSteps)
           console.log("")
         }
 
@@ -508,6 +650,12 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         await sleep(60)
         console.log(stepText)
         console.log("")
+
+        // Cleanup diff state
+        cleanupDiffListener()
+        disableDiffExpand()
+        if (currentRunId) clearRunDiffs(currentRunId)
+
         return response
       }
 
@@ -698,45 +846,52 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
           rateLimitBackoffMs = Math.max(5000, rateLimitBackoffMs / 2)
         }
 
-        // Handle step transitions from AI
+        // Handle step transitions from server pipeline
         const stepTransition = response.stepTransition as { complete?: string; start?: string } | undefined
         if (stepTransition) {
-          if (stepTransition.complete) {
-            completedSteps.add(stepTransition.complete)
-          }
+          if (stepTransition.complete) completedSteps.add(stepTransition.complete)
         }
 
         const toolCalls = response.tools as Array<{ id: string; tool: string; args: Record<string, unknown> }> | undefined
         const isParallel = toolCalls && toolCalls.length > 1
 
-        // Show task on first tool call
+        // ─── Task Pipeline: show box once, then inline step transitions ───
         const task = response.task as Record<string, unknown> | null
-        if (task && !taskShown) {
-          spinner.stop()
-          taskShown = true
-          taskSteps = (task.steps || []) as Array<{ id: string; label: string; status?: string }>
+        if (task) {
+          const incomingSteps = (task.steps || []) as Array<{ id: string; label: string; status?: string }>
 
-          console.log("")
-          console.log("  " + boxTop("TASK", 42))
-          console.log("  " + boxMid(colors.bright.bold(task.title as string)))
-          console.log("  " + boxMid(colors.muted(task.goal as string)))
-          console.log("  " + boxMid(""))
-
-          for (let i = 0; i < taskSteps.length; i++) {
-            const s = taskSteps[i]
-            console.log("  " + boxMid(`${stepIcon(s.status)} ${stepLabel(s.label, s.status)}`))
-          }
-          console.log("  " + boxBot(42))
-          console.log("")
-
-          spinner.start(colors.muted("thinking..."))
-        }
-
-        // Update step display from task in response
-        if (task?.steps) {
-          const steps = task.steps as Array<{ id: string; status?: string }>
-          for (const s of steps) {
+          // Sync step statuses from server
+          for (const s of incomingSteps) {
             if (s.status === "completed" && s.id) completedSteps.add(s.id)
+            const existing = taskSteps.find((ts) => ts.id === s.id)
+            if (existing) existing.status = s.status
+          }
+          taskSteps = incomingSteps
+
+          if (!taskShown) {
+            // First display — print the full pipeline box once
+            spinner.stop()
+            taskShown = true
+            console.log("")
+            renderPipelineBox(task.title as string, task.goal as string, taskSteps, completedSteps)
+            console.log("")
+            // Track which step is shown as active
+            const activeStep = taskSteps.find((s) => s.status === "in_progress")
+            lastPipelineStepId = activeStep?.id || null
+            spinner.start(colors.muted("thinking..."))
+          } else if (stepTransition) {
+            // Show inline step transition — no cursor tricks
+            spinner.stop()
+            const completedStep = stepTransition.complete ? taskSteps.find((s) => s.id === stepTransition.complete) : undefined
+            const startedStep = stepTransition.start ? taskSteps.find((s) => s.id === stepTransition.start) : undefined
+
+            // Only show if it's a new transition with valid labels (guard against undefined)
+            if (startedStep && startedStep.label && startedStep.id !== lastPipelineStepId) {
+              console.log("")
+              printStepTransition(completedStep?.label || null, startedStep.label)
+              lastPipelineStepId = startedStep.id
+            }
+            spinner.start(colors.muted("thinking..."))
           }
         }
 
@@ -840,8 +995,17 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         }
 
         // ═══ SINGLE TOOL PATH ═══
+        // If server returned tools array with 1 entry but no top-level tool/args, extract them
+        const singleFromArray = (!response.tool && Array.isArray(response.tools) && (response.tools as Array<Record<string, unknown>>).length === 1)
+          ? (response.tools as Array<Record<string, unknown>>)[0]
+          : null
+        if (singleFromArray) {
+          response.tool = singleFromArray.tool
+          response.args = singleFromArray.args
+        }
+
         const pendingTaskStep = (response.taskStep as string) || null
-        const args = response.args as Record<string, unknown>
+        const args = (response.args || {}) as Record<string, unknown>
 
         const actionKey = `${response.tool}:${JSON.stringify(args)}:${response.reasoning || ""}`
         const isDuplicate = actionKey === lastDisplayedAction
@@ -870,10 +1034,8 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
               console.log(colors.muted(`      ${BOX.dot} ${p}`))
             }
           } else if (response.tool === "run_command") {
-            const cmd = args.command as string
-            // Check if this is an interactive command — stop spinner completely
-            // Import the same patterns used by tools.ts
-            const isInteractiveCmd = /^npx\s+(--yes\s+)?(create-|@nestjs\/cli|@angular\/cli|nuxi)|^npm\s+(create|init)|^yarn\s+create|^pnpm\s+create/.test(cmd.trim())
+            const cmd = (args?.command as string) || ""
+            const isInteractiveCmd = cmd ? /^npx\s+(--yes\s+)?(create-|@nestjs\/cli|@angular\/cli|nuxi)|^npm\s+(create|init)|^yarn\s+create|^pnpm\s+create/.test(cmd.trim()) : false
             if (isInteractiveCmd) {
               console.log(`    ${colors.accent(BOX.arrow)} ${colors.tool("run")} ${colors.bright(cmd)}`)
               console.log(colors.muted("    (interactive — answer prompts below)"))
@@ -884,15 +1046,38 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
             const label = formatToolLabel(response.tool as string, args)
             const hasDiff = response.tool === "write_file" || response.tool === "edit_file"
             if (hasDiff) {
-              const newContent = (args.content || args.patch || "") as string
-              let oldContent: string | null = null
-              try { oldContent = await readFileTool(args.path as string) } catch { /* new file */ }
-              const { added, removed } = computeLineDiff(oldContent, newContent)
+              let added = 0, removed = 0
+              // For search/replace or line edits, estimate diff from the operation
+              if (args.search !== undefined && response.tool === "edit_file") {
+                const searchLines = ((args.search as string) || "").split("\n").length
+                const replaceLines = ((args.replace as string) || "").split("\n").filter(Boolean).length
+                removed = searchLines
+                added = replaceLines
+              } else if (args.line_start !== undefined && response.tool === "edit_file") {
+                const lineStart = args.line_start as number
+                const lineEnd = (args.line_end as number) || lineStart
+                removed = lineEnd - lineStart + 1
+                added = ((args.content as string) || "").split("\n").length
+              } else if (args.insert_at !== undefined && response.tool === "edit_file") {
+                added = ((args.content as string) || "").split("\n").length
+              } else {
+                const newContent = (args.content || args.patch || "") as string
+                let oldContent: string | null = null
+                try { oldContent = (await readFileTool(args.path as string)).content } catch { /* new file */ }
+                const lineDiff = computeLineDiff(oldContent, newContent)
+                added = lineDiff.added
+                removed = lineDiff.removed
+              }
               const parts: string[] = []
               if (added > 0) parts.push(colors.success(`+${added}`))
               if (removed > 0) parts.push(colors.error(`-${removed}`))
               const diffTag = parts.length > 0 ? " " + parts.join(colors.muted(" ")) : ""
-              console.log(`    ${colors.accent(BOX.arrow)} ${label}${diffTag}`)
+              const tabHint = (added > 0 || removed > 0) ? colors.muted("  [Tab → diff]") : ""
+              console.log(`    ${colors.accent(BOX.arrow)} ${label}${diffTag}${tabHint}`)
+              // Enable Tab expansion for this diff (will be computed after execution)
+              if (added > 0 || removed > 0) {
+                enableDiffExpand(currentRunId || (response.runId as string) || "")
+              }
             } else {
               console.log(`    ${colors.accent(BOX.arrow)} ${label}`)
             }
@@ -956,7 +1141,8 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
             tool: response.tool,
             result: {
               error: (toolError as Error).message,
-              success: false
+              success: false,
+              path: args?.path || undefined
             }
           })
         }
@@ -965,6 +1151,9 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
 
       default:
         spinner.stop()
+        cleanupDiffListener()
+        disableDiffExpand()
+        if (currentRunId) clearRunDiffs(currentRunId)
         throw new Error(`Unexpected status: ${response.status}`)
     }
   }

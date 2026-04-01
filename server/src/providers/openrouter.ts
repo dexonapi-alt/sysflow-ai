@@ -41,6 +41,10 @@ export class OpenRouterProvider extends BaseProvider {
         this.setRunTask(payload.runId, payload.userMessage)
       } else {
         // Continuation — add tool result(s) to history
+        // Ensure runTask is set even for error-aware flows that skip the initial model call
+        if (!this.runTasks.has(payload.runId) && payload.userMessage) {
+          this.setRunTask(payload.runId, payload.userMessage)
+        }
         const toolMsg = this.buildToolResultMessage(payload)
 
         if (!history) {

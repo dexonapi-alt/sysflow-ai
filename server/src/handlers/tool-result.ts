@@ -12,12 +12,22 @@ import { callModelAdapter } from "../providers/adapter.js"
 import { mapNormalizedResponseToClient } from "../providers/normalize.js"
 import { validateCompletion, buildRejectionPayload, analyzeTaskComplexity } from "../services/completion-guard.js"
 import { recordVerificationResult, shouldBlockCompletion, buildVerificationFixPayload, getVerificationState, clearVerificationState } from "../services/verification-guard.js"
+import { validateFrontendQuality, buildFrontendRejectionPayload, accumulateFrontendContent, clearFrontendContent } from "../services/frontend-quality-guard.js"
 import { actionPlanner } from "../services/action-planner.js"
+import { isFrontendTask } from "../knowledge/frontend-patterns.js"
+import { ingestToolResult, clearRunContext, buildWorkingContextString } from "../services/context-manager.js"
+import { updatePipelineProgress, completePipeline, clearPipeline, getPipeline, hasPipeline, pipelineToTaskMeta, createPipelineFromAiPlan, createFallbackPipeline } from "../services/task-pipeline.js"
+import { getScaffoldChoice, storeScaffoldChoice, parseScaffoldResponse, clearScaffoldState } from "../services/scaffold-options.js"
+import { getPendingError, clearPendingError, setPendingError, buildFixInstructions, setPendingFileContent, hasPendingErrors, popNextPendingError } from "../services/error-autofix.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 /** Track how many times completion was rejected per run (prevent infinite loops) */
 const completionRejections = new Map<string, number>()
 const MAX_COMPLETION_REJECTIONS = 3
+
+/** Track frontend quality rejections per run (separate from structural completion guard) */
+const frontendQualityRejections = new Map<string, number>()
+const MAX_FRONTEND_QUALITY_REJECTIONS = 2
 
 interface ToolResultBody {
   runId: string
@@ -49,15 +59,48 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     }
   }
 
-  // Record actions for each tool AND feed results to action planner
+  // ─── Scaffold choice injection: when user responds to scaffold question, inject the command ───
+  if (body.tool === "_user_response") {
+    const userAnswer = (body.result.answer as string) || (body.result.content as string) || ""
+    // Check if this looks like a scaffold choice response (number or keyword)
+    if (/^\s*[1-9]\s*$/.test(userAnswer.trim()) || /\b(vite|next|nest|manual|create)\b/i.test(userAnswer)) {
+      // Import scaffold options dynamically to parse the choice
+      const { parseScaffoldResponse, detectScaffoldingNeed } = await import("../services/scaffold-options.js")
+      // We need the original prompt to regenerate options
+      const options = detectScaffoldingNeed(run.content, []) // empty tree since we already confirmed scaffolding is needed
+      if (options) {
+        const choice = parseScaffoldResponse(userAnswer, options)
+        if (choice && choice.command) {
+          // Inject the exact scaffold command into planner context so the AI uses it
+          const projectName = run.content.match(/(?:called|named|for)\s+(\w+)/i)?.[1]?.toLowerCase() || "my-app"
+          const resolvedCommand = choice.command.replace("{name}", projectName)
+          actionPlanner.injectContext(body.runId,
+            `[SCAFFOLD CHOICE] The user chose: "${choice.label}"\nRun this EXACT command: ${resolvedCommand}\nUse run_command with command: "${resolvedCommand}"\nAfter scaffolding, read the generated package.json to verify, then create all source files.`
+          )
+          console.log(`[scaffold] User chose "${choice.label}" — injecting command: ${resolvedCommand}`)
+        } else if (choice && !choice.command) {
+          actionPlanner.injectContext(body.runId,
+            `[SCAFFOLD CHOICE] The user chose to create files manually. Do NOT run any scaffolding commands. Create all project files directly with write_file (package.json, index.html, src/*, etc).`
+          )
+          console.log(`[scaffold] User chose manual file creation`)
+        }
+      }
+    }
+  }
+
+  // Record actions for each tool AND feed results to action planner + context manager
   if (isBatch) {
     for (const tr of body.toolResults!) {
       recordRunAction(body.runId, tr.tool, tr.result, run.projectId)
+      ingestToolResult(body.runId, tr.tool, tr.result, tr.result)
+      updatePipelineProgress(body.runId, tr.tool, tr.result)
     }
     actionPlanner.recordBatchResults(body.runId, body.toolResults!.map((tr) => ({ tool: tr.tool, result: tr.result })))
   } else {
     recordRunAction(body.runId, body.tool, body.result, run.projectId)
     actionPlanner.recordResult(body.runId, body.tool, body.result)
+    ingestToolResult(body.runId, body.tool, body.result, body.result)
+    updatePipelineProgress(body.runId, body.tool, body.result)
   }
 
   // ─── Process verification results from client-side auto-verify ───
@@ -69,12 +112,32 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
         const warnings = (tr.result.warnings || []) as string[]
         recordVerificationResult(body.runId, passed, errors, warnings)
       }
+      // Lint errors are treated as verification errors too
+      if (tr.tool === "_lint" && tr.result.passed === false) {
+        const lintErrors = (tr.result.errors || []) as string[]
+        recordVerificationResult(body.runId, false, lintErrors, [])
+      }
     }
   } else if (body.tool === "_verification") {
     const passed = body.result.passed === true
     const errors = (body.result.errors || []) as string[]
     const warnings = (body.result.warnings || []) as string[]
     recordVerificationResult(body.runId, passed, errors, warnings)
+  }
+
+  // ─── Per-file lint errors: inject into planner context so AI fixes them immediately ───
+  if (!isBatch && body.result.lint && (body.result.lint as Record<string, unknown>).passed === false) {
+    const lintErrors = ((body.result.lint as Record<string, unknown>).errors || []) as string[]
+    if (lintErrors.length > 0) {
+      const filePath = body.result.path as string || "unknown"
+      actionPlanner.injectContext(body.runId,
+        `[LINT ERRORS] Your write/edit to "${filePath}" has ${lintErrors.length} error(s). Fix these BEFORE proceeding:\n` +
+        lintErrors.map(e => `  ${e}`).join("\n") +
+        `\nUse read_file to see the current content, then edit_file to fix each error.`
+      )
+      // Also record as verification errors so completion guard catches them
+      recordVerificationResult(body.runId, false, lintErrors, [])
+    }
   }
 
   const task = await getTask(run.taskId)
@@ -85,6 +148,12 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     cwd: run.cwd as string,
     sysbasePath: run.sysbasePath as string | undefined
   })
+
+  // ─── Inject managed working context ───
+  const workingContext = buildWorkingContextString(body.runId)
+  if (workingContext) {
+    (context as Record<string, unknown>).workingContext = workingContext
+  }
 
   // Build provider payload with single or batch results
   const providerPayload: Record<string, unknown> = {
@@ -114,6 +183,88 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     }
   }
 
+  // ─── Error-Aware Fix: when we forced a read_file for an error, inject fix instructions into AI context ───
+  const pendingError = getPendingError(body.runId)
+  if (pendingError && body.tool === "read_file") {
+    clearPendingError(body.runId)
+
+    if (body.result.success !== false && !body.result.error) {
+      const fileContent = (body.result.content as string) || (body.result.data as string) || ""
+      if (fileContent) {
+        // Build specific instructions telling the AI exactly what line to remove
+        const fixInstructions = buildFixInstructions(pendingError, fileContent)
+        console.log(`[error-aware] Read succeeded — injecting fix instructions for AI`)
+        actionPlanner.injectContext(body.runId, fixInstructions)
+        // Store file content for programmatic fix fallback (if AI fails to produce valid edit args)
+        setPendingFileContent(body.runId, fileContent)
+      }
+    } else {
+      // Read failed — FORCE a search_files call (don't rely on AI to follow instructions)
+      const fileName = pendingError.sourceFile.split("/").pop() || pendingError.sourceFile
+      console.log(`[error-aware] Read failed for "${pendingError.sourceFile}" — forcing search_files for "${fileName}"`)
+
+      // Re-store the error so we can pick it up when the search result comes back
+      setPendingError(body.runId, { ...pendingError, type: "import-error" as const })
+
+      const searchAction: NormalizedResponse = {
+        kind: "needs_tool",
+        tool: "search_files",
+        args: { query: fileName, glob: `**/${fileName.replace(/\.[jt]sx?$/, ".*")}` },
+        content: `File "${pendingError.sourceFile}" not found — searching for it.`,
+        reasoning: `The exact path doesn't exist. Searching for the file to find its actual location.`,
+        usage: { inputTokens: 0, outputTokens: 0 },
+        task: hasPipeline(body.runId) ? pipelineToTaskMeta(getPipeline(body.runId)!) : undefined
+      }
+
+      return mapNormalizedResponseToClient(body.runId, searchAction)
+    }
+    // Fall through to AI model — it will see the file content + instructions
+  }
+
+  // ─── Error-Aware Fix: search_files result came back — now force read on found file ───
+  const pendingSearchError = getPendingError(body.runId)
+  if (pendingSearchError && body.tool === "search_files") {
+    clearPendingError(body.runId)
+
+    // search_files returns results as a newline-joined string
+    const rawResults = (body.result.results as string) || ""
+    const resultLines = rawResults.split("\n").map((l: string) => l.trim()).filter((l: string) => l && !l.startsWith("No files"))
+
+    // Find the matching file from search results
+    const targetName = pendingSearchError.sourceFile.split("/").pop() || ""
+    const baseName = targetName.replace(/\.[^.]+$/, "") // "FeaturesGrid" without extension
+    const found = resultLines.find((r: string) => r.includes(targetName))
+      || resultLines.find((r: string) => r.includes(baseName))
+      || resultLines[0]
+
+    if (found) {
+      console.log(`[error-aware] Search found "${found}" — forcing read_file`)
+      // Update sourceFile to the found path and re-store for the read result handler
+      const updatedError = { ...pendingSearchError, sourceFile: found }
+      setPendingError(body.runId, updatedError)
+
+      const readAction: NormalizedResponse = {
+        kind: "needs_tool",
+        tool: "read_file",
+        args: { path: found },
+        content: `Found "${found}" — reading it to apply the fix.`,
+        reasoning: `Located the file. Reading it to find and remove the broken import.`,
+        usage: { inputTokens: 0, outputTokens: 0 },
+        task: hasPipeline(body.runId) ? pipelineToTaskMeta(getPipeline(body.runId)!) : undefined
+      }
+
+      return mapNormalizedResponseToClient(body.runId, readAction)
+    } else {
+      console.log(`[error-aware] Search found nothing for "${targetName}" — telling AI`)
+      actionPlanner.injectContext(body.runId,
+        `[ERROR-FIX] Could not find the file "${pendingSearchError.sourceFile}" anywhere in the project.\n` +
+        `The file may have a different extension (.js/.jsx/.tsx/.ts). Try list_directory on "src/components" to see what files exist.\n` +
+        `Once you find it, read_file it and use edit_file search/replace to remove the import containing "${pendingSearchError.targetImport}".\n` +
+        `Do NOT create new files or directories.`
+      )
+    }
+  }
+
   let normalized = await callModelAdapter(providerPayload as never)
 
   await persistModelUsage({
@@ -127,8 +278,37 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
   // ─── ACTION PLANNER: fix broken tools, detect loops, transform actions ───
   normalized = actionPlanner.intercept(body.runId, normalized)
 
-  // ─── COMPLETION GUARD: reject premature completion ───
-  if (normalized.kind === "completed") {
+  // ─── FRONTEND QUALITY: accumulate content from write operations for quality analysis ───
+  if (isFrontendTask(run.content)) {
+    accumulateFrontendContent(body.runId, normalized)
+  }
+
+  // ─── FATAL TERMINATION: bypass all guards if the model is fundamentally broken ───
+  const isFatal = actionPlanner.isFatalTermination(body.runId)
+
+  // ─── MULTI-ERROR QUEUE: if AI completed but more errors remain, fix the next one ───
+  if (normalized.kind === "completed" && !isFatal && hasPendingErrors(body.runId)) {
+    const nextError = popNextPendingError(body.runId)
+    if (nextError) {
+      console.log(`[error-aware] AI completed but ${hasPendingErrors(body.runId) ? "more" : "1"} error(s) remain — fixing "${nextError.targetImport}" in "${nextError.sourceFile}"`)
+      setPendingError(body.runId, nextError)
+      const fileName = nextError.sourceFile.split("/").pop() || nextError.sourceFile
+      const baseName = fileName.replace(/\.[^.]+$/, "")
+
+      normalized = {
+        kind: "needs_tool",
+        tool: "search_files",
+        args: { query: baseName, glob: `**/${baseName}.*` },
+        content: `Fixing next error: searching for "${baseName}" to remove broken import "${nextError.targetImport}".`,
+        reasoning: `Previous fix completed. Now fixing: ${nextError.description}`,
+        usage: normalized.usage,
+        task: hasPipeline(body.runId) ? pipelineToTaskMeta(getPipeline(body.runId)!) : undefined
+      }
+    }
+  }
+
+  // ─── COMPLETION GUARD: reject premature completion (skip if fatal) ───
+  if (normalized.kind === "completed" && !isFatal) {
     const rejectionCount = completionRejections.get(body.runId) || 0
 
     if (rejectionCount < MAX_COMPLETION_REJECTIONS) {
@@ -165,8 +345,8 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     }
   }
 
-  // ─── VERIFICATION GUARD: block completion if code has errors ───
-  if (normalized.kind === "completed") {
+  // ─── VERIFICATION GUARD: block completion if code has errors (skip if fatal) ───
+  if (normalized.kind === "completed" && !isFatal) {
     const verBlock = shouldBlockCompletion(body.runId)
     if (verBlock.block) {
       const verState = getVerificationState(body.runId)!
@@ -184,27 +364,84 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     }
   }
 
+  // ─── FRONTEND QUALITY GUARD: reject completion if UI code is too basic (skip if fatal) ───
+  if (normalized.kind === "completed" && !isFatal && isFrontendTask(run.content)) {
+    const frontendRejections = frontendQualityRejections.get(body.runId) || 0
+    if (frontendRejections < MAX_FRONTEND_QUALITY_REJECTIONS) {
+      const qualityResult = validateFrontendQuality(body.runId, run.content)
+
+      if (!qualityResult.pass) {
+        frontendQualityRejections.set(body.runId, frontendRejections + 1)
+        console.log(`[frontend-quality] REJECTED: score ${qualityResult.score}/100 (anim: ${qualityResult.animationScore}, style: ${qualityResult.styleScore}, struct: ${qualityResult.structureScore}) — attempt ${frontendRejections + 1}/${MAX_FRONTEND_QUALITY_REJECTIONS}`)
+
+        const rejection = buildFrontendRejectionPayload(qualityResult.reason!, run.content)
+        const retryPayload = {
+          ...providerPayload,
+          toolResult: { tool: rejection.tool, result: rejection.result },
+          toolResults: undefined
+        }
+
+        const retryNormalized = await callModelAdapter(retryPayload as never)
+        await persistModelUsage({
+          runId: body.runId,
+          projectId: run.projectId,
+          model: run.model,
+          usage: retryNormalized.usage,
+          userId: run.userId || null
+        })
+
+        normalized = retryNormalized
+      }
+    } else {
+      frontendQualityRejections.delete(body.runId)
+    }
+  }
+
   // Clean up state on terminal states
   if (normalized.kind === "completed" || normalized.kind === "failed") {
     completionRejections.delete(body.runId)
+    frontendQualityRejections.delete(body.runId)
     clearVerificationState(body.runId)
     actionPlanner.clear(body.runId)
+    clearRunContext(body.runId)
+    clearFrontendContent(body.runId)
   }
 
-  // Handle step transitions
-  if (normalized.stepTransition && task) {
-    const steps = (task as unknown as Record<string, unknown>).steps as Array<{ id: string; status: string }> | undefined
-    if (steps) {
-      if (normalized.stepTransition.complete) {
-        const step = steps.find((s) => s.id === normalized.stepTransition!.complete)
-        if (step) step.status = "completed"
-      }
-      if (normalized.stepTransition.start) {
-        const step = steps.find((s) => s.id === normalized.stepTransition!.start)
-        if (step) step.status = "in_progress"
+  // ─── Task Pipeline: create from AI plan if not yet created, then track progress ───
+  if (normalized.kind === "needs_tool") {
+    // If AI sent a taskPlan and we don't have a pipeline yet, create one
+    if (normalized.taskPlan && normalized.taskPlan.steps.length > 0 && !hasPipeline(body.runId)) {
+      const pipeline = createPipelineFromAiPlan(body.runId, run.content, normalized.taskPlan)
+      normalized.task = pipelineToTaskMeta(pipeline)
+    }
+    // If still no pipeline, create fallback
+    if (!hasPipeline(body.runId)) {
+      createFallbackPipeline(body.runId, run.content)
+    }
+
+    const pipelineUpdate = updatePipelineProgress(
+      body.runId,
+      normalized.tool || "",
+      (normalized.args || {}) as Record<string, unknown>
+    )
+    if (pipelineUpdate) {
+      normalized.task = pipelineUpdate.task
+      if (pipelineUpdate.stepTransition) {
+        normalized.stepTransition = pipelineUpdate.stepTransition
       }
     }
+  } else if (normalized.kind === "completed") {
+    const completed = completePipeline(body.runId)
+    if (completed) {
+      normalized.task = completed
+    }
+    clearPipeline(body.runId)
+  } else if (normalized.kind === "failed") {
+    clearPipeline(body.runId)
   }
+
+  // Step transitions are now fully managed by the server-side pipeline
+  // (updatePipelineProgress sets stepTransition based on actual tool execution)
 
   const response = mapNormalizedResponseToClient(body.runId, normalized)
 

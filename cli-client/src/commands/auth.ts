@@ -2,7 +2,7 @@ import readline from "node:readline"
 import chalk from "chalk"
 import { saveAuthToken, getAuthToken, getAuthUser, clearAuth } from "../lib/sysbase.js"
 
-const SERVER_URL = process.env.SYS_SERVER_URL || "http://localhost:3000"
+const SERVER_URL = process.env.SYS_SERVER_URL || "http://localhost:4000"
 
 function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
