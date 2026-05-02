@@ -4,6 +4,13 @@
 
 ## Recent Work
 
+**Phase 3 capabilities pass** (`.claude/plans/applied/2026-05-02-phase-3-capabilities.md`):
+
+- **Zod tool input schemas**: `cli-client/src/agent/tool-schemas.ts` declares one Zod schema per tool (read_file, batch_read, list_directory, file_exists, create_directory, write_file, edit_file, move_file, delete_file, search_code, search_files, run_command, web_search, batch_write). edit_file is a discriminated union of its four valid shapes. `validateToolInput()` returns either parsed args or a structured ValidationError with the failing field path, all issues, and a recovery hint. Wired into the executor; replaces the manual `if (!args.path)` chains.
+- **Permission system**: modes (`default | auto | plan | bypass`) persisted in `models.json`. `agent/permissions.ts` exposes `checkPermissions()` consulting mode > rules > per-tool defaults; persistent rules in `<sysbasePath>/permissions.json` (longest-pattern wins). Run-scoped session cache remembers ask-answers so the user only confirms once per (tool, path) per run. Interactive `cli/permission-prompt.ts` gives 4 options (allow once / Allow always / deny once / Deny always). `/mode <name>` and `/permissions [list|remove n|clear]` slash commands.
+- **Hook registry**: `agent/hooks.ts` with `pre_tool_use`, `post_tool_use`, `post_tool_use_failure` events. Hooks can `override` the permission decision, `prevent` execution, or add audit notes. `agent/builtin-hooks.ts` ships two hooks enabled by default — `builtin/secrets-block` denies writes to `.env*`, `*.pem`, `id_rsa*`, `secrets.{json,yaml,toml}`, `credentials.*` (with `.example`/`.sample`/`.template` allowlisted), and `builtin/audit` appends JSONL entries to `<sysbasePath>/audit.jsonl`.
+- **Server passthrough**: `classifyToolErrorFromResult()` trusts the CLI's `_errorCategory` field instead of re-deriving from the error string, so the model gets the structural validation/permission hint without double-prefixing.
+
 **Phase 2 foundation pass** (`.claude/plans/applied/2026-05-02-phase-2-foundation.md`):
 
 - **Tool-error classifier**: `services/tool-error-classifier.ts` returns one of validation | permission | file_not_found | file_too_large | timeout | command_failed | command_not_found | network | auth | unknown plus a tool-specific recovery hint that's appended to the AI's tool result. Replaces the regex-only legacy hint table for any error the classifier recognises.
