@@ -21,6 +21,7 @@ import { getScaffoldChoice, storeScaffoldChoice, parseScaffoldResponse, clearSca
 import { getPendingError, clearPendingError, setPendingError, buildFixInstructions, setPendingFileContent, hasPendingErrors, popNextPendingError } from "../services/error-autofix.js"
 import { applyToolResultBudget, estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import { classifyToolError } from "../services/tool-error-classifier.js"
+import { persistLargeToolResult } from "../store/tool-result-persistence.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 /** Track how many times completion was rejected per run (prevent infinite loops) */
@@ -41,17 +42,42 @@ interface ToolResultBody {
 export async function handleToolResult(body: ToolResultBody): Promise<ClientResponse> {
   const isBatch = body.toolResults && body.toolResults.length > 0
 
-  // ─── Tool result budget: clamp oversized results before saving or sending to provider ───
+  // We need the run's sysbasePath for archival — fetch it ahead of save.
+  let sysbasePath: string | undefined
+  try {
+    const r = await getRun(body.runId)
+    sysbasePath = r.sysbasePath as string | undefined
+  } catch {
+    sysbasePath = undefined
+  }
+
+  // ─── Tool-result archival + budget ───
+  // 1) Archive the *original* (pre-budget) result to disk if it's large
+  //    (>10 KiB serialised). 2) Then clamp the in-memory representation
+  //    via applyToolResultBudget. The model only sees the clamped view,
+  //    but a human can inspect the full result later.
   if (isBatch) {
-    body.toolResults = body.toolResults!.map((tr) => ({
-      ...tr,
-      result: applyToolResultBudget(tr.tool, tr.result),
-    }))
-    for (const tr of body.toolResults) {
+    const enriched: typeof body.toolResults = []
+    for (const tr of body.toolResults!) {
+      const archive = await persistLargeToolResult({ sysbasePath, runId: body.runId, toolId: tr.id, tool: tr.tool, result: tr.result })
+      const clamped = applyToolResultBudget(tr.tool, tr.result)
+      if (archive.path) {
+        clamped._persistedPath = archive.path
+        clamped._persistedSize = archive.originalSize
+      }
+      enriched!.push({ ...tr, result: clamped })
+    }
+    body.toolResults = enriched
+    for (const tr of body.toolResults!) {
       await saveToolResult(body.runId, tr.tool, tr.result)
     }
   } else {
+    const archive = await persistLargeToolResult({ sysbasePath, runId: body.runId, toolId: "single", tool: body.tool, result: body.result })
     body.result = applyToolResultBudget(body.tool, body.result)
+    if (archive.path) {
+      body.result._persistedPath = archive.path
+      body.result._persistedSize = archive.originalSize
+    }
     await saveToolResult(body.runId, body.tool, body.result)
   }
 
