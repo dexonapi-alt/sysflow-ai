@@ -4,6 +4,15 @@
 
 ## Recent Work
 
+**Phase 2 foundation pass** (`.claude/plans/applied/2026-05-02-phase-2-foundation.md`):
+
+- **Tool-error classifier**: `services/tool-error-classifier.ts` returns one of validation | permission | file_not_found | file_too_large | timeout | command_failed | command_not_found | network | auth | unknown plus a tool-specific recovery hint that's appended to the AI's tool result. Replaces the regex-only legacy hint table for any error the classifier recognises.
+- **Project memory file**: `services/project-memory.ts` discovers `.sysflow.md` (preferred) or `CLAUDE.md` (fallback) in cwd, parent dir, and `~/.sysflow/MEMORY.md`. New `prompt/sections/project-memory.ts` injects discovered content into the prompt's dynamic half. Memoised by mtime, hard-capped at 50k chars combined, skips files matching common secret patterns. `cwd` is now plumbed through `ProviderPayload`.
+- **Real autocompact**: `compactConversationSummary()` asks the model to produce a structured markdown summary (original task / files touched / decisions / current state / unresolved) and replaces chat history with a single summary turn. Singleton `AutocompactCircuitBreaker` opens after 3 consecutive failures per run. Recursion guard prevents summary-of-summary calls.
+- **Max-output-token recovery**: `BaseProvider.nextMaxOutputAction(runId)` returns `escalate` | `continue` | `fail` per attempt (max 3). Gemini provider's new `sendWithMaxOutputRecovery` wraps `chat.sendMessage`; on `finishReason === 'MAX_TOKENS'` it issues a continuation prompt and concatenates partial text until the model finishes or the limit hits.
+- **Tool-result archival**: `store/tool-result-persistence.ts` writes results larger than 10 KiB to `<sysbasePath>/tool-results/<runId>/<toolId>.json` as full pre-budget payloads. Best-effort, never throws. Budget-clamped result gains `_persistedPath` + `_persistedSize`.
+- **Concurrency partitioning + sibling abort**: `cli-client/src/agent/tool-meta.ts` is the single source of truth for per-tool flags (`isConcurrencySafe`, `isReadOnly`, `abortsSiblingsOnError`). `executor.ts` uses `partitionToolCalls()` and short-circuits serial siblings with `aborted_by_sibling: true` when a `run_command` fails. CLI preview renders `↯ aborted` for those.
+
 **Phase 1 reasoning + CLI UX pass** (`.claude/plans/applied/2026-05-02-phase-1-reasoning-and-cli-ux.md`):
 
 - **Modular system prompt**: extracted the monolithic `SHARED_SYSTEM_PROMPT` into priority-sorted sections under `server/src/providers/prompt/sections/` (identity, system rules, tools, task guidelines, output efficiency, env info, model-specific) joined by an explicit `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker so future provider-side caching can split on it.
