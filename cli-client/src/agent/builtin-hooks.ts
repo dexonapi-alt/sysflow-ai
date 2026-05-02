@@ -6,11 +6,10 @@
  * in module-local closures.
  */
 
-import fs from "node:fs/promises"
-import path from "node:path"
 import { registerHook, type Hook, type HookContext } from "./hooks.js"
 import { primaryPath } from "./permissions.js"
 import { getSysbasePath } from "../lib/sysbase.js"
+import { appendAudit } from "./audit-log.js"
 
 const SECRET_PATH_RE = [
   /(^|\/)\.env(\.[^/]+)?$/,                 // .env, .env.local — but NOT .env.example
@@ -50,21 +49,15 @@ const secretsBlockHook: Hook = (ctx: HookContext) => {
 const auditHook: Hook = async (ctx: HookContext) => {
   const sysbasePath = getSysbasePath()
   if (!sysbasePath) return
-  try {
-    const auditPath = path.join(sysbasePath, "audit.jsonl")
-    const entry = {
-      ts: new Date().toISOString(),
-      event: ctx.event,
-      runId: ctx.runId ?? null,
-      tool: ctx.tool,
-      args: redact(ctx.args),
-      success: ctx.event === "post_tool_use" ? true : ctx.event === "post_tool_use_failure" ? false : null,
-      errorCategory: ctx.result?._errorCategory ?? null,
-    }
-    await fs.appendFile(auditPath, JSON.stringify(entry) + "\n", "utf8")
-  } catch {
-    // Audit logging is best-effort; never block the main flow.
-  }
+  await appendAudit(sysbasePath, {
+    ts: new Date().toISOString(),
+    event: ctx.event,
+    runId: ctx.runId ?? null,
+    tool: ctx.tool,
+    args: redact(ctx.args),
+    success: ctx.event === "post_tool_use" ? true : ctx.event === "post_tool_use_failure" ? false : null,
+    errorCategory: ctx.result?._errorCategory ?? null,
+  })
 }
 
 /** Strip large fields from args before writing to the audit log. */
