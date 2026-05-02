@@ -247,6 +247,12 @@ export abstract class BaseProvider {
   protected runParseFailures = new Map<string, number>()
   protected static readonly MAX_PARSE_FAILURES = 2
 
+  /** Per-run max-output-token recovery counter. */
+  protected runMaxOutputAttempts = new Map<string, number>()
+  protected static readonly MAX_OUTPUT_RECOVERY_ATTEMPTS = 3
+  /** Escalated max-output-tokens limit on the first recovery attempt. */
+  static readonly ESCALATED_MAX_OUTPUT_TOKENS = 131_072
+
   /** System prompt shared by all providers (can be overridden) */
   protected readonly systemPrompt: string = SHARED_SYSTEM_PROMPT
 
@@ -269,6 +275,7 @@ export abstract class BaseProvider {
     this.runAnalysis.delete(runId)
     this.runFilePaths.delete(runId)
     this.runParseFailures.delete(runId)
+    this.runMaxOutputAttempts.delete(runId)
   }
 
   /** Store the original task for this run */
@@ -302,6 +309,34 @@ export abstract class BaseProvider {
   protected onSuccessfulCall(): void {
     clearRateLimit(this.name)
   }
+
+  /**
+   * Track and decide what to do on a model-side MAX_TOKENS finish. Returns:
+   *   - 'escalate'  — first attempt: retry with a higher max-output cap.
+   *   - 'continue'  — second attempt: send a "continue from where you left off" message.
+   *   - 'fail'      — third attempt or beyond: surface as errorCode='max_output_tokens'.
+   *
+   * Counter is per-run; cleared by clearRunState. Providers are responsible for
+   * wiring up the actual escalate/continue mechanics in their SDK.
+   */
+  protected nextMaxOutputAction(runId: string): "escalate" | "continue" | "fail" {
+    const used = (this.runMaxOutputAttempts.get(runId) ?? 0) + 1
+    this.runMaxOutputAttempts.set(runId, used)
+    if (used === 1) return "escalate"
+    if (used === 2) return "continue"
+    return "fail"
+  }
+
+  /** Reset the max-output-tokens counter — call after a successful (non-MAX_TOKENS) response. */
+  protected resetMaxOutputAttempts(runId: string): void {
+    this.runMaxOutputAttempts.delete(runId)
+  }
+
+  /** Synthetic user-turn text used by the 'continue' recovery action. */
+  static readonly MAX_OUTPUT_CONTINUE_PROMPT =
+    "Your previous response was cut off mid-output (max_output_tokens). " +
+    "Continue from exactly where you stopped. Output ONLY the remainder " +
+    "of valid JSON — no preamble, no fences, just the missing tail."
 
   /**
    * Provider-level completion validation.

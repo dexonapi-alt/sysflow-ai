@@ -142,6 +142,44 @@ export class GeminiProvider extends BaseProvider {
     }
   }
 
+  private finishReasonOf(result: GenerateContentResult): string | undefined {
+    try {
+      return (result.response.candidates?.[0]?.finishReason as string | undefined) ?? undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Send a message and recover from MAX_TOKENS via escalate-then-continue.
+   * On 'escalate' we cannot rebuild the underlying ChatSession's maxOutputTokens
+   * (it was set when the model was created), so we treat 'escalate' the same as
+   * 'continue' for now: re-issue with a continuation prompt. The counter still
+   * caps total attempts at 3.
+   */
+  private async sendWithMaxOutputRecovery(
+    chat: ChatSession,
+    initialMsg: string,
+    runId: string,
+  ): Promise<{ result: GenerateContentResult; truncated: boolean; combinedText: string }> {
+    let result = await chat.sendMessage(initialMsg)
+    let combined = result.response.text()
+
+    while (this.finishReasonOf(result) === "MAX_TOKENS") {
+      const action = this.nextMaxOutputAction(runId)
+      if (action === "fail") {
+        console.warn(`[max-output] Run ${runId} exceeded ${BaseProvider.MAX_OUTPUT_RECOVERY_ATTEMPTS} recovery attempts — failing`)
+        return { result, truncated: true, combinedText: combined }
+      }
+      console.log(`[max-output] Run ${runId} hit MAX_TOKENS — retrying via ${action} (attempt ${this.runMaxOutputAttempts.get(runId)})`)
+      result = await chat.sendMessage(BaseProvider.MAX_OUTPUT_CONTINUE_PROMPT)
+      combined += result.response.text()
+    }
+
+    this.resetMaxOutputAttempts(runId)
+    return { result, truncated: false, combinedText: combined }
+  }
+
   async call(payload: ProviderPayload): Promise<NormalizedResponse> {
     const genAI = this.getGenAI()
     const geminiModelName = this.getModelName(payload.model)
@@ -167,10 +205,13 @@ export class GeminiProvider extends BaseProvider {
         this.setRunTask(payload.runId, payload.userMessage)
 
         const userMsg = this.buildInitialUserMessage(payload)
-        const result = await chat.sendMessage(userMsg)
-        const text = result.response.text()
+        const { result, truncated, combinedText } = await this.sendWithMaxOutputRecovery(chat, userMsg, payload.runId)
+        if (truncated) {
+          this.clearRunState(payload.runId)
+          return this.failedResponse(`Model output exceeded max-output-tokens recovery limit (${BaseProvider.MAX_OUTPUT_RECOVERY_ATTEMPTS} attempts).`)
+        }
 
-        let normalized = this.parseJsonResponse(text, payload.runId)
+        let normalized = this.parseJsonResponse(combinedText, payload.runId)
         normalized.usage = this.extractUsage(result)
         this.onSuccessfulCall()
 
@@ -277,11 +318,14 @@ export class GeminiProvider extends BaseProvider {
 
       const toolMsg = this.buildToolResultMessage(payload)
 
-      const result = await chat.sendMessage(toolMsg)
-      const text = result.response.text()
+      const { result, truncated, combinedText } = await this.sendWithMaxOutputRecovery(chat, toolMsg, payload.runId)
+      if (truncated) {
+        this.clearRunState(payload.runId)
+        return this.failedResponse(`Model output exceeded max-output-tokens recovery limit (${BaseProvider.MAX_OUTPUT_RECOVERY_ATTEMPTS} attempts).`)
+      }
 
       // ActionPlanner handles broken args and loops in the handler layer
-      let normalized = this.parseJsonResponse(text, payload.runId)
+      let normalized = this.parseJsonResponse(combinedText, payload.runId)
 
       normalized.usage = this.extractUsage(result)
       this.onSuccessfulCall()

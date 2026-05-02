@@ -8,6 +8,7 @@ function classifyFailureErrorCode(error: string | undefined): ServerErrorCode {
   if (lower.includes("usage limit")) return "usage_limit"
   if (lower.includes("rate limit") || lower.includes("429") || lower.includes("quota")) return "rate_limit"
   if (lower.includes("prompt too long") || lower.includes("tokens) exceeds")) return "prompt_too_long"
+  if (lower.includes("max-output-tokens") || lower.includes("max_output_tokens")) return "unknown" // surfaces in CLI as a regular failure for now
   return "unknown"
 }
 
