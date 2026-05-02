@@ -1,219 +1,37 @@
 import os from "node:os"
 import path from "node:path"
 import readline from "node:readline"
-import chalk from "chalk"
 import ora from "ora"
-import { callServer, callServerStream } from "../lib/server.js"
+import { callServer, callServerStream, type ServerError } from "../lib/server.js"
 import { ensureSysbase, getSelectedModel, getSysbasePath, getReasoningEnabled, getAuthToken } from "../lib/sysbase.js"
 import { executeTool, executeToolsBatch } from "./executor.js"
 import { readFileTool, computeLineDiff } from "./tools.js"
-import { getLastDiff, formatDiffColored, clearRunDiffs } from "./diff.js"
+import { clearRunDiffs } from "./diff.js"
 import { getOrBuildIndex, compactTree } from "./indexer.js"
 import { ensureActiveChat } from "../commands/chats.js"
-
-interface ServerError extends Error {
-  code?: string
-  plan?: string
-}
+import {
+  colors,
+  BOX,
+  boxTop,
+  boxMid,
+  boxBot,
+  revealReasoning,
+  formatToolLabel,
+  isHiddenStep,
+  renderMarkdown,
+  renderPipelineBox,
+  printStepTransition,
+} from "../cli/render.js"
+import {
+  enableDiffExpand,
+  disableDiffExpand,
+  startDiffKeyListener,
+} from "../cli/diff-preview.js"
+import { renderToolResultPreview } from "../cli/tool-result-preview.js"
+import { classifyResponse, makeRetryBudget, noteSuccess, type RetryBudget } from "./state-machine.js"
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-// ─── Color palette ───
-
-const colors = {
-  accent: chalk.hex("#7C6FFF"),       // purple accent
-  accentDim: chalk.hex("#5A50B8"),    // muted purple
-  success: chalk.hex("#58D68D"),      // green
-  warning: chalk.hex("#F4D03F"),      // yellow
-  error: chalk.hex("#E74C3C"),        // red
-  info: chalk.hex("#5DADE2"),         // blue
-  muted: chalk.hex("#7F8C8D"),       // gray
-  bright: chalk.hex("#ECF0F1"),      // off-white
-  tool: chalk.hex("#48C9B0"),        // teal for tool names
-  file: chalk.hex("#AEB6BF"),        // silver for paths
-  bar: chalk.hex("#34495E"),         // dark bar color
-}
-
-// ─── Box drawing helpers ───
-
-const BOX = {
-  tl: "╭", tr: "╮", bl: "╰", br: "╯",
-  h: "─", v: "│",
-  lt: "├", rt: "┤",
-  dot: "●", ring: "○", arrow: "▸", check: "✔", cross: "✖", dash: "─",
-} as const
-
-function boxLine(width: number): string {
-  return colors.bar(BOX.h.repeat(width))
-}
-
-function boxTop(label: string, width = 40): string {
-  const inner = ` ${label} `
-  const pad = Math.max(0, width - inner.length - 2)
-  return colors.bar(BOX.tl + BOX.h) + colors.accent.bold(inner) + colors.bar(BOX.h.repeat(pad) + BOX.tr)
-}
-
-function boxMid(content: string, width = 40): string {
-  return colors.bar(BOX.v) + " " + content
-}
-
-function boxBot(width = 40): string {
-  return colors.bar(BOX.bl + BOX.h.repeat(width) + BOX.br)
-}
-
-// ─── Reasoning: instant display with cascade reveal animation ───
-
-async function revealReasoning(text: string): Promise<void> {
-  // Truncate long reasoning to keep output clean
-  const maxLen = 280
-  let display = text.trim()
-  if (display.length > maxLen) {
-    display = display.slice(0, maxLen).trimEnd() + "..."
-  }
-
-  const lines = display.split("\n")
-
-  // Print each line with a fast cascade delay (no cursor movement — Windows compatible)
-  for (let i = 0; i < lines.length; i++) {
-    const line = `    ${colors.muted(BOX.v)} ${colors.muted(lines[i])}`
-    console.log(line)
-    if (lines.length > 1 && i < lines.length - 1) {
-      await sleep(20)
-    }
-  }
-  await sleep(60)
-}
-
-// ─── Tool label formatting ───
-
-function extractPathFromArgs(args: Record<string, unknown>): string | null {
-  // Try to find a file path in any string arg value
-  for (const val of Object.values(args)) {
-    if (typeof val === "string" && /^[\w./-]+\.\w+$/.test(val) && val.length < 200) {
-      return val
-    }
-  }
-  // Try args_json if present (broken tool calls sometimes put path there)
-  if (typeof args.args_json === "string") {
-    try {
-      const inner = JSON.parse(args.args_json)
-      if (inner.path) return inner.path as string
-    } catch { /* ignore */ }
-  }
-  return null
-}
-
-function formatToolLabel(tool: string, args: Record<string, unknown>): string | null {
-  if (!args) args = {}
-  // Try multiple sources for the file path
-  const filePath = (args.path as string)
-    || (args.file_path as string)
-    || (args.filePath as string)
-    || extractPathFromArgs(args)
-    || "(unknown)"
-
-  switch (tool) {
-    case "read_file":
-      return colors.tool("read") + " " + colors.file(filePath)
-    case "batch_read":
-      return null
-    case "write_file":
-      return colors.tool("create") + " " + colors.file(filePath)
-    case "edit_file":
-      return colors.tool("edit") + " " + colors.file(filePath)
-    case "create_directory":
-      return colors.tool("mkdir") + " " + colors.file(filePath)
-    case "move_file":
-      return colors.tool("move") + " " + colors.file((args.from as string) || "?") + colors.muted(" → ") + colors.file((args.to as string) || "?")
-    case "delete_file":
-      return colors.tool("delete") + " " + colors.file(filePath)
-    case "file_exists":
-      return colors.tool("check") + " " + colors.file(filePath)
-    case "search_code":
-      return colors.tool("search") + " " + colors.bright(`"${args.pattern || ""}"`)
-    case "search_files":
-      return colors.tool("find") + " " + colors.bright(`"${args.query || args.glob || ""}"`)
-    case "run_command":
-      return colors.tool("run") + " " + colors.bright((args.command as string) || "(no command)")
-    case "web_search":
-      return colors.tool("search web") + " " + colors.bright(`"${args.query || ""}"`)
-    case "batch_write": {
-      const files = (args.files || []) as Array<{ path: string }>
-      return colors.tool("batch write") + " " + colors.muted(`${files.length} files`)
-    }
-    default:
-      return colors.tool(tool || "unknown") + " " + colors.muted(JSON.stringify(args))
-  }
-}
-
-function isHiddenStep(tool: string): boolean {
-  return tool === "list_directory"
-}
-
-// ─── Diff preview system ───
-// Shows collapsed diff (+N -M) with [Tab → diff] hint.
-// When Tab is pressed during the "thinking..." spinner, expands the last diff.
-
-let pendingDiffRunId: string | null = null
-let diffExpandEnabled = false
-
-function enableDiffExpand(runId: string): void {
-  pendingDiffRunId = runId
-  diffExpandEnabled = true
-}
-
-function disableDiffExpand(): void {
-  diffExpandEnabled = false
-  pendingDiffRunId = null
-}
-
-/**
- * Start listening for Tab keypress to expand diffs.
- * Returns a cleanup function to stop listening.
- */
-function startDiffKeyListener(spinner: ReturnType<typeof ora>): () => void {
-  if (!process.stdin.isTTY) return () => {}
-
-  const wasRaw = process.stdin.isRaw
-  process.stdin.setRawMode(true)
-  process.stdin.resume()
-
-  const onData = (data: Buffer) => {
-    const key = data.toString()
-
-    // Tab key
-    if (key === "\t" && diffExpandEnabled && pendingDiffRunId) {
-      const last = getLastDiff(pendingDiffRunId)
-      if (last && last.diff.changed) {
-        spinner.stop()
-        console.log("")
-        console.log(colors.muted(`    ┌── diff: ${last.path}`))
-        const diffStr = formatDiffColored(last.diff)
-        const diffLines = diffStr.split("\n").slice(0, 40) // cap at 40 lines
-        for (const line of diffLines) {
-          console.log(colors.muted("    │ ") + line)
-        }
-        if (diffStr.split("\n").length > 40) {
-          console.log(colors.muted(`    │ ... ${diffStr.split("\n").length - 40} more lines`))
-        }
-        console.log(colors.muted("    └──"))
-        console.log("")
-        spinner.start(colors.muted("thinking..."))
-      }
-      disableDiffExpand()
-    }
-  }
-
-  process.stdin.on("data", onData)
-
-  return () => {
-    process.stdin.removeListener("data", onData)
-    if (!wasRaw && process.stdin.isTTY) {
-      try { process.stdin.setRawMode(false) } catch { /* ignore */ }
-    }
-  }
 }
 
 // ─── User input prompt ───
@@ -226,127 +44,6 @@ function askUser(question: string): Promise<string> {
       resolve(answer.trim())
     })
   })
-}
-
-// ─── Markdown → terminal renderer ───
-
-function renderMarkdown(text: string): string {
-  let inCodeBlock = false
-  const lines = text.split("\n")
-  const result: string[] = []
-
-  for (const raw of lines) {
-    // Code fence toggle
-    if (raw.trimStart().startsWith("```")) {
-      inCodeBlock = !inCodeBlock
-      continue // skip fence lines
-    }
-
-    // Inside code block — render as-is with code color
-    if (inCodeBlock) {
-      result.push(colors.info(raw))
-      continue
-    }
-
-    let line = raw
-
-    // Headers: ## Title → bold colored
-    if (/^#{1,3}\s/.test(line)) {
-      result.push("")
-      result.push(colors.accent.bold(line.replace(/^#{1,3}\s+/, "")))
-      continue
-    }
-
-    // Empty lines → preserved as spacing
-    if (line.trim() === "") {
-      result.push("")
-      continue
-    }
-
-    // Apply inline formatting BEFORE bullet/number detection
-    // Bold: **text**
-    line = line.replace(/\*\*([^*]+)\*\*/g, (_m, b: string) => colors.bright.bold(b))
-    // Inline code: `code`
-    line = line.replace(/`([^`]+)`/g, (_m, c: string) => colors.info(c))
-
-    // Bullet points: - item or * item (with any indentation)
-    if (/^\s*[-*]\s/.test(line)) {
-      line = line.replace(/^(\s*)([-*])\s/, `$1${colors.accent(BOX.arrow)} `)
-      result.push(line)
-      continue
-    }
-
-    // Numbered list: 1. item (with any indentation)
-    if (/^\s*\d+\.\s/.test(line)) {
-      line = line.replace(/^(\s*)(\d+\.)\s/, `$1${colors.accent("$2")} `)
-      result.push(line)
-      continue
-    }
-
-    result.push(line)
-  }
-
-  // Clean up leading/trailing empty lines
-  while (result.length > 0 && result[0] === "") result.shift()
-  while (result.length > 0 && result[result.length - 1] === "") result.pop()
-
-  return result.join("\n")
-}
-
-// ─── Step icon helpers ───
-
-function stepIcon(status: string | undefined): string {
-  if (status === "completed") return colors.success(BOX.check)
-  if (status === "in_progress") return colors.accent(BOX.arrow)
-  return colors.muted(BOX.ring)
-}
-
-function stepLabel(label: string, status: string | undefined): string {
-  if (status === "completed") return colors.success(label)
-  if (status === "in_progress") return colors.accent.bold(label)
-  return colors.muted(label)
-}
-
-// ─── Task Pipeline Display ───
-
-function renderPipelineBox(title: string, goal: string, steps: Array<{ id: string; label: string; status?: string }>, completedSet: Set<string>): void {
-  const width = 46
-
-  console.log("  " + colors.bar(BOX.tl + BOX.h) + colors.accent.bold(` ${title} `) + colors.bar(BOX.h.repeat(Math.max(0, width - title.length - 4)) + BOX.tr))
-  console.log("  " + colors.bar(BOX.v) + " " + colors.muted(goal.length > width ? goal.slice(0, width - 3) + "..." : goal))
-  console.log("  " + colors.bar(BOX.v))
-
-  for (const s of steps) {
-    const isDone = completedSet.has(s.id) || s.status === "completed"
-    const isActive = s.status === "in_progress" && !isDone
-    let icon: string
-    let label: string
-    if (isDone) {
-      icon = colors.success(BOX.check)
-      label = colors.success(s.label)
-    } else if (isActive) {
-      icon = colors.accent(BOX.arrow)
-      label = colors.accent.bold(s.label)
-    } else {
-      icon = colors.muted(BOX.ring)
-      label = colors.muted(s.label)
-    }
-    console.log("  " + colors.bar(BOX.v) + `  ${icon} ${label}`)
-  }
-
-  console.log("  " + colors.bar(BOX.bl + BOX.h.repeat(width) + BOX.br))
-}
-
-/**
- * Print an inline step transition message — no cursor tricks, just a clean line.
- */
-function printStepTransition(completedLabel: string | null | undefined, startedLabel: string | null | undefined): void {
-  if (completedLabel && completedLabel !== "undefined") {
-    console.log(`  ${colors.success(BOX.check)} ${colors.success(completedLabel)}`)
-  }
-  if (startedLabel && startedLabel !== "undefined") {
-    console.log(`  ${colors.accent(BOX.arrow)} ${colors.accent.bold(startedLabel)}`)
-  }
 }
 
 function resolveFileMentions(prompt: string, cwd: string): { prompt: string; mentions: Array<{ path: string; absolute: string }> } {
@@ -429,20 +126,19 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   }
 
   let response: Record<string, unknown>
+  const budget: RetryBudget = makeRetryBudget()
 
-  // ─── Initial call with task-driven retry on rate/usage limits ───
+  // Wrap callServerStream / callServer in a single retryable call. USAGE_LIMIT bubbles up.
   async function makeServerCall(payload: Record<string, unknown>, phaseHandler?: (label: string) => void): Promise<Record<string, unknown>> {
     try {
       return await callServerStream(payload, phaseHandler)
     } catch (err) {
-      if ((err as ServerError).code === "USAGE_LIMIT") {
-        throw err // let outer handler decide
-      }
-      // Fallback to non-streaming
+      if ((err as ServerError).code === "USAGE_LIMIT") throw err
       return await callServer(payload)
     }
   }
 
+  // ─── Initial call with task-driven retry on rate/usage limits ───
   let initialAttempts = 0
   const MAX_INITIAL_ATTEMPTS = 6
   while (true) {
@@ -481,36 +177,21 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   let taskShown = false
   let taskSteps: Array<{ id: string; label: string; status?: string }> = []
   const completedSteps = new Set<string>()
-  let consecutiveErrors = 0
-  const MAX_CONSECUTIVE_ERRORS = 3
   let lastDisplayedAction: string | null = null
   let lastDisplayedReasoning: string | null = null
   const currentRunId = (response.runId as string) || ""
+  let lastPipelineStepId: string | null = null
 
-  // ─── Task pipeline tracking ───
-  let lastPipelineStepId: string | null = null  // track which step was last shown as active
-
-  // ─── Diff preview: Tab keypress listener ───
   const cleanupDiffListener = startDiffKeyListener(spinner)
 
-  // ─── Task-driven persistence state ───
-  let clientCompletionRejections = 0  // client-side completion verification
-  let rateLimitRetries = 0
-  const MAX_RATE_LIMIT_RETRIES = 8       // total retries across all rate limit events
-  let rateLimitBackoffMs = 5000           // starts at 5s, doubles each time
-  const MAX_RATE_LIMIT_BACKOFF = 120_000  // cap at 2 minutes
-  let failureRetries = 0
-  const MAX_FAILURE_RETRIES = 5           // auto-retry recoverable failures
-
   while (true) {
-    // Safety: detect misclassified responses — if "completed" but message contains needs_tool JSON
+    // Safety: detect misclassified responses — "completed" but message contains needs_tool JSON
     if (response.status === "completed") {
       const msg = (response.message || response.content || "") as string
       if (msg.trimStart().startsWith("{")) {
         try {
           const parsed = JSON.parse(msg)
           if (parsed.kind === "needs_tool" && (parsed.tool || parsed.tools)) {
-            // Re-map as needs_tool response
             response.status = "needs_tool"
             response.tool = parsed.tool || undefined
             response.args = parsed.args || undefined
@@ -536,150 +217,141 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       }
     }
 
-    switch (response.status) {
-      case "completed": {
-        // ─── CLIENT-SIDE COMPLETION VERIFICATION ───
-        // Don't blindly trust "completed" — check if work actually matches the prompt
-        const completionMsg = ((response.message || response.content || "") as string).toLowerCase()
-        const isComplexPrompt = /full[- ]?stack|backend.*frontend|multiple\s+modules|end[- ]?to[- ]?end|crud.*auth|nestjs.*next/i.test(prompt)
-        const isShortCompletion = completionMsg.length < 150
-        const hasListedFiles = /files?\s*(created|modified|written)/i.test(completionMsg)
-        const tooFewSteps = stepCount < 5 && isComplexPrompt
+    const transition = classifyResponse(response)
 
-        // Reject completion if it looks premature
-        if (isComplexPrompt && (tooFewSteps || (isShortCompletion && !hasListedFiles)) && response.runId && clientCompletionRejections < 3) {
-          clientCompletionRejections++
+    // ─── Client-side completion verification: reject premature completion ───
+    if (transition.terminal && transition.reason === "completed") {
+      const completionMsg = ((response.message || response.content || "") as string).toLowerCase()
+      const isComplexPrompt = /full[- ]?stack|backend.*frontend|multiple\s+modules|end[- ]?to[- ]?end|crud.*auth|nestjs.*next/i.test(prompt)
+      const isShortCompletion = completionMsg.length < 150
+      const hasListedFiles = /files?\s*(created|modified|written)/i.test(completionMsg)
+      const tooFewSteps = stepCount < 5 && isComplexPrompt
+
+      if (
+        isComplexPrompt
+        && (tooFewSteps || (isShortCompletion && !hasListedFiles))
+        && response.runId
+        && budget.completion_rejection.used < budget.completion_rejection.max
+      ) {
+        budget.completion_rejection.used++
+        spinner.stop()
+        console.log("")
+        console.log(colors.warning(`  ⚠ Task appears incomplete (${stepCount} steps for a complex task)`))
+        console.log(colors.muted(`    Auto-continuing... (attempt ${budget.completion_rejection.used}/${budget.completion_rejection.max})`))
+        console.log("")
+        spinner.start(colors.muted("continuing task..."))
+
+        try {
+          response = await makeServerCall({
+            type: "tool_result",
+            runId: response.runId,
+            tool: "_completion_rejected",
+            result: {
+              error: `CLIENT REJECTION: The task is complex but only ${stepCount} steps were taken. Continue implementing all required files before completing.`,
+              success: false,
+              originalTask: prompt,
+              hint: "Respond with needs_tool to continue. Do NOT respond with completed again until ALL files are created."
+            }
+          }, (label) => { spinner.text = colors.muted(label) })
+        } catch {
+          response = await callServer({
+            type: "tool_result",
+            runId: response.runId,
+            tool: "_completion_rejected",
+            result: { error: "Task incomplete. Continue implementing.", success: false, originalTask: prompt }
+          })
+        }
+        continue
+      }
+    }
+
+    // ─── Handle terminal transitions ───
+    if (transition.terminal) {
+      switch (transition.reason) {
+        case "completed": {
+          await renderCompletion(response, hasReasoning, lastDisplayedReasoning, taskSteps, completedSteps, stepCount)
+          cleanupDiffListener()
+          disableDiffExpand()
+          if (currentRunId) clearRunDiffs(currentRunId)
+          return response
+        }
+        case "session_expired": {
           spinner.stop()
           console.log("")
-          console.log(colors.warning(`  ⚠ Task appears incomplete (${stepCount} steps for a complex task)`))
-          console.log(colors.muted(`    Auto-continuing... (attempt ${clientCompletionRejections}/3)`))
+          console.log(colors.warning("  Session expired (server was restarted)."))
+          console.log(colors.muted("  Run your prompt again with ") + colors.accent("sys \"your prompt\"") + colors.muted(" or ") + colors.accent("sys continue"))
           console.log("")
-
-          spinner.start(colors.muted("continuing task..."))
-          try {
-            response = await makeServerCall({
-              type: "tool_result",
-              runId: response.runId,
-              tool: "_completion_rejected",
-              result: {
-                error: `CLIENT REJECTION: The task is complex (full-stack) but only ${stepCount} steps were taken. The summary is too short and doesn't list files created. You MUST continue implementing. Create ALL backend modules, frontend pages, and configuration files before completing.`,
-                success: false,
-                originalTask: prompt,
-                hint: "Respond with needs_tool to continue implementation. Do NOT respond with completed again until ALL files are created."
-              }
-            }, (label) => { spinner.text = colors.muted(label) })
-          } catch {
-            response = await callServer({
-              type: "tool_result",
-              runId: response.runId,
-              tool: "_completion_rejected",
-              result: {
-                error: "Task incomplete. Continue implementing.",
-                success: false,
-                originalTask: prompt
-              }
-            })
-          }
-          break
+          cleanupDiffListener()
+          return response
         }
-
-        // ─── Accept completion — display results ───
-        spinner.stop()
-
-        let message = (response.message || response.content) as string | null
-        const reasoning = response.reasoning as string | null
-
-        // Safety: if message is raw JSON, extract the content field
-        if (message && message.trimStart().startsWith("{")) {
-          try {
-            const parsed = JSON.parse(message)
-            if (parsed.content && typeof parsed.content === "string") {
-              message = parsed.content
-            }
-          } catch { /* not JSON, use as-is */ }
-        }
-
-        // Show reasoning only if it's different from the message AND from last displayed
-        if (hasReasoning && reasoning && reasoning !== lastDisplayedReasoning && reasoning !== message) {
-          lastDisplayedReasoning = reasoning
-          await revealReasoning(reasoning)
-        }
-
-        console.log("")
-
-        const summary = response.summary as Record<string, unknown> | null
-        if (summary && summary.memoryUpdated) {
-          console.log("  " + boxTop("MEMORY", 36))
-          if (summary.patternSaved) {
-            console.log("  " + boxMid(colors.bright(`Pattern: ${summary.patternSaved}`)))
-          }
-          console.log("  " + boxMid(colors.muted("Shared with the whole team.")))
-          console.log("  " + boxBot(36))
+        case "prompt_too_long": {
+          spinner.stop()
           console.log("")
-        }
-
-        if (taskSteps.length > 0) {
-          // Mark all steps completed at the end
-          for (const s of taskSteps) {
-            completedSteps.add(s.id)
-            s.status = "completed"
-          }
-          const completedTask = response.task as Record<string, unknown> | null
-          const title = (completedTask?.title as string) || `${completedSteps.size}/${taskSteps.length} COMPLETE`
-          const goal = (completedTask?.goal as string) || ""
-          renderPipelineBox(title, goal, taskSteps, completedSteps)
+          console.log(colors.warning("  ⚠ " + ((response.error as string) || "Prompt too long")))
+          console.log(colors.muted("  Try a shorter prompt or fewer @file mentions, or run ") + colors.accent("sys chat new") + colors.muted(" to start fresh."))
           console.log("")
+          cleanupDiffListener()
+          return response
         }
-
-        // Display the completion message with markdown rendering
-        if (message) {
-          const rendered = renderMarkdown(message)
-          const renderedLines = rendered.split("\n")
-          console.log("  " + boxTop("SUMMARY", 50))
-          for (const line of renderedLines) {
-            console.log("  " + boxMid(line, 50))
-          }
-          console.log("  " + boxBot(50))
+        case "malformed_response_exhausted": {
+          spinner.stop()
           console.log("")
+          console.log(colors.error("  ✖ Model returned malformed JSON repeatedly. Aborting."))
+          console.log(colors.muted("  " + ((response.error as string) || "")))
+          console.log("")
+          cleanupDiffListener()
+          throw new Error((response.error as string) || "malformed_response")
         }
+        default: {
+          spinner.stop()
+          cleanupDiffListener()
+          disableDiffExpand()
+          if (currentRunId) clearRunDiffs(currentRunId)
+          throw new Error(`Unexpected terminal: ${transition.reason}`)
+        }
+      }
+    }
 
-        // Animated completion line
-        const doneText = `  ${colors.success(BOX.check)} done`
-        const stepText = colors.muted(` ${BOX.dash} ${stepCount} steps`)
-        process.stdout.write(doneText)
-        await sleep(60)
-        console.log(stepText)
-        console.log("")
-
-        // Cleanup diff state
-        cleanupDiffListener()
-        disableDiffExpand()
-        if (currentRunId) clearRunDiffs(currentRunId)
-
-        return response
+    // ─── Continue transitions ───
+    switch (transition.reason) {
+      case "tool_executed":
+      case "tool_batch_executed": {
+        const result = await handleNeedsTool(
+          response,
+          spinner,
+          { hasReasoning, lastDisplayedAction, lastDisplayedReasoning, currentRunId, taskShown, taskSteps, completedSteps, lastPipelineStepId, budget },
+          makeServerCall,
+        )
+        response = result.response
+        stepCount = result.stepCount === undefined ? stepCount + 1 : stepCount + result.stepCount
+        taskShown = result.taskShown
+        taskSteps = result.taskSteps
+        lastDisplayedAction = result.lastDisplayedAction
+        lastDisplayedReasoning = result.lastDisplayedReasoning
+        lastPipelineStepId = result.lastPipelineStepId
+        noteSuccess(budget)
+        break
       }
 
-      case "waiting_for_user": {
+      case "user_responded": {
         spinner.stop()
         console.log("")
         const questionText = (response.message || response.content || "Waiting for your input") as string
-        // Render the question with markdown formatting
         const renderedQ = renderMarkdown(questionText)
         for (const qLine of renderedQ.split("\n")) {
           console.log("  " + boxMid(qLine, 50))
         }
         console.log("")
 
-        // Prompt user for input
         const userAnswer = await askUser(questionText)
 
         if (!userAnswer || userAnswer.toLowerCase() === "quit" || userAnswer.toLowerCase() === "exit") {
           console.log(colors.muted("  cancelled."))
           console.log("")
+          cleanupDiffListener()
           return response
         }
 
-        // Send user's answer back to the server and continue the loop
         spinner.start(colors.muted("thinking..."))
         try {
           response = await makeServerCall({
@@ -690,9 +362,8 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
           }, (label) => { spinner.text = colors.muted(label) })
         } catch (userErr) {
           if ((userErr as ServerError).code === "USAGE_LIMIT") {
-            // Rate limit during user response — wait and retry
-            rateLimitRetries++
-            const waitMs = Math.min(10000 * rateLimitRetries, MAX_RATE_LIMIT_BACKOFF)
+            budget.usage_limit.used++
+            const waitMs = Math.min(10_000 * budget.usage_limit.used, budget.usage_limit.maxBackoffMs)
             spinner.stop()
             console.log(colors.warning(`  ⚠ Usage limit — waiting ${Math.round(waitMs / 1000)}s...`))
             await sleep(waitMs)
@@ -708,453 +379,491 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         break
       }
 
-      case "failed": {
+      case "rate_limit_retry":
+      case "usage_limit_retry":
+      case "failure_retry": {
         const errorMsg = (response.error as string) || "Agent failed"
-        const isSessionExpired = errorMsg.includes("Session expired") || errorMsg.includes("Run not found")
-        const isRateLimited = errorMsg.includes("rate limit") || errorMsg.includes("Rate limit") || errorMsg.includes("429") || errorMsg.includes("quota") || errorMsg.includes("RESOURCE_EXHAUSTED") || errorMsg.includes("auto-retry")
-        const isUsageLimit = errorMsg.includes("Usage limit") || errorMsg.includes("usage_limit")
+        const isRateLimit = transition.reason === "rate_limit_retry"
+        const isUsageLimit = transition.reason === "usage_limit_retry"
 
-        // Session expired — don't retry, just tell the user
-        if (isSessionExpired) {
-          spinner.stop()
-          console.log("")
-          console.log(colors.warning("  Session expired (server was restarted)."))
-          console.log(colors.muted("  Run your prompt again with ") + colors.accent("sys \"your prompt\"") + colors.muted(" or ") + colors.accent("sys continue"))
-          console.log("")
-          return response
-        }
-
-        // ─── Task-driven: auto-retry rate limits with exponential backoff ───
-        if (isRateLimited && rateLimitRetries < MAX_RATE_LIMIT_RETRIES && response.runId) {
-          rateLimitRetries++
-          spinner.stop()
-          console.log(colors.warning(`  ⚠ Rate limited — waiting ${Math.round(rateLimitBackoffMs / 1000)}s (retry ${rateLimitRetries}/${MAX_RATE_LIMIT_RETRIES})`))
-          console.log(colors.muted("    Server will try fallback models automatically."))
-          await sleep(rateLimitBackoffMs)
-          rateLimitBackoffMs = Math.min(rateLimitBackoffMs * 2, MAX_RATE_LIMIT_BACKOFF)
-          spinner.start(colors.muted("retrying after rate limit..."))
-          try {
-            response = await makeServerCall({
-              type: "tool_result",
-              runId: response.runId,
-              tool: "_recovery",
-              result: {
-                error: errorMsg,
-                success: false,
-                hint: "Rate limit was hit. The system waited and is retrying. Continue with the task using fewer tokens if possible."
-              }
-            }, (label) => { spinner.text = colors.muted(label) })
-          } catch (retryErr) {
-            if ((retryErr as ServerError).code === "USAGE_LIMIT") {
-              // Usage limit during retry — wait longer
-              rateLimitRetries++
-              const waitMs = Math.min(rateLimitBackoffMs * 2, MAX_RATE_LIMIT_BACKOFF)
-              spinner.stop()
-              console.log(colors.warning(`  ⚠ Usage limit during retry — waiting ${Math.round(waitMs / 1000)}s`))
-              await sleep(waitMs)
-              spinner.start(colors.muted("retrying..."))
-              response = { ...response, status: "failed", error: errorMsg }
-            } else {
-              response = await callServer({
-                type: "tool_result",
-                runId: response.runId,
-                tool: "_recovery",
-                result: { error: errorMsg, success: false }
-              })
-            }
-          }
-          break
-        }
-
-        // ─── Task-driven: auto-retry usage limits ───
-        if (isUsageLimit && rateLimitRetries < MAX_RATE_LIMIT_RETRIES) {
-          rateLimitRetries++
-          const waitMs = Math.min(30000 * rateLimitRetries, MAX_RATE_LIMIT_BACKOFF)
-          spinner.stop()
-          console.log(colors.warning(`  ⚠ Usage limit — waiting ${Math.round(waitMs / 1000)}s (retry ${rateLimitRetries}/${MAX_RATE_LIMIT_RETRIES})`))
-          await sleep(waitMs)
-          spinner.start(colors.muted("retrying after usage limit..."))
-          // Re-send the last state to the server
-          if (response.runId) {
-            try {
-              response = await makeServerCall({
-                type: "tool_result",
-                runId: response.runId,
-                tool: "_recovery",
-                result: { error: errorMsg, success: false, hint: "Usage limit was hit. Reduce token usage and continue the task." }
-              }, (label) => { spinner.text = colors.muted(label) })
-            } catch {
-              response = { ...response, status: "failed", error: errorMsg }
-            }
-          }
-          break
-        }
-
-        // ─── Task-driven: auto-retry generic failures if task is in progress ───
-        if (stepCount > 0 && failureRetries < MAX_FAILURE_RETRIES && response.runId) {
-          failureRetries++
-          consecutiveErrors++
-          spinner.stop()
-
-          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS && failureRetries >= MAX_FAILURE_RETRIES) {
-            // Truly exhausted — give up
-            console.log(colors.error(`  ${BOX.cross} ${errorMsg}`))
-            console.log(colors.error(`  Task failed after ${failureRetries} retries and ${consecutiveErrors} consecutive errors.`))
-            console.log("")
+        if (isRateLimit) {
+          if (budget.rate_limit.used >= budget.rate_limit.max || !response.runId) {
+            spinner.fail(colors.error(errorMsg))
+            console.log(colors.muted(`  Exhausted rate-limit retries (${budget.rate_limit.used}/${budget.rate_limit.max})`))
+            cleanupDiffListener()
             throw new Error(errorMsg)
           }
-
-          console.log(colors.error(`  ${BOX.cross} ${errorMsg}`))
-          console.log(colors.muted(`    Auto-retrying (${failureRetries}/${MAX_FAILURE_RETRIES})...`))
-          spinner.start(colors.muted("retrying..."))
-          try {
-            response = await makeServerCall({
-              type: "tool_result",
-              runId: response.runId,
-              tool: "_recovery",
-              result: {
-                error: errorMsg,
-                success: false,
-                hint: "Please fix the issue and continue. Do NOT give up. Respond with needs_tool to take the next action."
-              }
-            }, (label) => { spinner.text = colors.muted(label) })
-          } catch {
-            response = await callServer({
-              type: "tool_result",
-              runId: response.runId,
-              tool: "_recovery",
-              result: { error: errorMsg, success: false, hint: "Continue the task." }
-            })
-          }
-          break
-        }
-
-        spinner.fail(colors.error(errorMsg))
-        if (rateLimitRetries > 0 || failureRetries > 0) {
-          console.log(colors.muted(`  Exhausted retries: ${rateLimitRetries} rate limit, ${failureRetries} failure retries`))
-        }
-        throw new Error(errorMsg)
-      }
-
-      case "needs_tool": {
-        stepCount++
-        // Reset failure counters on successful progress
-        consecutiveErrors = 0
-        failureRetries = 0
-        // Gradually reduce rate limit backoff on success
-        if (rateLimitBackoffMs > 5000) {
-          rateLimitBackoffMs = Math.max(5000, rateLimitBackoffMs / 2)
-        }
-
-        // Handle step transitions from server pipeline
-        const stepTransition = response.stepTransition as { complete?: string; start?: string } | undefined
-        if (stepTransition) {
-          if (stepTransition.complete) completedSteps.add(stepTransition.complete)
-        }
-
-        const toolCalls = response.tools as Array<{ id: string; tool: string; args: Record<string, unknown> }> | undefined
-        const isParallel = toolCalls && toolCalls.length > 1
-
-        // ─── Task Pipeline: show box once, then inline step transitions ───
-        const task = response.task as Record<string, unknown> | null
-        if (task) {
-          const incomingSteps = (task.steps || []) as Array<{ id: string; label: string; status?: string }>
-
-          // Sync step statuses from server
-          for (const s of incomingSteps) {
-            if (s.status === "completed" && s.id) completedSteps.add(s.id)
-            const existing = taskSteps.find((ts) => ts.id === s.id)
-            if (existing) existing.status = s.status
-          }
-          taskSteps = incomingSteps
-
-          if (!taskShown) {
-            // First display — print the full pipeline box once
-            spinner.stop()
-            taskShown = true
-            console.log("")
-            renderPipelineBox(task.title as string, task.goal as string, taskSteps, completedSteps)
-            console.log("")
-            // Track which step is shown as active
-            const activeStep = taskSteps.find((s) => s.status === "in_progress")
-            lastPipelineStepId = activeStep?.id || null
-            spinner.start(colors.muted("thinking..."))
-          } else if (stepTransition) {
-            // Show inline step transition — no cursor tricks
-            spinner.stop()
-            const completedStep = stepTransition.complete ? taskSteps.find((s) => s.id === stepTransition.complete) : undefined
-            const startedStep = stepTransition.start ? taskSteps.find((s) => s.id === stepTransition.start) : undefined
-
-            // Only show if it's a new transition with valid labels (guard against undefined)
-            if (startedStep && startedStep.label && startedStep.id !== lastPipelineStepId) {
-              console.log("")
-              printStepTransition(completedStep?.label || null, startedStep.label)
-              lastPipelineStepId = startedStep.id
-            }
-            spinner.start(colors.muted("thinking..."))
-          }
-        }
-
-        if (isParallel) {
-          // ═══ PARALLEL EXECUTION PATH ═══
+          budget.rate_limit.used++
           spinner.stop()
-
-          if (hasReasoning && response.reasoning && response.reasoning !== lastDisplayedReasoning) {
-            lastDisplayedReasoning = response.reasoning as string
-            await revealReasoning(response.reasoning as string)
+          console.log(colors.warning(`  ⚠ Rate limited — waiting ${Math.round(budget.rate_limit.backoffMs / 1000)}s (retry ${budget.rate_limit.used}/${budget.rate_limit.max})`))
+          await sleep(budget.rate_limit.backoffMs)
+          budget.rate_limit.backoffMs = Math.min(budget.rate_limit.backoffMs * 2, budget.rate_limit.maxBackoffMs)
+          spinner.start(colors.muted("retrying after rate limit..."))
+        } else if (isUsageLimit) {
+          if (budget.usage_limit.used >= budget.usage_limit.max) {
+            spinner.fail(colors.error(errorMsg))
+            cleanupDiffListener()
+            throw new Error(errorMsg)
           }
-
-          // Check if any tools are shell commands
-          const hasCommands = toolCalls!.some((tc) => tc.tool === "run_command")
-
-          // Show batch header
-          console.log("")
-          const batchLabel = hasCommands ? "batch" : "parallel"
-          console.log(colors.accent(`    ${BOX.tl}${BOX.h}${BOX.h} ${batchLabel} `) + colors.muted(`(${toolCalls!.length} tools)`))
-
-          // List tools
-          for (let i = 0; i < toolCalls!.length; i++) {
-            const tc = toolCalls![i]
-            const label = formatToolLabel(tc.tool, tc.args)
-            await sleep(30)
-            console.log(colors.accent(`    ${BOX.v}`) + `  ${colors.muted(BOX.ring)} ` + (label || `${tc.tool} ${JSON.stringify(tc.args)}`))
-          }
-
-          if (hasCommands) {
-            // Commands present — run everything without spinner (commands need terminal)
-            console.log("")
-            try {
-              response = await executeToolsBatch(toolCalls!, response.runId as string)
-            } catch (batchError) {
-              consecutiveErrors++
-              console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.error("error:")} ` + colors.muted((batchError as Error).message))
-
-              if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-                console.log(colors.error(`\n  aborted: ${MAX_CONSECUTIVE_ERRORS} consecutive errors`))
-                throw new Error("Too many consecutive tool errors")
-              }
-
-              spinner.start(colors.muted("thinking..."))
-              response = await callServer({
-                type: "tool_result",
-                runId: response.runId,
-                tool: "_recovery",
-                result: { error: (batchError as Error).message, success: false }
-              })
-              break
-            }
-            consecutiveErrors = 0
-            console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.success("done")}`)
-            console.log("")
-            spinner.start(colors.muted("thinking..."))
-            break
-          }
-
-          // Pure file operations — run with spinner
-          spinner.start(colors.muted(`  executing ${toolCalls!.length} tools...`))
-
-          try {
-            response = await executeToolsBatch(toolCalls!, response.runId as string, (label) => {
-              spinner.text = colors.muted(`  ${label}`)
-            })
-            consecutiveErrors = 0
-            spinner.stop()
-
-            // Animated completion: mark each tool done
-            process.stdout.write(`\x1b[${toolCalls!.length}A`)
-            for (let i = 0; i < toolCalls!.length; i++) {
-              const tc = toolCalls![i]
-              const label = formatToolLabel(tc.tool, tc.args)
-              process.stdout.write("\r\x1b[K")
-              console.log(colors.accent(`    ${BOX.v}`) + `  ${colors.success(BOX.check)} ` + (label || `${tc.tool}`))
-              await sleep(50)
-            }
-
-            console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.success("done")}`)
-            console.log("")
-            spinner.start(colors.muted("thinking..."))
-          } catch (batchError) {
-            consecutiveErrors++
-            spinner.stop()
-            console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.error("error:")} ` + colors.muted((batchError as Error).message))
-
-            if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-              console.log(colors.error(`\n  aborted: ${MAX_CONSECUTIVE_ERRORS} consecutive errors`))
-              throw new Error("Too many consecutive tool errors")
-            }
-
-            spinner.start(colors.muted("thinking..."))
-            response = await callServer({
-              type: "tool_result",
-              runId: response.runId,
-              tool: "_recovery",
-              result: { error: (batchError as Error).message, success: false }
-            })
-          }
-          break
-        }
-
-        // ═══ SINGLE TOOL PATH ═══
-        // If server returned tools array with 1 entry but no top-level tool/args, extract them
-        const singleFromArray = (!response.tool && Array.isArray(response.tools) && (response.tools as Array<Record<string, unknown>>).length === 1)
-          ? (response.tools as Array<Record<string, unknown>>)[0]
-          : null
-        if (singleFromArray) {
-          response.tool = singleFromArray.tool
-          response.args = singleFromArray.args
-        }
-
-        const pendingTaskStep = (response.taskStep as string) || null
-        const args = (response.args || {}) as Record<string, unknown>
-
-        const actionKey = `${response.tool}:${JSON.stringify(args)}:${response.reasoning || ""}`
-        const isDuplicate = actionKey === lastDisplayedAction
-        lastDisplayedAction = actionKey
-
-        await sleep(hasReasoning ? 200 : 100 + Math.floor(Math.random() * 150))
-
-        if (isHiddenStep(response.tool as string)) {
-          spinner.text = colors.muted("scanning directory...")
-        } else if (isDuplicate) {
+          budget.usage_limit.used++
+          const waitMs = Math.min(budget.usage_limit.baseMs * Math.pow(2, budget.usage_limit.used - 1), budget.usage_limit.maxBackoffMs)
           spinner.stop()
-          spinner.start(colors.muted("thinking..."))
+          console.log(colors.warning(`  ⚠ Usage limit — waiting ${Math.round(waitMs / 1000)}s (retry ${budget.usage_limit.used}/${budget.usage_limit.max})`))
+          await sleep(waitMs)
+          spinner.start(colors.muted("retrying after usage limit..."))
         } else {
-          if (hasReasoning && response.reasoning && response.reasoning !== lastDisplayedReasoning) {
-            lastDisplayedReasoning = response.reasoning as string
-            spinner.stop()
-            await revealReasoning(response.reasoning as string)
-          } else {
-            spinner.stop()
-          }
-
-          if (response.tool === "batch_read") {
-            const paths = (args.paths || []) as string[]
-            console.log(`    ${colors.tool("read")} ${colors.muted(`${paths.length} files`)}`)
-            for (const p of paths) {
-              console.log(colors.muted(`      ${BOX.dot} ${p}`))
+          if (stepCount === 0 || budget.failure.used >= budget.failure.max || !response.runId) {
+            spinner.fail(colors.error(errorMsg))
+            if (budget.rate_limit.used > 0 || budget.failure.used > 0) {
+              console.log(colors.muted(`  Exhausted retries: ${budget.rate_limit.used} rate limit, ${budget.failure.used} failure retries`))
             }
-          } else if (response.tool === "run_command") {
-            const cmd = (args?.command as string) || ""
-            const isInteractiveCmd = cmd ? /^npx\s+(--yes\s+)?(create-|@nestjs\/cli|@angular\/cli|nuxi)|^npm\s+(create|init)|^yarn\s+create|^pnpm\s+create/.test(cmd.trim()) : false
-            if (isInteractiveCmd) {
-              console.log(`    ${colors.accent(BOX.arrow)} ${colors.tool("run")} ${colors.bright(cmd)}`)
-              console.log(colors.muted("    (interactive — answer prompts below)"))
-            } else {
-              spinner.start(colors.muted("  ") + colors.bright(cmd))
-            }
-          } else {
-            const label = formatToolLabel(response.tool as string, args)
-            const hasDiff = response.tool === "write_file" || response.tool === "edit_file"
-            if (hasDiff) {
-              let added = 0, removed = 0
-              // For search/replace or line edits, estimate diff from the operation
-              if (args.search !== undefined && response.tool === "edit_file") {
-                const searchLines = ((args.search as string) || "").split("\n").length
-                const replaceLines = ((args.replace as string) || "").split("\n").filter(Boolean).length
-                removed = searchLines
-                added = replaceLines
-              } else if (args.line_start !== undefined && response.tool === "edit_file") {
-                const lineStart = args.line_start as number
-                const lineEnd = (args.line_end as number) || lineStart
-                removed = lineEnd - lineStart + 1
-                added = ((args.content as string) || "").split("\n").length
-              } else if (args.insert_at !== undefined && response.tool === "edit_file") {
-                added = ((args.content as string) || "").split("\n").length
-              } else {
-                const newContent = (args.content || args.patch || "") as string
-                let oldContent: string | null = null
-                try { oldContent = (await readFileTool(args.path as string)).content } catch { /* new file */ }
-                const lineDiff = computeLineDiff(oldContent, newContent)
-                added = lineDiff.added
-                removed = lineDiff.removed
-              }
-              const parts: string[] = []
-              if (added > 0) parts.push(colors.success(`+${added}`))
-              if (removed > 0) parts.push(colors.error(`-${removed}`))
-              const diffTag = parts.length > 0 ? " " + parts.join(colors.muted(" ")) : ""
-              const tabHint = (added > 0 || removed > 0) ? colors.muted("  [Tab → diff]") : ""
-              console.log(`    ${colors.accent(BOX.arrow)} ${label}${diffTag}${tabHint}`)
-              // Enable Tab expansion for this diff (will be computed after execution)
-              if (added > 0 || removed > 0) {
-                enableDiffExpand(currentRunId || (response.runId as string) || "")
-              }
-            } else {
-              console.log(`    ${colors.accent(BOX.arrow)} ${label}`)
-            }
+            cleanupDiffListener()
+            throw new Error(errorMsg)
           }
-
-          if (response.tool !== "run_command") {
-            spinner.start(colors.muted("thinking..."))
+          budget.failure.used++
+          budget.failure.consecutiveErrors++
+          spinner.stop()
+          if (budget.failure.consecutiveErrors >= budget.failure.maxConsecutive && budget.failure.used >= budget.failure.max) {
+            console.log(colors.error(`  ${BOX.cross} ${errorMsg}`))
+            console.log(colors.error(`  Task failed after ${budget.failure.used} retries and ${budget.failure.consecutiveErrors} consecutive errors.`))
+            console.log("")
+            cleanupDiffListener()
+            throw new Error(errorMsg)
           }
+          console.log(colors.error(`  ${BOX.cross} ${errorMsg}`))
+          console.log(colors.muted(`    Auto-retrying (${budget.failure.used}/${budget.failure.max})...`))
+          spinner.start(colors.muted("retrying..."))
         }
 
-        const currentTool = response.tool as string
-        const currentCmd = args?.command as string | undefined
+        // Re-issue _recovery to push the agent forward.
+        const recoveryHint = isRateLimit
+          ? "Rate limit was hit. The system waited and is retrying. Continue with the task using fewer tokens if possible."
+          : isUsageLimit
+            ? "Usage limit was hit. Reduce token usage and continue the task."
+            : "Please fix the issue and continue. Do NOT give up. Respond with needs_tool to take the next action."
 
         try {
-          response = await executeTool(response as never, (label) => {
-            spinner.text = colors.muted(label)
-          })
-          consecutiveErrors = 0
-
-          if (currentTool === "run_command") {
-            spinner.stop()
-            const toolResult = response.lastToolResult as Record<string, unknown> | undefined
-            if (toolResult?.skipped) {
-              console.log(colors.warning(`  ⚠ `) + colors.muted(currentCmd) + colors.warning(" (run manually)"))
-            } else if (toolResult?.timedOut) {
-              console.log(colors.warning(`  ⏱ `) + colors.muted(currentCmd) + colors.warning(" (timed out)"))
-              console.log(colors.warning("  command timed out — continuing task..."))
-            } else if (toolResult?.interactive) {
-              console.log("")
-              console.log(`  ${colors.success(BOX.check)} ` + colors.muted(currentCmd) + colors.success(" (done)"))
-              console.log(colors.accent("  continuing task..."))
-            } else {
-              console.log(`  ${colors.success(BOX.check)} ` + colors.muted(currentCmd))
-            }
-            spinner.start(colors.muted("thinking..."))
-          }
-
-          if (pendingTaskStep && taskSteps.length > 0) {
-            const step = taskSteps.find((s) => s.id === pendingTaskStep)
-            if (step) completedSteps.add(step.id)
-          }
-        } catch (toolError) {
-          consecutiveErrors++
-          spinner.stop()
-          if (currentTool === "run_command") {
-            console.log(colors.error(`  ${BOX.cross} `) + colors.muted(currentCmd) + colors.error(` — ${(toolError as Error).message}`))
-          } else {
-            console.log(colors.error(`    ${BOX.cross} ${(toolError as Error).message}`))
-          }
-
-          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-            console.log(colors.error(`\n  aborted: ${MAX_CONSECUTIVE_ERRORS} consecutive errors`))
-            console.log("")
-            throw new Error("Too many consecutive tool errors")
-          }
-
-          spinner.start(colors.muted("thinking..."))
-          response = await callServer({
+          response = await makeServerCall({
             type: "tool_result",
             runId: response.runId,
-            tool: response.tool,
-            result: {
-              error: (toolError as Error).message,
-              success: false,
-              path: args?.path || undefined
-            }
-          })
+            tool: "_recovery",
+            result: { error: errorMsg, success: false, hint: recoveryHint }
+          }, (label) => { spinner.text = colors.muted(label) })
+        } catch (retryErr) {
+          if ((retryErr as ServerError).code === "USAGE_LIMIT") {
+            response = { ...response, status: "failed", error: errorMsg, errorCode: "usage_limit" }
+          } else {
+            response = await callServer({
+              type: "tool_result",
+              runId: response.runId,
+              tool: "_recovery",
+              result: { error: errorMsg, success: false, hint: recoveryHint }
+            })
+          }
         }
         break
       }
 
+      case "completion_rejected": {
+        // Triggered manually by client-side completion verification (handled in handleCompletion path).
+        break
+      }
+
+      case "next_turn":
       default:
-        spinner.stop()
-        cleanupDiffListener()
-        disableDiffExpand()
-        if (currentRunId) clearRunDiffs(currentRunId)
-        throw new Error(`Unexpected status: ${response.status}`)
+        break
     }
   }
+}
+
+// ─── Render the final completion state ───
+
+async function renderCompletion(
+  response: Record<string, unknown>,
+  hasReasoning: boolean,
+  lastDisplayedReasoning: string | null,
+  taskSteps: Array<{ id: string; label: string; status?: string }>,
+  completedSteps: Set<string>,
+  stepCount: number,
+): Promise<void> {
+  let message = (response.message || response.content) as string | null
+  const reasoning = response.reasoning as string | null
+
+  if (message && message.trimStart().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(message)
+      if (parsed.content && typeof parsed.content === "string") {
+        message = parsed.content
+      }
+    } catch { /* not JSON */ }
+  }
+
+  if (hasReasoning && reasoning && reasoning !== lastDisplayedReasoning && reasoning !== message) {
+    await revealReasoning(reasoning)
+  }
+
+  console.log("")
+
+  const summary = response.summary as Record<string, unknown> | null
+  if (summary && summary.memoryUpdated) {
+    console.log("  " + boxTop("MEMORY", 36))
+    if (summary.patternSaved) {
+      console.log("  " + boxMid(colors.bright(`Pattern: ${summary.patternSaved}`)))
+    }
+    console.log("  " + boxMid(colors.muted("Shared with the whole team.")))
+    console.log("  " + boxBot(36))
+    console.log("")
+  }
+
+  if (taskSteps.length > 0) {
+    for (const s of taskSteps) {
+      completedSteps.add(s.id)
+      s.status = "completed"
+    }
+    const completedTask = response.task as Record<string, unknown> | null
+    const title = (completedTask?.title as string) || `${completedSteps.size}/${taskSteps.length} COMPLETE`
+    const goal = (completedTask?.goal as string) || ""
+    renderPipelineBox(title, goal, taskSteps, completedSteps)
+    console.log("")
+  }
+
+  if (message) {
+    const rendered = renderMarkdown(message)
+    const renderedLines = rendered.split("\n")
+    console.log("  " + boxTop("SUMMARY", 50))
+    for (const line of renderedLines) {
+      console.log("  " + boxMid(line, 50))
+    }
+    console.log("  " + boxBot(50))
+    console.log("")
+  }
+
+  const doneText = `  ${colors.success(BOX.check)} done`
+  const stepText = colors.muted(` ${BOX.dash} ${stepCount} steps`)
+  process.stdout.write(doneText)
+  await sleep(60)
+  console.log(stepText)
+  console.log("")
+}
+
+// ─── Handle a needs_tool transition (single or batch) ───
+
+interface NeedsToolCtx {
+  hasReasoning: boolean
+  lastDisplayedAction: string | null
+  lastDisplayedReasoning: string | null
+  currentRunId: string
+  taskShown: boolean
+  taskSteps: Array<{ id: string; label: string; status?: string }>
+  completedSteps: Set<string>
+  lastPipelineStepId: string | null
+  budget: RetryBudget
+}
+
+interface NeedsToolResult {
+  response: Record<string, unknown>
+  stepCount?: number
+  taskShown: boolean
+  taskSteps: Array<{ id: string; label: string; status?: string }>
+  lastDisplayedAction: string | null
+  lastDisplayedReasoning: string | null
+  lastPipelineStepId: string | null
+}
+
+async function handleNeedsTool(
+  response: Record<string, unknown>,
+  spinner: ReturnType<typeof ora>,
+  ctx: NeedsToolCtx,
+  makeServerCall: (payload: Record<string, unknown>, phaseHandler?: (label: string) => void) => Promise<Record<string, unknown>>,
+): Promise<NeedsToolResult> {
+  const { hasReasoning, currentRunId, completedSteps, budget } = ctx
+  let { lastDisplayedAction, lastDisplayedReasoning, taskShown, taskSteps, lastPipelineStepId } = ctx
+
+  // Step transition handling
+  const stepTransition = response.stepTransition as { complete?: string; start?: string } | undefined
+  if (stepTransition?.complete) completedSteps.add(stepTransition.complete)
+
+  const toolCalls = response.tools as Array<{ id: string; tool: string; args: Record<string, unknown> }> | undefined
+  const isParallel = toolCalls && toolCalls.length > 1
+
+  // Pipeline display
+  const task = response.task as Record<string, unknown> | null
+  if (task) {
+    const incomingSteps = (task.steps || []) as Array<{ id: string; label: string; status?: string }>
+    for (const s of incomingSteps) {
+      if (s.status === "completed" && s.id) completedSteps.add(s.id)
+      const existing = taskSteps.find((ts) => ts.id === s.id)
+      if (existing) existing.status = s.status
+    }
+    taskSteps = incomingSteps
+
+    if (!taskShown) {
+      spinner.stop()
+      taskShown = true
+      console.log("")
+      renderPipelineBox(task.title as string, task.goal as string, taskSteps, completedSteps)
+      console.log("")
+      const activeStep = taskSteps.find((s) => s.status === "in_progress")
+      lastPipelineStepId = activeStep?.id || null
+      spinner.start(colors.muted("thinking..."))
+    } else if (stepTransition) {
+      spinner.stop()
+      const completedStep = stepTransition.complete ? taskSteps.find((s) => s.id === stepTransition.complete) : undefined
+      const startedStep = stepTransition.start ? taskSteps.find((s) => s.id === stepTransition.start) : undefined
+      if (startedStep && startedStep.label && startedStep.id !== lastPipelineStepId) {
+        console.log("")
+        printStepTransition(completedStep?.label || null, startedStep.label)
+        lastPipelineStepId = startedStep.id
+      }
+      spinner.start(colors.muted("thinking..."))
+    }
+  }
+
+  if (isParallel) {
+    spinner.stop()
+
+    if (hasReasoning && response.reasoning && response.reasoning !== lastDisplayedReasoning) {
+      lastDisplayedReasoning = response.reasoning as string
+      await revealReasoning(response.reasoning as string)
+    }
+
+    const hasCommands = toolCalls!.some((tc) => tc.tool === "run_command")
+
+    console.log("")
+    const batchLabel = hasCommands ? "batch" : "parallel"
+    console.log(colors.accent(`    ${BOX.tl}${BOX.h}${BOX.h} ${batchLabel} `) + colors.muted(`(${toolCalls!.length} tools)`))
+
+    for (let i = 0; i < toolCalls!.length; i++) {
+      const tc = toolCalls![i]
+      const label = formatToolLabel(tc.tool, tc.args)
+      await sleep(30)
+      console.log(colors.accent(`    ${BOX.v}`) + `  ${colors.muted(BOX.ring)} ` + (label || `${tc.tool} ${JSON.stringify(tc.args)}`))
+    }
+
+    if (hasCommands) {
+      console.log("")
+      try {
+        response = await executeToolsBatch(toolCalls!, response.runId as string)
+      } catch (batchError) {
+        budget.failure.consecutiveErrors++
+        console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.error("error:")} ` + colors.muted((batchError as Error).message))
+        if (budget.failure.consecutiveErrors >= budget.failure.maxConsecutive) {
+          console.log(colors.error(`\n  aborted: ${budget.failure.maxConsecutive} consecutive errors`))
+          throw new Error("Too many consecutive tool errors")
+        }
+        spinner.start(colors.muted("thinking..."))
+        response = await callServer({
+          type: "tool_result",
+          runId: response.runId,
+          tool: "_recovery",
+          result: { error: (batchError as Error).message, success: false }
+        })
+        return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId }
+      }
+      console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.success("done")}`)
+      console.log("")
+      spinner.start(colors.muted("thinking..."))
+      return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId }
+    }
+
+    spinner.start(colors.muted(`  executing ${toolCalls!.length} tools...`))
+
+    try {
+      response = await executeToolsBatch(toolCalls!, response.runId as string, (label) => {
+        spinner.text = colors.muted(`  ${label}`)
+      })
+      spinner.stop()
+
+      process.stdout.write(`\x1b[${toolCalls!.length}A`)
+      for (let i = 0; i < toolCalls!.length; i++) {
+        const tc = toolCalls![i]
+        const label = formatToolLabel(tc.tool, tc.args)
+        process.stdout.write("\r\x1b[K")
+        console.log(colors.accent(`    ${BOX.v}`) + `  ${colors.success(BOX.check)} ` + (label || `${tc.tool}`))
+        await sleep(50)
+      }
+
+      console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.success("done")}`)
+      console.log("")
+      spinner.start(colors.muted("thinking..."))
+    } catch (batchError) {
+      budget.failure.consecutiveErrors++
+      spinner.stop()
+      console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.error("error:")} ` + colors.muted((batchError as Error).message))
+      if (budget.failure.consecutiveErrors >= budget.failure.maxConsecutive) {
+        console.log(colors.error(`\n  aborted: ${budget.failure.maxConsecutive} consecutive errors`))
+        throw new Error("Too many consecutive tool errors")
+      }
+      spinner.start(colors.muted("thinking..."))
+      response = await callServer({
+        type: "tool_result",
+        runId: response.runId,
+        tool: "_recovery",
+        result: { error: (batchError as Error).message, success: false }
+      })
+    }
+    return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId }
+  }
+
+  // ── SINGLE TOOL PATH ──
+  const singleFromArray = (!response.tool && Array.isArray(response.tools) && (response.tools as Array<Record<string, unknown>>).length === 1)
+    ? (response.tools as Array<Record<string, unknown>>)[0]
+    : null
+  if (singleFromArray) {
+    response.tool = singleFromArray.tool
+    response.args = singleFromArray.args
+  }
+
+  const pendingTaskStep = (response.taskStep as string) || null
+  const args = (response.args || {}) as Record<string, unknown>
+
+  const actionKey = `${response.tool}:${JSON.stringify(args)}:${response.reasoning || ""}`
+  const isDuplicate = actionKey === lastDisplayedAction
+  lastDisplayedAction = actionKey
+
+  await sleep(hasReasoning ? 200 : 100 + Math.floor(Math.random() * 150))
+
+  if (isHiddenStep(response.tool as string)) {
+    spinner.text = colors.muted("scanning directory...")
+  } else if (isDuplicate) {
+    spinner.stop()
+    spinner.start(colors.muted("thinking..."))
+  } else {
+    if (hasReasoning && response.reasoning && response.reasoning !== lastDisplayedReasoning) {
+      lastDisplayedReasoning = response.reasoning as string
+      spinner.stop()
+      await revealReasoning(response.reasoning as string)
+    } else {
+      spinner.stop()
+    }
+
+    if (response.tool === "batch_read") {
+      const paths = (args.paths || []) as string[]
+      console.log(`    ${colors.tool("read")} ${colors.muted(`${paths.length} files`)}`)
+      for (const p of paths) {
+        console.log(colors.muted(`      ${BOX.dot} ${p}`))
+      }
+    } else if (response.tool === "run_command") {
+      const cmd = (args?.command as string) || ""
+      const isInteractiveCmd = cmd ? /^npx\s+(--yes\s+)?(create-|@nestjs\/cli|@angular\/cli|nuxi)|^npm\s+(create|init)|^yarn\s+create|^pnpm\s+create/.test(cmd.trim()) : false
+      if (isInteractiveCmd) {
+        console.log(`    ${colors.accent(BOX.arrow)} ${colors.tool("run")} ${colors.bright(cmd)}`)
+        console.log(colors.muted("    (interactive — answer prompts below)"))
+      } else {
+        spinner.start(colors.muted("  ") + colors.bright(cmd))
+      }
+    } else {
+      const label = formatToolLabel(response.tool as string, args)
+      const hasDiff = response.tool === "write_file" || response.tool === "edit_file"
+      if (hasDiff) {
+        let added = 0, removed = 0
+        if (args.search !== undefined && response.tool === "edit_file") {
+          const searchLines = ((args.search as string) || "").split("\n").length
+          const replaceLines = ((args.replace as string) || "").split("\n").filter(Boolean).length
+          removed = searchLines
+          added = replaceLines
+        } else if (args.line_start !== undefined && response.tool === "edit_file") {
+          const lineStart = args.line_start as number
+          const lineEnd = (args.line_end as number) || lineStart
+          removed = lineEnd - lineStart + 1
+          added = ((args.content as string) || "").split("\n").length
+        } else if (args.insert_at !== undefined && response.tool === "edit_file") {
+          added = ((args.content as string) || "").split("\n").length
+        } else {
+          const newContent = (args.content || args.patch || "") as string
+          let oldContent: string | null = null
+          try { oldContent = (await readFileTool(args.path as string)).content } catch { /* new file */ }
+          const lineDiff = computeLineDiff(oldContent, newContent)
+          added = lineDiff.added
+          removed = lineDiff.removed
+        }
+        const parts: string[] = []
+        if (added > 0) parts.push(colors.success(`+${added}`))
+        if (removed > 0) parts.push(colors.error(`-${removed}`))
+        const diffTag = parts.length > 0 ? " " + parts.join(colors.muted(" ")) : ""
+        const tabHint = (added > 0 || removed > 0) ? colors.muted("  [Tab → diff]") : ""
+        console.log(`    ${colors.accent(BOX.arrow)} ${label}${diffTag}${tabHint}`)
+        if (added > 0 || removed > 0) {
+          enableDiffExpand(currentRunId || (response.runId as string) || "")
+        }
+      } else {
+        console.log(`    ${colors.accent(BOX.arrow)} ${label}`)
+      }
+    }
+
+    if (response.tool !== "run_command") {
+      spinner.start(colors.muted("thinking..."))
+    }
+  }
+
+  const currentTool = response.tool as string
+  const currentCmd = args?.command as string | undefined
+
+  try {
+    response = await executeTool(response as never, (label) => {
+      spinner.text = colors.muted(label)
+    })
+
+    // ─── Tool-result preview: replace the silent spinner gap with a one-liner ───
+    if (!isHiddenStep(currentTool)) {
+      const toolResult = response.lastToolResult as Record<string, unknown> | undefined
+      const preview = renderToolResultPreview({ tool: currentTool, result: toolResult })
+      if (preview) {
+        spinner.stop()
+        console.log(preview)
+        spinner.start(colors.muted("thinking..."))
+      }
+    }
+
+    if (currentTool === "run_command") {
+      spinner.stop()
+      const toolResult = response.lastToolResult as Record<string, unknown> | undefined
+      if (toolResult?.skipped) {
+        console.log(colors.warning(`  ⚠ `) + colors.muted(currentCmd) + colors.warning(" (run manually)"))
+      } else if (toolResult?.timedOut) {
+        console.log(colors.warning(`  ⏱ `) + colors.muted(currentCmd) + colors.warning(" (timed out)"))
+        console.log(colors.warning("  command timed out — continuing task..."))
+      } else if (toolResult?.interactive) {
+        console.log("")
+        console.log(`  ${colors.success(BOX.check)} ` + colors.muted(currentCmd) + colors.success(" (done)"))
+        console.log(colors.accent("  continuing task..."))
+      } else {
+        console.log(`  ${colors.success(BOX.check)} ` + colors.muted(currentCmd))
+      }
+      spinner.start(colors.muted("thinking..."))
+    }
+
+    if (pendingTaskStep && taskSteps.length > 0) {
+      const step = taskSteps.find((s) => s.id === pendingTaskStep)
+      if (step) completedSteps.add(step.id)
+    }
+  } catch (toolError) {
+    budget.failure.consecutiveErrors++
+    spinner.stop()
+    if (currentTool === "run_command") {
+      console.log(colors.error(`  ${BOX.cross} `) + colors.muted(currentCmd) + colors.error(` — ${(toolError as Error).message}`))
+    } else {
+      console.log(colors.error(`    ${BOX.cross} ${(toolError as Error).message}`))
+    }
+
+    if (budget.failure.consecutiveErrors >= budget.failure.maxConsecutive) {
+      console.log(colors.error(`\n  aborted: ${budget.failure.maxConsecutive} consecutive errors`))
+      console.log("")
+      throw new Error("Too many consecutive tool errors")
+    }
+
+    spinner.start(colors.muted("thinking..."))
+    response = await callServer({
+      type: "tool_result",
+      runId: response.runId,
+      tool: response.tool,
+      result: {
+        error: (toolError as Error).message,
+        success: false,
+        path: args?.path || undefined
+      }
+    })
+  }
+
+  return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId }
 }
