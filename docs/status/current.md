@@ -1,10 +1,20 @@
 # Current Project Status
 
-> Last updated: 2026-03-26
+> Last updated: 2026-05-02
 
 ## Recent Work
 
-The project just completed a **TypeScript migration**:
+**Phase 1 reasoning + CLI UX pass** (`.claude/plans/applied/2026-05-02-phase-1-reasoning-and-cli-ux.md`):
+
+- **Modular system prompt**: extracted the monolithic `SHARED_SYSTEM_PROMPT` into priority-sorted sections under `server/src/providers/prompt/sections/` (identity, system rules, tools, task guidelines, output efficiency, env info, model-specific) joined by an explicit `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` marker so future provider-side caching can split on it.
+- **Context budget**: new `server/src/services/context-budget.ts` exposes `estimateTokens`, per-tool `TOOL_RESULT_MAX_CHARS`, `applyToolResultBudget`, and `microcompactGeminiHistory`. Wired into both handlers + Gemini chat-history rebuild.
+- **Pre-API token guard**: `user-message.ts` and `tool-result.ts` reject oversized payloads with `errorCode: 'prompt_too_long'` before calling the provider.
+- **Schema fixes**: Gemini `RESPONSE_SCHEMA` now includes `waiting_for_user` in `kind` and a `taskPlan` property.
+- **Malformed-response cap**: `parseJsonResponse` tracks per-run failures and returns `failed` after 2 in a row instead of silently coercing to `list_directory` forever.
+- **CLI refactor**: `cli-client/src/agent/agent.ts` (was 1160 lines of mixed concerns) now imports rendering primitives from `cli/render.ts`, diff-Tab handling from `cli/diff-preview.ts`, tool-result previews from `cli/tool-result-preview.ts`, and dispatches transitions through `agent/state-machine.ts` with retry budgets in `agent/retry.ts`.
+- **Tool-result preview**: each tool now prints a short preview line (first 3 lines for reads, exit code + last stdout line for commands, match count for searches) instead of dropping straight back into the spinner.
+
+Earlier completed work:
 
 - Converted all CLI modules to TypeScript (agent, commands, CLI, lib)
 - Fixed TypeScript errors in server tool-result and billing routes

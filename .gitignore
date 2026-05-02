@@ -27,7 +27,13 @@ npm-debug.log*
 
 # Sysbase (local agent memory per project)
 sysbase/
-.claude/
+
+# Claude/memex working dir — ignore by default, but un-ignore the parts
+# CLAUDE.md says should travel with the repo (knowledge base, plans, skills).
+.claude/*
+!.claude/knowledge/
+!.claude/plans/
+!.claude/skills/
 
 # Lock files (optional — remove if you want to track them)
 # package-lock.json
