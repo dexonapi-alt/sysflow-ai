@@ -2,8 +2,18 @@ import { getAuthToken } from "./sysbase.js"
 
 const SERVER_URL = process.env.SYS_SERVER_URL || "http://localhost:4000"
 
-interface ServerError extends Error {
-  code?: string
+/** Stable error codes the controller can switch on instead of string-matching. */
+export type ServerErrorCode =
+  | "USAGE_LIMIT"
+  | "RATE_LIMIT"
+  | "SESSION_EXPIRED"
+  | "PROMPT_TOO_LONG"
+  | "MALFORMED_RESPONSE"
+  | "NETWORK"
+  | "UNKNOWN"
+
+export interface ServerError extends Error {
+  code?: ServerErrorCode | string
   plan?: string
 }
 
