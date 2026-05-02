@@ -19,6 +19,7 @@ import { ingestToolResult, clearRunContext, buildWorkingContextString } from "..
 import { updatePipelineProgress, completePipeline, clearPipeline, getPipeline, hasPipeline, pipelineToTaskMeta, createPipelineFromAiPlan, createFallbackPipeline } from "../services/task-pipeline.js"
 import { getScaffoldChoice, storeScaffoldChoice, parseScaffoldResponse, clearScaffoldState } from "../services/scaffold-options.js"
 import { getPendingError, clearPendingError, setPendingError, buildFixInstructions, setPendingFileContent, hasPendingErrors, popNextPendingError } from "../services/error-autofix.js"
+import { applyToolResultBudget, estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 /** Track how many times completion was rejected per run (prevent infinite loops) */
@@ -39,12 +40,17 @@ interface ToolResultBody {
 export async function handleToolResult(body: ToolResultBody): Promise<ClientResponse> {
   const isBatch = body.toolResults && body.toolResults.length > 0
 
+  // ─── Tool result budget: clamp oversized results before saving or sending to provider ───
   if (isBatch) {
-    // Save each tool result in the batch
-    for (const tr of body.toolResults!) {
+    body.toolResults = body.toolResults!.map((tr) => ({
+      ...tr,
+      result: applyToolResultBudget(tr.tool, tr.result),
+    }))
+    for (const tr of body.toolResults) {
       await saveToolResult(body.runId, tr.tool, tr.result)
     }
   } else {
+    body.result = applyToolResultBudget(body.tool, body.result)
     await saveToolResult(body.runId, body.tool, body.result)
   }
 
@@ -263,6 +269,21 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
         `Do NOT create new files or directories.`
       )
     }
+  }
+
+  // ─── Pre-API token guard ───
+  const incomingPayloadTokens =
+    estimateTokens(providerPayload.toolResult) +
+    estimateTokens(providerPayload.toolResults) +
+    estimateTokens((context as Record<string, unknown>).workingContext)
+  if (shouldBlockOnTokens(incomingPayloadTokens, run.model)) {
+    console.warn(`[token-guard] BLOCKED tool result: estimated ${incomingPayloadTokens} tokens exceeds ${run.model} effective window`)
+    return {
+      status: "failed",
+      runId: body.runId,
+      error: `Tool result too large (~${incomingPayloadTokens} tokens). Reducing future result sizes via tool-result budget.`,
+      errorCode: "prompt_too_long",
+    } as ClientResponse
   }
 
   let normalized = await callModelAdapter(providerPayload as never)

@@ -1,4 +1,15 @@
-import type { NormalizedResponse, ClientResponse } from "../types.js"
+import type { NormalizedResponse, ClientResponse, ServerErrorCode } from "../types.js"
+
+function classifyFailureErrorCode(error: string | undefined): ServerErrorCode {
+  if (!error) return "unknown"
+  const lower = error.toLowerCase()
+  if (lower.includes("malformed json") || lower.includes("malformed model")) return "malformed_response"
+  if (lower.includes("session expired") || lower.includes("run not found")) return "session_expired"
+  if (lower.includes("usage limit")) return "usage_limit"
+  if (lower.includes("rate limit") || lower.includes("429") || lower.includes("quota")) return "rate_limit"
+  if (lower.includes("prompt too long") || lower.includes("tokens) exceeds")) return "prompt_too_long"
+  return "unknown"
+}
 
 export function mapNormalizedResponseToClient(runId: string, normalized: NormalizedResponse): ClientResponse {
   switch (normalized.kind) {
@@ -37,7 +48,8 @@ export function mapNormalizedResponseToClient(runId: string, normalized: Normali
       return {
         status: "failed",
         runId,
-        error: normalized.error
+        error: normalized.error,
+        errorCode: classifyFailureErrorCode(normalized.error)
       }
 
     case "rate_limited":
@@ -45,7 +57,8 @@ export function mapNormalizedResponseToClient(runId: string, normalized: Normali
       return {
         status: "failed",
         runId,
-        error: normalized.error || "Rate limited — all fallback models exhausted"
+        error: normalized.error || "Rate limited — all fallback models exhausted",
+        errorCode: "rate_limit"
       }
 
     default:

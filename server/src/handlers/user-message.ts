@@ -16,6 +16,7 @@ import { detectErrorForSearch, buildErrorSearchOverride } from "../services/setu
 import { detectErrorContext, setPendingError, detectAllErrors, setPendingErrorQueue } from "../services/error-autofix.js"
 import { createPipelineFromAiPlan, createFallbackPipeline, pipelineToTaskMeta } from "../services/task-pipeline.js"
 import { detectScaffoldingNeed, buildScaffoldConfirmationMessage } from "../services/scaffold-options.js"
+import { estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 interface UserMessageBody {
@@ -196,6 +197,25 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     }
 
     return mapNormalizedResponseToClient(runId, searchAction)
+  }
+
+  // ─── Pre-API token guard: refuse oversized payloads instead of wasting an API call ───
+  const estimatedTokens =
+    estimateTokens(body.content) +
+    estimateTokens(body.directoryTree) +
+    estimateTokens(context.sessionHistory) +
+    estimateTokens(context.projectMemory) +
+    estimateTokens(context.projectKnowledge) +
+    estimateTokens(context.frontendPatterns) +
+    estimateTokens(context.continueContext)
+  if (shouldBlockOnTokens(estimatedTokens, body.model)) {
+    console.warn(`[token-guard] BLOCKED: estimated ${estimatedTokens} tokens exceeds ${body.model} effective window`)
+    return {
+      status: "failed",
+      runId,
+      error: `Prompt too long (~${estimatedTokens} tokens). Try a shorter prompt or fewer @file mentions.`,
+      errorCode: "prompt_too_long",
+    } as ClientResponse
   }
 
   let normalized = await callModelAdapter({

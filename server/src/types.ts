@@ -115,6 +115,15 @@ export interface RunState {
 
 // ─── Client Response ───
 
+/** Stable error codes the CLI can switch on instead of string-matching `error`. */
+export type ServerErrorCode =
+  | "usage_limit"
+  | "rate_limit"
+  | "session_expired"
+  | "prompt_too_long"
+  | "malformed_response"
+  | "unknown"
+
 export interface ClientResponse {
   status: "needs_tool" | "completed" | "waiting_for_user" | "failed"
   runId: string
@@ -130,6 +139,8 @@ export interface ClientResponse {
   stepTransition?: { complete?: string; start?: string }
   pendingAction?: unknown
   error?: string
+  /** Stable code for the CLI; `error` remains the human-readable string. */
+  errorCode?: ServerErrorCode
 }
 
 // ─── Database ───
