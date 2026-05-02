@@ -26,6 +26,7 @@ import { runVerification } from "./verifier.js"
 import { createSnapshot, cleanupSnapshot, rollback, getSnapshot, detectGit } from "./git.js"
 import { lintFile, lintFiles, displayLintErrors, resetTscCache } from "./lint.js"
 import { partitionToolCalls, getToolMeta } from "./tool-meta.js"
+import { validateToolInput } from "./validate-tool-input.js"
 
 interface ToolResponse {
   tool: string
@@ -43,26 +44,24 @@ interface ToolCallEntry {
 // ─── Local tool execution (no server call) ───
 
 export async function executeToolLocally(tool: string, args: Record<string, unknown>, runId?: string): Promise<Record<string, unknown>> {
-  // ─── Arg validation: catch undefined/null args before they cause cryptic errors ───
   if (!args) args = {}
 
-  // Tools that require a 'path' arg
-  if (["list_directory", "file_exists", "create_directory", "read_file", "write_file", "edit_file", "delete_file"].includes(tool)) {
-    if (!args.path && tool !== "write_file" && tool !== "edit_file") {
-      return { error: `Tool "${tool}" requires a "path" argument but received undefined. Check args.`, success: false }
+  // ─── Zod-driven validation: structured error if args don't match the schema ───
+  const validated = validateToolInput<Record<string, unknown>>(tool, args)
+  if (!validated.ok) {
+    return {
+      error: validated.error.hint,
+      success: false,
+      _errorCategory: "validation",
+      _validation: {
+        tool: validated.error.tool,
+        field: validated.error.field,
+        expected: validated.error.expected,
+        issues: validated.error.issues,
+      },
     }
   }
-
-  // write_file/edit_file need both path and content
-  if (tool === "write_file" && (!args.path || !args.content)) {
-    return { error: `write_file requires "path" and "content" args. Got path=${args.path}, content=${args.content ? "present" : "missing"}`, success: false }
-  }
-  if (tool === "edit_file" && !args.path) {
-    return { error: `edit_file requires "path" arg. Got path=${args.path}`, success: false }
-  }
-  if (tool === "edit_file" && !args.search && !args.line_start && !args.insert_at && !args.patch && !args.content) {
-    return { error: `edit_file requires one of: search+replace, line_start+content, insert_at+content, patch, or content. None provided.`, success: false }
-  }
+  args = validated.args
 
   switch (tool) {
     case "list_directory": {
