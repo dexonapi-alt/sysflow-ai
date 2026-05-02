@@ -25,6 +25,7 @@ import {
 import { runVerification } from "./verifier.js"
 import { createSnapshot, cleanupSnapshot, rollback, getSnapshot, detectGit } from "./git.js"
 import { lintFile, lintFiles, displayLintErrors, resetTscCache } from "./lint.js"
+import { partitionToolCalls, getToolMeta } from "./tool-meta.js"
 
 interface ToolResponse {
   tool: string
@@ -287,9 +288,11 @@ export async function executeToolsBatch(
   runId: string,
   onPhase?: (label: string) => void
 ): Promise<Record<string, unknown>> {
-  // Split: run_command tools run sequentially, everything else in parallel
-  const parallelTools = tools.filter((tc) => tc.tool !== "run_command")
-  const commandTools = tools.filter((tc) => tc.tool === "run_command")
+  // Split via tool-meta: concurrency-safe tools run in parallel; everything
+  // else runs sequentially (preserving submission order). Sibling abort lives
+  // in the serial loop — if a tool with abortsSiblingsOnError fails, the
+  // remaining serial siblings are short-circuited with aborted_by_sibling.
+  const { parallel: parallelTools, serial: commandTools } = partitionToolCalls(tools)
 
   // ─── Git snapshot: create before write/edit batches (only if git repo with commits) ───
   const hasWrites = tools.some((tc) => tc.tool === "write_file" || tc.tool === "edit_file" || tc.tool === "delete_file")
@@ -338,8 +341,24 @@ export async function executeToolsBatch(
     }
   }
 
-  // Execute ALL command tools one at a time (they share shell/stdin and may depend on each other)
+  // Execute serial tools one at a time. If any tool with
+  // abortsSiblingsOnError fails (currently only run_command), short-circuit
+  // the remaining serial tools with an aborted_by_sibling marker.
+  let siblingAbortReason: string | null = null
   for (const tc of commandTools) {
+    if (siblingAbortReason) {
+      allResults.push({
+        id: tc.id,
+        tool: tc.tool,
+        result: {
+          aborted_by_sibling: true,
+          success: false,
+          error: `Aborted because a sibling tool failed: ${siblingAbortReason}`,
+        },
+      })
+      continue
+    }
+
     let cmd = (tc.args.command as string) || tc.tool
     let result: Record<string, unknown> | null = null
     let autoFixAttempted = false
@@ -441,6 +460,15 @@ export async function executeToolsBatch(
     }
 
     allResults.push({ id: tc.id, tool: tc.tool, result })
+
+    // If this tool aborts siblings on error and the result is a failure, set
+    // the abort flag so subsequent serial siblings short-circuit.
+    if (getToolMeta(tc.tool).abortsSiblingsOnError) {
+      const failed = result.error || result.success === false || result.skipped === true
+      if (failed) {
+        siblingAbortReason = (result.error as string) || (result.skipped ? "previous command was skipped" : "previous command failed")
+      }
+    }
   }
 
   // Sort results back to original order

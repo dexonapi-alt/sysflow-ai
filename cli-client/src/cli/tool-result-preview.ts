@@ -18,12 +18,19 @@ const MAX_PREVIEW_CHARS = 200
 
 export function renderToolResultPreview({ tool, result }: PreviewableResult): string | null {
   if (!result) return null
+  if (result.aborted_by_sibling) {
+    return `      ${colors.muted(BOX.dash)} ${colors.warning("↯ aborted")} ${colors.muted("(sibling failed)")}`
+  }
   if (result.error && typeof result.error === "string") {
     return `      ${colors.muted(BOX.dash)} ${colors.error("error:")} ${colors.muted(truncate(result.error))}`
   }
   if (result._truncated) {
     const original = result._original_size as number | undefined
     return `      ${colors.muted(BOX.dash)} ${colors.warning("truncated")} ${colors.muted(original ? `(${original} chars)` : "")}`
+  }
+  if (result._persistedPath) {
+    const sz = result._persistedSize as number | undefined
+    return `      ${colors.muted(BOX.dash)} ${colors.muted(`archived to disk${sz ? ` (${Math.round(sz / 1024)} KiB)` : ""}`)}`
   }
 
   switch (tool) {
