@@ -206,3 +206,139 @@ function extractCompactedToolName(text: string): string | null {
   if (batch) return batch[1]
   return null
 }
+
+// ─── Real autocompact via summarisation ───
+//
+// Asks the model to produce a structured summary of the conversation so far,
+// then replaces the chat history with a single user turn that says
+// "[Previous conversation compacted]\n\n<summary>\n\n[Continue from here]".
+//
+// A circuit breaker stops repeated attempts on the same run after N failures.
+
+const AUTOCOMPACT_PROMPT = `You are summarising a prior conversation between a user and an AI coding agent so the agent can continue with a smaller context window.
+
+PRESERVE EXACTLY:
+1. The user's ORIGINAL TASK (what they asked for, in one sentence).
+2. EVERY file path that was created, modified, or read (with one-line description of what's in it).
+3. KEY DECISIONS already made (libraries chosen, patterns adopted, architectural splits).
+4. The CURRENT STATE: what's done, what's in progress, what remains.
+5. Any UNRESOLVED ERRORS the agent was working through.
+
+OMIT:
+- Tool-call back-and-forth detail (no "I called read_file then write_file...").
+- Pleasantries and commentary.
+
+OUTPUT exactly this markdown structure (no preamble, no fences):
+
+## Original task
+<one sentence>
+
+## Files touched
+- <path>: <one-line summary>
+- ...
+
+## Decisions
+- <decision>: <rationale>
+- ...
+
+## Current state
+<2-4 sentences on what's done, what's in progress, what's pending>
+
+## Unresolved
+- <error or open question>
+- ...
+
+Output ONLY the markdown. No JSON, no fences.`
+
+const AUTOCOMPACT_MAX_OUTPUT_TOKENS = 4_000
+
+/** Per-run circuit-breaker for autocompact attempts. Opens after 3 consecutive failures. */
+export class AutocompactCircuitBreaker {
+  private state = new Map<string, { failures: number; openedAt: number | null }>()
+  private static readonly THRESHOLD = 3
+
+  isOpen(runId: string): boolean {
+    const s = this.state.get(runId)
+    return !!s && s.openedAt !== null
+  }
+
+  recordSuccess(runId: string): void {
+    this.state.delete(runId)
+  }
+
+  recordFailure(runId: string): boolean {
+    const s = this.state.get(runId) ?? { failures: 0, openedAt: null }
+    s.failures += 1
+    if (s.failures >= AutocompactCircuitBreaker.THRESHOLD) {
+      s.openedAt = Date.now()
+    }
+    this.state.set(runId, s)
+    return s.openedAt !== null
+  }
+
+  reset(runId: string): void {
+    this.state.delete(runId)
+  }
+}
+
+/** Singleton breaker — used by Gemini provider. */
+export const autocompactBreaker = new AutocompactCircuitBreaker()
+
+/** A run that's currently inside its own autocompact summary call — used to prevent recursion. */
+const summarisingRuns = new Set<string>()
+
+export function isInsideAutocompactCall(runId: string): boolean {
+  return summarisingRuns.has(runId)
+}
+
+export interface AutocompactCallback {
+  /**
+   * The provider-specific summary call. Receives the prompt + the existing
+   * chat history (already cast to whatever the provider accepts) and returns
+   * the raw summary text.
+   */
+  (prompt: string, history: GeminiContent[]): Promise<string>
+}
+
+/**
+ * Compact a Gemini chat history by asking the model to summarise it. Returns
+ * a new history (NOT mutating the input) of length 1: a single user turn that
+ * carries the summary. The circuit breaker is consulted before running and
+ * updated based on the outcome.
+ *
+ * If the breaker is open, returns null and the caller should give up
+ * (typically: respond with errorCode='prompt_too_long').
+ */
+export async function compactConversationSummary(
+  runId: string,
+  history: GeminiContent[],
+  callSummariser: AutocompactCallback,
+): Promise<GeminiContent[] | null> {
+  if (autocompactBreaker.isOpen(runId)) return null
+  if (summarisingRuns.has(runId)) return null // recursion guard
+
+  summarisingRuns.add(runId)
+  try {
+    const summary = await callSummariser(AUTOCOMPACT_PROMPT, history)
+    if (!summary || summary.trim().length < 50) {
+      autocompactBreaker.recordFailure(runId)
+      return null
+    }
+    autocompactBreaker.recordSuccess(runId)
+    return [
+      {
+        role: "user",
+        parts: [{ text: `[Previous conversation compacted by autocompact]\n\n${summary.trim()}\n\n[Continue from here.]` }],
+      },
+    ]
+  } catch (err) {
+    console.warn(`[autocompact] Summary call failed for run ${runId}:`, (err as Error).message)
+    autocompactBreaker.recordFailure(runId)
+    return null
+  } finally {
+    summarisingRuns.delete(runId)
+  }
+}
+
+/** Maximum tokens we ask the summariser to produce. Exposed so providers can wire it in. */
+export const AUTOCOMPACT_SUMMARY_MAX_TOKENS = AUTOCOMPACT_MAX_OUTPUT_TOKENS

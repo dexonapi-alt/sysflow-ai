@@ -1,6 +1,14 @@
 import { GoogleGenerativeAI, SchemaType, type ChatSession, type GenerateContentResult } from "@google/generative-ai"
 import { BaseProvider, getSystemPrompt } from "./base-provider.js"
-import { microcompactGeminiHistory, type GeminiContent } from "../services/context-budget.js"
+import {
+  microcompactGeminiHistory,
+  compactConversationSummary,
+  isInsideAutocompactCall,
+  estimateTokens,
+  shouldBlockOnTokens,
+  AUTOCOMPACT_SUMMARY_MAX_TOKENS,
+  type GeminiContent,
+} from "../services/context-budget.js"
 import { discoverProjectMemory } from "../services/project-memory.js"
 import type { ProviderPayload, NormalizedResponse, TokenUsage } from "../types.js"
 
@@ -204,14 +212,52 @@ export class GeminiProvider extends BaseProvider {
         this.setRunTask(payload.runId, payload.userMessage)
       }
 
-      // ─── Microcompact: rebuild chat with compacted history once it grows past threshold ───
+      // ─── Compaction pipeline: microcompact first, then autocompact if still over budget ───
       try {
         const history = (await chat.getHistory()) as GeminiContent[]
         const toolResultTurns = history.filter((h) =>
           h.role === "user" && (h.parts?.[0]?.text ?? "").startsWith("Tool result")
         ).length
+
+        // Step 1: cheap microcompact (regex-based history rewrite).
+        let workingHistory: GeminiContent[] | null = null
         if (toolResultTurns > MICROCOMPACT_TRIGGER_THRESHOLD) {
-          const compacted = microcompactGeminiHistory(history)
+          workingHistory = microcompactGeminiHistory(history)
+          console.log(`[microcompact] Run ${payload.runId}: ${toolResultTurns} tool turns → compacted to last 5`)
+        }
+
+        // Step 2: full autocompact summary if estimated tokens still exceed budget.
+        const candidateHistory = workingHistory ?? history
+        const estTokens = estimateTokens(candidateHistory)
+        if (
+          shouldBlockOnTokens(estTokens, payload.model)
+          && !isInsideAutocompactCall(payload.runId)
+        ) {
+          const compacted = await compactConversationSummary(
+            payload.runId,
+            candidateHistory,
+            async (prompt, hist) => {
+              const summaryModel = genAI.getGenerativeModel({
+                model: geminiModelName,
+                systemInstruction: prompt,
+                generationConfig: {
+                  responseMimeType: "text/plain",
+                  temperature: 0.0,
+                  maxOutputTokens: AUTOCOMPACT_SUMMARY_MAX_TOKENS,
+                },
+              })
+              const summaryChat = summaryModel.startChat({ history: hist as never })
+              const r = await summaryChat.sendMessage("Summarise the conversation per the rules above.")
+              return r.response.text()
+            },
+          )
+          if (compacted) {
+            workingHistory = compacted
+            console.log(`[autocompact] Run ${payload.runId}: history rewritten via summary call (was ~${estTokens} tokens)`)
+          }
+        }
+
+        if (workingHistory) {
           const model = genAI.getGenerativeModel({
             model: geminiModelName,
             systemInstruction,
@@ -222,12 +268,11 @@ export class GeminiProvider extends BaseProvider {
               maxOutputTokens: this.getAdaptiveMaxTokens(65536)
             }
           })
-          chat = model.startChat({ history: compacted as never })
+          chat = model.startChat({ history: workingHistory as never })
           this.runState.set(payload.runId, chat)
-          console.log(`[microcompact] Rebuilt Gemini chat for run ${payload.runId}: ${toolResultTurns} tool turns → compacted to last 5`)
         }
       } catch (compactErr) {
-        console.warn(`[microcompact] Skipped due to error:`, (compactErr as Error).message)
+        console.warn(`[compaction] Skipped due to error:`, (compactErr as Error).message)
       }
 
       const toolMsg = this.buildToolResultMessage(payload)
