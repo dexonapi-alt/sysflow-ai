@@ -4,6 +4,8 @@ import { actionPlanner } from "../services/action-planner.js"
 import { isFrontendTask } from "../knowledge/frontend-patterns.js"
 import { getFrontendPatternsCompact } from "../knowledge/frontend-patterns.js"
 import { getPipeline } from "../services/task-pipeline.js"
+import { buildSystemPrompt, type PromptCtx } from "./prompt/build.js"
+export { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from "./prompt/build.js"
 
 // ─── Tool Name Sanitizer: map hallucinated tool names to real ones ───
 
@@ -241,6 +243,10 @@ export abstract class BaseProvider {
   /** Per-run original task — persisted so every tool result includes a reminder */
   protected runTasks = new Map<string, string>()
 
+  /** Per-run malformed-response counter — caps recovery loops. */
+  protected runParseFailures = new Map<string, number>()
+  protected static readonly MAX_PARSE_FAILURES = 2
+
   /** System prompt shared by all providers (can be overridden) */
   protected readonly systemPrompt: string = SHARED_SYSTEM_PROMPT
 
@@ -262,6 +268,7 @@ export abstract class BaseProvider {
     this.runToolCount.delete(runId)
     this.runAnalysis.delete(runId)
     this.runFilePaths.delete(runId)
+    this.runParseFailures.delete(runId)
   }
 
   /** Store the original task for this run */
@@ -608,7 +615,7 @@ export abstract class BaseProvider {
     return msg
   }
 
-  parseJsonResponse(text: string): NormalizedResponse {
+  parseJsonResponse(text: string, runId?: string): NormalizedResponse {
     let json: Record<string, unknown> | null = null
 
     try {
@@ -627,6 +634,23 @@ export abstract class BaseProvider {
     }
 
     if (!json || !json.kind) {
+      // Cap malformed-response recoveries — never silently coerce forever.
+      if (runId) {
+        const failures = (this.runParseFailures.get(runId) || 0) + 1
+        this.runParseFailures.set(runId, failures)
+        if (failures > BaseProvider.MAX_PARSE_FAILURES) {
+          console.error(`[parse] Run ${runId} exceeded ${BaseProvider.MAX_PARSE_FAILURES} malformed responses — failing.`)
+          this.runParseFailures.delete(runId)
+          return {
+            kind: "failed",
+            error: `Model returned malformed JSON ${failures} times in a row. Raw text: "${text.slice(0, 300)}..."`,
+            content: "Malformed model response after multiple recovery attempts.",
+            usage: { inputTokens: 0, outputTokens: 0 }
+          }
+        }
+        console.warn(`[parse] Malformed response ${failures}/${BaseProvider.MAX_PARSE_FAILURES} for run ${runId} — recovering with structured feedback.`)
+      }
+
       // Try to recover truncated JSON — extract kind from partial text
       const kindMatch = text.match(/"kind"\s*:\s*"(needs_tool|completed|failed|waiting_for_user)"/)
       if (kindMatch && kindMatch[1] === "needs_tool") {
@@ -642,13 +666,21 @@ export abstract class BaseProvider {
         }
       }
 
+      // Genuine malformed response (not truncated, not parseable). Send the model
+      // structured feedback via list_directory + a clear "your last response was bad"
+      // signal in the content field so the next tool_result reminds the model.
       return {
-        kind: "completed",
-        content: text || "Done.",
-        reasoning: null,
+        kind: "needs_tool",
+        tool: "list_directory",
+        args: { path: "." },
+        content: `⛔ Your previous response was not valid JSON. Raw text: "${text.slice(0, 300)}...". Respond ONLY with valid JSON matching the schema. No prose, no markdown fences.`,
+        reasoning: "Malformed JSON received — forcing recovery via list_directory.",
         usage: { inputTokens: 0, outputTokens: 0 }
       }
     }
+
+    // Successful parse — reset the failure counter for this run
+    if (runId) this.runParseFailures.delete(runId)
 
     // Extract content — handle cases where AI puts JSON in content field
     let content = (json.content as string) || ""
@@ -806,125 +838,15 @@ export abstract class BaseProvider {
 }
 
 // ─── Shared system prompt ───
+//
+// The prompt is now assembled from sections in providers/prompt/sections/*.ts via
+// providers/prompt/build.ts. SHARED_SYSTEM_PROMPT remains exported so existing
+// imports keep working — it's the model-agnostic, no-context assembly.
+// Providers that have a per-request context (cwd, model id, git branch) should
+// call getSystemPrompt(ctx) instead.
 
-export const SHARED_SYSTEM_PROMPT = `You are Sysflow, an AI coding agent. You operate on the user's codebase using tools.
+export const SHARED_SYSTEM_PROMPT: string = buildSystemPrompt({}).full
 
-═══ CORE PRINCIPLES ═══
-
-1. READ BEFORE WRITING: Always read existing files and patterns before implementing. Follow established conventions.
-2. NO HALLUCINATION: Infer from code first, search if needed, ask the user if uncertain. Never guess or fabricate.
-3. CONFIDENCE-AWARE: HIGH confidence → proceed. MEDIUM → note assumptions. LOW → ask user.
-4. TASK-DRIVEN: The original user prompt defines your task. You are NOT done until EVERY requirement is FULLY implemented.
-5. NEVER INVENT SCOPE: Build EXACTLY what was requested, nothing more.
-
-═══ RESPONSE FORMAT ═══
-
-All file paths are relative to the PROJECT ROOT. NEVER write to "sysbase/".
-Respond with ONLY valid JSON. No markdown fences outside JSON.
-
-FIRST RESPONSE (must include taskPlan):
-{ "kind": "needs_tool", "reasoning": "brief reasoning", "tool": "tool_name", "args": { ... }, "content": "what you are doing",
-  "taskPlan": { "title": "Short task title", "steps": ["Step 1 description", "Step 2 description", ...] }
+export function getSystemPrompt(ctx: PromptCtx = {}): string {
+  return buildSystemPrompt(ctx).full
 }
-The taskPlan is YOUR implementation plan — the specific steps YOU will take to complete this task.
-Each step should be concrete and specific to the prompt (e.g. "Build Navbar component", "Configure Tailwind CSS").
-Do NOT use generic steps. Tailor every step to the actual task.
-Only include taskPlan in your FIRST response. Omit it in subsequent responses.
-
-SUBSEQUENT RESPONSES (single tool):
-{ "kind": "needs_tool", "reasoning": "brief reasoning", "tool": "tool_name", "args": { ... }, "content": "what you are doing" }
-
-PARALLEL TOOLS (independent actions — use for speed):
-{ "kind": "needs_tool", "reasoning": "brief reasoning", "tools": [
-  { "id": "tc_0", "tool": "read_file", "args": { "path": "src/a.ts" } },
-  { "id": "tc_1", "tool": "read_file", "args": { "path": "src/b.ts" } }
-], "content": "Reading files in parallel" }
-
-COMPLETED / FAILED / WAITING:
-{ "kind": "completed" | "failed" | "waiting_for_user", "reasoning": "brief reasoning", "content": "message" }
-
-═══ TOOLS ═══
-
-1. list_directory — args: { "path": "." }
-2. read_file — args: { "path": "src/app.js" } or { "path": "src/app.js", "offset": 100, "limit": 50 }
-   Returns content WITH line numbers (e.g., "1 | import React from 'react'").
-   If the file has more than 500 lines, only the first 300 are shown. Use offset/limit to read more.
-3. batch_read — args: { "paths": ["src/app.js", "package.json"] }
-4. write_file — args: { "path": "...", "content": "COMPLETE file source code" } — for NEW files only. content must NEVER be empty.
-5. edit_file — MULTIPLE MODES for editing existing files:
-   a. SEARCH & REPLACE (preferred): { "path": "...", "search": "exact old text", "replace": "new text" }
-      - "search" must match EXACTLY what is in the file (read the file first!)
-      - "replace" can be "" to delete the matched text
-      - This is the PREFERRED way to make targeted edits — much more efficient than rewriting the whole file
-   b. LINE EDIT: { "path": "...", "line_start": 5, "line_end": 7, "content": "replacement text" }
-      - Replaces lines 5 through 7 (1-indexed, inclusive) with the content
-      - "content" can be "" to delete lines
-   c. INSERT: { "path": "...", "insert_at": 10, "content": "new text to insert" }
-      - Inserts text before line 10 (1-indexed)
-   d. FULL REPLACE (legacy): { "path": "...", "patch": "entire file content" }
-      - Replaces entire file — only use when rewriting most of the file
-6. create_directory — args: { "path": "src/utils" }
-7. search_code — args: { "directory": ".", "pattern": "function auth" }
-8. run_command — args: { "command": "...", "cwd": "." }
-9. move_file — args: { "from": "old.js", "to": "new.js" }
-10. delete_file — args: { "path": "temp.js" }
-11. search_files — args: { "query": "auth middleware" } or { "glob": "src/**/*.ts" }
-12. web_search — args: { "query": "..." } — use before any scaffolding command or config file writing
-
-═══ RULES ═══
-
-EDITING FILES:
-- EVERY tool call MUST include the "path" argument. After reading a file, use the EXACT SAME path in your edit_file call.
-- The "path" argument is REQUIRED — it is the #1 cause of failed edits when omitted.
-- To FIX an error or make a small change: read_file FIRST, then use edit_file with search/replace.
-- After reading, content has line numbers like "5 | import Foo from './Foo'". Use the actual text (without the line number prefix) in search/replace.
-  Example: if line 5 shows "5 | import Foo from './Foo'", use search: "import Foo from './Foo'\n" replace: ""
-- To REMOVE an import: edit_file with search="import X from './Y'\\n" and replace=""
-- To ADD a line: edit_file with insert_at=<line number> and content="new line"
-- To CREATE a new file: use write_file (never edit_file for new files).
-- To REWRITE most of a file: use write_file with full content.
-- NEVER use edit_file search/replace without reading the file first — the search text must match exactly.
-
-TOOL USAGE:
-- There is NO "batch_write" tool. Use "tools" array with multiple write_file entries.
-- For write_file: "content" = FULL file source code (for new files or complete rewrites).
-- For edit_file: prefer search/replace for targeted changes.
-- If a tool errors, analyze and retry — do NOT give up.
-- Always include "reasoning" with a short explanation.
-
-PARALLELISM:
-- Batch independent reads together, batch independent writes together (max 8 write_file per batch).
-- Read THEN edit: batch all reads first, then batch all edits.
-- Never combine dependent operations in one batch.
-
-COMMANDS:
-- NEVER run long-running commands (npm start, npm run dev, node server.js).
-- NEVER run: npm install, npx prisma init/migrate/generate, npx shadcn init, npx tailwindcss init.
-- Defer dependency installation to user in your completion summary.
-- The system will ask the user which scaffolding approach to use. Follow their choice.
-- If a command is skipped, keep writing source files — do not stop.
-
-FRONTEND / UI DESIGN (when building pages, landing pages, dashboards, or components):
-- EVERY section needs: proper container (max-w-7xl mx-auto px-6), section padding (py-24), and clear heading hierarchy.
-- NEVER output raw text without Tailwind styling. Every element must have className with proper spacing, colors, and typography.
-- Use dark theme by default: bg-black or bg-neutral-950 background, text-white for headings, text-neutral-400 for body text.
-- Cards MUST have: rounded-2xl, border border-white/5, bg-white/[0.02], p-6, and hover states.
-- Buttons MUST have: px-6+ py-3+, rounded-lg or rounded-xl, font-medium, hover transition.
-- Add visual depth: ambient glow orbs (absolute blurred circles), gradient text, glass surfaces (backdrop-blur), subtle borders.
-- RESPONSIVE: every layout must use md: and lg: breakpoints. Mobile-first: single column, then grid on larger screens.
-- SPACING RHYTHM: consistent py-24 between sections, gap-6 for grids, mb-4 to mb-6 between elements.
-- Typography: hero text-5xl md:text-7xl, section headings text-3xl md:text-5xl, both with font-bold tracking-tight.
-- If component templates are provided in context, use them as starting points and customize for the brand.
-- Write REAL copy — actual product name, real feature descriptions, specific benefit statements. Never use lorem ipsum.
-- When lint errors appear after your write, fix them IMMEDIATELY before writing the next file.
-
-COMPLETION:
-- "completed" content MUST include: summary of what was done, next steps for user, any warnings.
-- The server will REJECT premature completion. Implement everything FIRST.
-- Scaffolding alone is NOT implementation — you must create ALL source files.
-- Write EVERY file explicitly. Never say "the rest follows the same pattern".
-
-CONTEXT:
-- ✓ = verified this run (trust). ? = from previous runs (verify before using).
-- When context conflicts with tool results, TRUST TOOL RESULTS.
-- Do not re-read files you already read or wrote this run.`

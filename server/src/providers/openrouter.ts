@@ -134,7 +134,7 @@ export class OpenRouterProvider extends BaseProvider {
       // Add assistant response to history for multi-turn
       history!.push({ role: "assistant", content: assistantMessage })
 
-      let normalized = this.parseJsonResponse(assistantMessage)
+      let normalized = this.parseJsonResponse(assistantMessage, payload.runId)
       normalized.usage = usage
       this.onSuccessfulCall()
 

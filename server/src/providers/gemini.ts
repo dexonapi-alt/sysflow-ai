@@ -1,6 +1,10 @@
 import { GoogleGenerativeAI, SchemaType, type ChatSession, type GenerateContentResult } from "@google/generative-ai"
-import { BaseProvider, SHARED_SYSTEM_PROMPT } from "./base-provider.js"
+import { BaseProvider, getSystemPrompt } from "./base-provider.js"
+import { microcompactGeminiHistory, type GeminiContent } from "../services/context-budget.js"
 import type { ProviderPayload, NormalizedResponse, TokenUsage } from "../types.js"
+
+/** Threshold: once the chat history has more than this many user-turn tool-results, run microcompact. */
+const MICROCOMPACT_TRIGGER_THRESHOLD = 8
 
 const RESPONSE_SCHEMA = {
   description: "Agent action response",
@@ -9,7 +13,7 @@ const RESPONSE_SCHEMA = {
     kind: {
       type: SchemaType.STRING,
       description: "The type of response",
-      enum: ["needs_tool", "completed", "failed"]
+      enum: ["needs_tool", "completed", "failed", "waiting_for_user"]
     },
     reasoning: {
       type: SchemaType.STRING,
@@ -60,6 +64,20 @@ const RESPONSE_SCHEMA = {
         start: { type: SchemaType.STRING, description: "Step ID to mark in_progress", nullable: true }
       }
     },
+    taskPlan: {
+      type: SchemaType.OBJECT,
+      description: "AI-generated implementation plan. Include only in the FIRST response.",
+      nullable: true,
+      properties: {
+        title: { type: SchemaType.STRING, description: "Short task title", nullable: true },
+        steps: {
+          type: SchemaType.ARRAY,
+          description: "Ordered list of concrete steps the agent will take",
+          items: { type: SchemaType.STRING },
+          nullable: true
+        }
+      }
+    },
     content: {
       type: SchemaType.STRING,
       description: "Brief description of what you are doing or result message"
@@ -76,55 +94,16 @@ export class GeminiProvider extends BaseProvider {
     "gemini-pro": "gemini-2.5-pro"
   }
 
-  // Gemini uses structured output with args_json field instead of args
-  protected override readonly systemPrompt: string = SHARED_SYSTEM_PROMPT + `
-
-═══ GEMINI-SPECIFIC: ARGS FORMAT ═══
-
-CRITICAL: The "path" field is REQUIRED in args_json for ALL file operations. Never omit it.
-
-Your response uses the field "args_json" which is a JSON STRING containing the tool arguments.
-Examples:
-- read_file: args_json: {"path": "src/app.js"}
-- read_file with range: args_json: {"path": "src/app.js", "offset": 50, "limit": 100}
-- edit_file search/replace: args_json: {"path": "src/app.js", "search": "old text", "replace": "new text"}
-- edit_file remove line: args_json: {"path": "src/app.js", "search": "import X from './Y'\\n", "replace": ""}
-- write_file: args_json: {"path": "src/app.js", "content": "full file code here"}
-- run_command: args_json: {"command": "npm run build", "cwd": "."}
-- web_search: args_json: {"query": "how to create nestjs project 2026"}
-
-After reading a file, use the SAME path in your edit. For example:
-  1. read_file args_json: {"path": "src/components/Foo.tsx"}
-  2. edit_file args_json: {"path": "src/components/Foo.tsx", "search": "bad import line\\n", "replace": ""}
-
-args_json must be a valid JSON string. For parallel tools, each item in the "tools" array uses args_json.
-
-═══ GEMINI-SPECIFIC: FILE SIZE STRATEGY ═══
-
-CRITICAL: Your args_json has a size limit. For files longer than ~80 lines, use this incremental strategy:
-
-1. write_file with a SKELETON first (imports, component structure, return statement with placeholder sections)
-2. Then use edit_file insert_at to ADD each section one at a time
-
-Example for a large React component:
-  Step 1: write_file → skeleton with imports + empty component + export
-  Step 2: edit_file insert_at → add the hero section JSX
-  Step 3: edit_file insert_at → add the features section JSX
-  Step 4: edit_file insert_at → add the remaining sections
-
-This prevents args_json from being too large and failing. ALWAYS use this approach for landing pages, dashboards, and components with many sections.
-
-For small files (< 80 lines): write_file with full content in one go.
-
-ALSO: Split large pages into SEPARATE component files:
-  - src/components/Navbar.tsx (one file)
-  - src/components/Hero.tsx (one file)
-  - src/components/Features.tsx (one file)
-  - src/App.tsx (imports and assembles all components)
-Each component file stays small enough for a single write_file.`
+  // Gemini uses structured output with args_json field instead of args.
+  // The Gemini-specific args/skeleton instructions now live in
+  // providers/prompt/sections/model-specific.ts and are assembled per-request.
 
   constructor() {
     super()
+  }
+
+  private buildPrompt(payload: ProviderPayload): string {
+    return getSystemPrompt({ model: payload.model })
   }
 
   // All broken-arg recovery, loop detection, and read-before-edit enforcement
@@ -157,7 +136,7 @@ Each component file stays small enough for a single write_file.`
         // First call — create a new chat session
         const model = genAI.getGenerativeModel({
           model: geminiModelName,
-          systemInstruction: this.systemPrompt,
+          systemInstruction: this.buildPrompt(payload),
           generationConfig: {
             responseMimeType: "application/json",
             responseSchema: RESPONSE_SCHEMA as never,
@@ -174,7 +153,7 @@ Each component file stays small enough for a single write_file.`
         const result = await chat.sendMessage(userMsg)
         const text = result.response.text()
 
-        let normalized = this.parseJsonResponse(text)
+        let normalized = this.parseJsonResponse(text, payload.runId)
         normalized.usage = this.extractUsage(result)
         this.onSuccessfulCall()
 
@@ -198,7 +177,7 @@ Each component file stays small enough for a single write_file.`
         // Session lost — recreate
         const model = genAI.getGenerativeModel({
           model: geminiModelName,
-          systemInstruction: this.systemPrompt,
+          systemInstruction: this.buildPrompt(payload),
           generationConfig: {
             responseMimeType: "application/json",
             responseSchema: RESPONSE_SCHEMA as never,
@@ -216,13 +195,39 @@ Each component file stays small enough for a single write_file.`
         this.setRunTask(payload.runId, payload.userMessage)
       }
 
+      // ─── Microcompact: rebuild chat with compacted history once it grows past threshold ───
+      try {
+        const history = (await chat.getHistory()) as GeminiContent[]
+        const toolResultTurns = history.filter((h) =>
+          h.role === "user" && (h.parts?.[0]?.text ?? "").startsWith("Tool result")
+        ).length
+        if (toolResultTurns > MICROCOMPACT_TRIGGER_THRESHOLD) {
+          const compacted = microcompactGeminiHistory(history)
+          const model = genAI.getGenerativeModel({
+            model: geminiModelName,
+            systemInstruction: this.buildPrompt(payload),
+            generationConfig: {
+              responseMimeType: "application/json",
+              responseSchema: RESPONSE_SCHEMA as never,
+              temperature: 0.1,
+              maxOutputTokens: this.getAdaptiveMaxTokens(65536)
+            }
+          })
+          chat = model.startChat({ history: compacted as never })
+          this.runState.set(payload.runId, chat)
+          console.log(`[microcompact] Rebuilt Gemini chat for run ${payload.runId}: ${toolResultTurns} tool turns → compacted to last 5`)
+        }
+      } catch (compactErr) {
+        console.warn(`[microcompact] Skipped due to error:`, (compactErr as Error).message)
+      }
+
       const toolMsg = this.buildToolResultMessage(payload)
 
       const result = await chat.sendMessage(toolMsg)
       const text = result.response.text()
 
       // ActionPlanner handles broken args and loops in the handler layer
-      let normalized = this.parseJsonResponse(text)
+      let normalized = this.parseJsonResponse(text, payload.runId)
 
       normalized.usage = this.extractUsage(result)
       this.onSuccessfulCall()
