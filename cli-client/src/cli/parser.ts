@@ -3,6 +3,11 @@ interface ParsedInput {
   command?: string | null
   prompt?: string
   model?: string | null
+  /** Permission mode for /mode <name>. */
+  permissionMode?: string | null
+  /** Subcommand + arg for /permissions {list|remove|clear}. */
+  permissionSub?: string
+  permissionArg?: string
 }
 
 export function parseCliInput(argv: string[]): ParsedInput {
@@ -86,6 +91,15 @@ export function parseUiLine(line: string): ParsedInput | null {
 
   if (trimmed === "/model" || trimmed.startsWith("/model ")) {
     return { mode: "model", model: trimmed === "/model" ? null : trimmed.replace("/model", "").trim() }
+  }
+
+  if (trimmed === "/mode" || trimmed.startsWith("/mode ")) {
+    return { mode: "permission-mode", permissionMode: trimmed === "/mode" ? null : trimmed.replace("/mode", "").trim() }
+  }
+
+  if (trimmed === "/permissions" || trimmed.startsWith("/permissions ")) {
+    const rest = trimmed.replace("/permissions", "").trim().split(/\s+/).filter(Boolean)
+    return { mode: "permissions", permissionSub: rest[0] || "list", permissionArg: rest[1] }
   }
 
   if (trimmed === "/pull") {

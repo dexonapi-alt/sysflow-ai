@@ -17,7 +17,7 @@ export async function startUi(): Promise<void> {
   const userTag = user ? chalk.green(String(user.username)) : chalk.yellow("not logged in")
   const chatTag = chatInfo?.title ? chalk.cyan(String(chatInfo.title)) : chalk.dim("no chat")
   console.log(chalk.dim(`  sys v0.1  ${chalk.white(path.basename(process.cwd()))}  model: ${chalk.white(currentModel)}  user: ${userTag}  chat: ${chatTag}`))
-  console.log(chalk.dim("  /model /chats /billing /usage /login /whoami /continue /exit"))
+  console.log(chalk.dim("  /model /mode /permissions /chats /billing /usage /login /whoami /continue /exit"))
   console.log("")
 
   let working = false
@@ -177,6 +177,38 @@ export async function startUi(): Promise<void> {
       } else {
         const { showModelPicker } = await import("../commands/model.js")
         await showModelPicker()
+      }
+      console.log("")
+      rl.prompt()
+      return
+    }
+
+    if (parsed.mode === "permission-mode") {
+      const { changeMode } = await import("../commands/permissions.js")
+      if (parsed.permissionMode) {
+        await changeMode(parsed.permissionMode)
+      } else {
+        const { getPermissionMode } = await import("../lib/sysbase.js")
+        const current = await getPermissionMode()
+        console.log(chalk.dim(`  current mode: ${current}`))
+        console.log(chalk.dim(`  switch with: /mode <default|auto|plan|bypass>`))
+        console.log("")
+      }
+      rl.prompt()
+      return
+    }
+
+    if (parsed.mode === "permissions") {
+      const { showPermissions, removePermissionRule, clearAllPermissionRules } = await import("../commands/permissions.js")
+      const sub = parsed.permissionSub || "list"
+      if (sub === "list") {
+        await showPermissions()
+      } else if (sub === "remove" && parsed.permissionArg) {
+        await removePermissionRule(parsed.permissionArg)
+      } else if (sub === "clear") {
+        await clearAllPermissionRules()
+      } else {
+        console.log(chalk.dim(`  usage: /permissions [list|remove <n>|clear]`))
       }
       console.log("")
       rl.prompt()

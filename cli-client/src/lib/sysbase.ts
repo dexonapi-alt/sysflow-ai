@@ -101,6 +101,35 @@ export async function setReasoningEnabled(enabled: boolean): Promise<void> {
   await fs.writeFile(MODELS_META_FILE, JSON.stringify(data, null, 2), "utf8")
 }
 
+// ─── Permission mode persistence ───
+
+import type { PermissionMode } from "../agent/permissions.js"
+
+const VALID_MODES: PermissionMode[] = ["default", "auto", "plan", "bypass"]
+
+export async function getPermissionMode(): Promise<PermissionMode> {
+  await ensureSysbase()
+  try {
+    const raw = await fs.readFile(MODELS_META_FILE, "utf8")
+    const data = JSON.parse(raw)
+    const mode = data.permissionMode as string | undefined
+    return mode && (VALID_MODES as string[]).includes(mode) ? (mode as PermissionMode) : "default"
+  } catch {
+    return "default"
+  }
+}
+
+export async function setPermissionMode(mode: PermissionMode): Promise<void> {
+  await ensureSysbase()
+  if (!(VALID_MODES as string[]).includes(mode)) {
+    throw new Error(`Unknown permission mode: ${mode}. Valid: ${VALID_MODES.join(", ")}`)
+  }
+  const raw = await fs.readFile(MODELS_META_FILE, "utf8")
+  const data = JSON.parse(raw)
+  data.permissionMode = mode
+  await fs.writeFile(MODELS_META_FILE, JSON.stringify(data, null, 2), "utf8")
+}
+
 async function ensureSysflowHome(): Promise<void> {
   await fs.mkdir(SYSFLOW_HOME, { recursive: true })
 }
