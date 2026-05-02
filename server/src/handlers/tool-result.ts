@@ -20,6 +20,7 @@ import { updatePipelineProgress, completePipeline, clearPipeline, getPipeline, h
 import { getScaffoldChoice, storeScaffoldChoice, parseScaffoldResponse, clearScaffoldState } from "../services/scaffold-options.js"
 import { getPendingError, clearPendingError, setPendingError, buildFixInstructions, setPendingFileContent, hasPendingErrors, popNextPendingError } from "../services/error-autofix.js"
 import { applyToolResultBudget, estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
+import { classifyToolError } from "../services/tool-error-classifier.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 /** Track how many times completion was rejected per run (prevent infinite loops) */
@@ -508,9 +509,19 @@ function enrichSingleError(tool: string, result: Record<string, unknown>): Recor
   const error = (result.error as string) || ""
   if (!error) return result
 
+  // First: structured classification with rich hint (replaces the legacy regex chain).
+  const classified = classifyToolError(tool, error)
+  if (classified.category !== "unknown") {
+    return {
+      ...result,
+      error: `${error}\n\n${classified.hint}`,
+      _errorCategory: classified.category,
+    }
+  }
+
+  // Fall back to the legacy hint table for anything the classifier marks unknown.
   const hint = getErrorRecoveryHint(tool, error)
   if (!hint) return result
-
   return { ...result, error: `${error}\n\n${hint}` }
 }
 
