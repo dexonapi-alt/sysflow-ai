@@ -4,6 +4,22 @@
 
 ## Recent Work
 
+**Phase 4 productionisation pass** (`.claude/plans/applied/2026-05-02-phase-4-productionisation.md`):
+
+- **Feature flag system**: typed registry on both server (`services/flags.ts`) and CLI (`agent/flags.ts`). Three sources, highest first: `SYSFLOW_FLAG_<NAME>` env var → `<sysbasePath>/flags.json` → registered default. Wired into `compaction.autocompact_threshold_buffer`, `compaction.microcompact_keep_last_n`, `tool.persist_threshold_bytes`, `cli.retry_max_default`, `cli.tool_result_preview_enabled`, and `cli.audit_retention_days`. All defaults match the prior hardcoded values.
+- **Plan mode**: new `prompt/sections/plan-mode.ts` injected at priority 108. When `planMode === true`, the system prompt tells the model to do read-only research + propose a plan and stop. `getPlanMode()`/`setPlanMode()` persist in `models.json`. Slash command `/plan-mode [on|off]` toggles; bare `/plan-mode` flips. The CLI header shows `plan-mode` when on; `/permissions` displays it next to the permission mode.
+- **Audit-log rotation**: `agent/audit-log.ts` writes to dated files `audit-YYYY-MM-DD.jsonl` and prunes older than `cli.audit_retention_days` (default 14) on the first call after the date changes. Replaces the bare `audit.jsonl` append used by the audit hook.
+- **Per-run usage telemetry**: `agent/usage-log.ts` appends one JSONL line per terminal exit to `<sysbasePath>/usage.jsonl` with prompt preview, model, durationMs, stepCount, toolCount, errorCount, estimated tokens, and the terminal reason from the state machine.
+- **Initial test suite**: vitest configured in both packages. 30+ test cases across `validate-tool-input`, `permissions`, `hooks`, `tool-meta`, `context-budget`, `project-memory`, and `tool-error-classifier`.
+
+**Phase 4 productionisation pass** (`.claude/plans/applied/2026-05-02-phase-4-productionisation.md`):
+
+- **Feature flag system**: typed registries on both server (`server/src/services/flags.ts`) and CLI (`cli-client/src/agent/flags.ts`) with three-source precedence (`SYSFLOW_FLAG_<NAME>` env > `<sysbasePath>/flags.json` > registered default). Per-process memoisation; `resetFlagCache()` for tests. Initial inventory wires existing constants: `compaction.autocompact_threshold_buffer`, `compaction.microcompact_keep_last_n`, `tool.persist_threshold_bytes`, `cli.tool_result_preview_enabled`, `cli.diff_preview_lines_max`, `cli.retry_max_default`, `cli.audit_retention_days`.
+- **Plan mode**: new `prompt/sections/plan-mode.ts` injects a plan-aware section when `planMode === true`. `getPlanMode()`/`setPlanMode()` persist the flag in `models.json`. `/plan-mode [on|off]` slash command toggles it; the REPL header shows `plan-mode` when active. Pairs with the existing `PermissionMode = 'plan'` from Phase 3.
+- **Daily-rotated audit log**: `cli-client/src/agent/audit-log.ts` writes to `<sysbasePath>/audit-YYYY-MM-DD.jsonl` and prunes files older than `cli.audit_retention_days` (default 14) on the first call after the date changes. The `builtin/audit` hook now uses it.
+- **Per-run usage telemetry**: `agent/usage-log.ts` appends one JSONL line per terminal run-exit to `<sysbasePath>/usage.jsonl` with `runId, prompt (200-char preview), model, durationMs, stepCount, toolCount, errorCount, estimated input/output tokens, terminalReason`. Wired into every terminal branch in the CLI agent loop.
+- **Initial test suite**: vitest set up on both packages with `npm test` / `test:watch` scripts. ~30 cases land across `validate-tool-input` (12), `permissions` (10), `hooks` (6), `tool-meta` (8), `context-budget` (12), `project-memory` (6), `tool-error-classifier` (10). All target the pure modules from Phases 1–3 — no network, no DB.
+
 **Phase 3 capabilities pass** (`.claude/plans/applied/2026-05-02-phase-3-capabilities.md`):
 
 - **Zod tool input schemas**: `cli-client/src/agent/tool-schemas.ts` declares one Zod schema per tool (read_file, batch_read, list_directory, file_exists, create_directory, write_file, edit_file, move_file, delete_file, search_code, search_files, run_command, web_search, batch_write). edit_file is a discriminated union of its four valid shapes. `validateToolInput()` returns either parsed args or a structured ValidationError with the failing field path, all issues, and a recovery hint. Wired into the executor; replaces the manual `if (!args.path)` chains.

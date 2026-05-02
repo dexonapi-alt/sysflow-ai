@@ -8,6 +8,7 @@ _None active._
 
 ## Applied
 
+- [applied/2026-05-02-phase-4-productionisation.md](applied/2026-05-02-phase-4-productionisation.md) — Phase 4 productionisation: typed feature flag system, plan-mode toggle + slash command + status visibility, daily-rotated audit log with retention pruning, per-run CLI usage telemetry, vitest setup with ~30 cases across pure modules.  *(implemented 2026-05-02)*
 - [applied/2026-05-02-phase-3-capabilities.md](applied/2026-05-02-phase-3-capabilities.md) — Phase 3 capabilities: Zod input schemas + validation pipeline, permission system (modes + per-tool gate + interactive prompt + persistent rules + slash commands), hook registry with pre/post events + built-in audit + secrets-block hooks.  *(implemented 2026-05-02)*
 - [applied/2026-05-02-phase-2-foundation.md](applied/2026-05-02-phase-2-foundation.md) — Phase 2 foundation: real autocompact + circuit breaker, .sysflow.md project memory, max-output-token recovery, concurrency partitioning + sibling abort, tool-result persistence, structured tool-error classifier.  *(implemented 2026-05-02)*
 - [applied/2026-05-02-phase-1-reasoning-and-cli-ux.md](applied/2026-05-02-phase-1-reasoning-and-cli-ux.md) — Phase 1 reasoning + CLI UX pass: modular cacheable prompt sections, token guard + microcompact + tool-result budget, schema fix, agent.ts split into renderer/state-machine/retry, tool-result preview.  *(implemented 2026-05-02)*
