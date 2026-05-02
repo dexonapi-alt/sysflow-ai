@@ -15,29 +15,32 @@ export interface ToolMeta {
   isConcurrencySafe: boolean
   isReadOnly: boolean
   abortsSiblingsOnError: boolean
+  /** Default permission decision for this tool when no rule matches. */
+  defaultPermission: "allow" | "ask" | "deny"
 }
 
 export const TOOL_META: Record<string, ToolMeta> = {
-  read_file:        { isConcurrencySafe: true,  isReadOnly: true,  abortsSiblingsOnError: false },
-  batch_read:       { isConcurrencySafe: true,  isReadOnly: true,  abortsSiblingsOnError: false },
-  list_directory:   { isConcurrencySafe: true,  isReadOnly: true,  abortsSiblingsOnError: false },
-  search_code:      { isConcurrencySafe: true,  isReadOnly: true,  abortsSiblingsOnError: false },
-  search_files:     { isConcurrencySafe: true,  isReadOnly: true,  abortsSiblingsOnError: false },
-  web_search:       { isConcurrencySafe: true,  isReadOnly: true,  abortsSiblingsOnError: false },
-  file_exists:      { isConcurrencySafe: true,  isReadOnly: true,  abortsSiblingsOnError: false },
-  write_file:       { isConcurrencySafe: true,  isReadOnly: false, abortsSiblingsOnError: false },
-  edit_file:        { isConcurrencySafe: true,  isReadOnly: false, abortsSiblingsOnError: false },
-  create_directory: { isConcurrencySafe: true,  isReadOnly: false, abortsSiblingsOnError: false },
-  move_file:        { isConcurrencySafe: false, isReadOnly: false, abortsSiblingsOnError: false },
-  delete_file:      { isConcurrencySafe: false, isReadOnly: false, abortsSiblingsOnError: false },
-  run_command:      { isConcurrencySafe: false, isReadOnly: false, abortsSiblingsOnError: true  },
-  batch_write:      { isConcurrencySafe: true,  isReadOnly: false, abortsSiblingsOnError: false },
+  read_file:        { isConcurrencySafe: true,  isReadOnly: true,  abortsSiblingsOnError: false, defaultPermission: "allow" },
+  batch_read:       { isConcurrencySafe: true,  isReadOnly: true,  abortsSiblingsOnError: false, defaultPermission: "allow" },
+  list_directory:   { isConcurrencySafe: true,  isReadOnly: true,  abortsSiblingsOnError: false, defaultPermission: "allow" },
+  search_code:      { isConcurrencySafe: true,  isReadOnly: true,  abortsSiblingsOnError: false, defaultPermission: "allow" },
+  search_files:     { isConcurrencySafe: true,  isReadOnly: true,  abortsSiblingsOnError: false, defaultPermission: "allow" },
+  web_search:       { isConcurrencySafe: true,  isReadOnly: true,  abortsSiblingsOnError: false, defaultPermission: "allow" },
+  file_exists:      { isConcurrencySafe: true,  isReadOnly: true,  abortsSiblingsOnError: false, defaultPermission: "allow" },
+  write_file:       { isConcurrencySafe: true,  isReadOnly: false, abortsSiblingsOnError: false, defaultPermission: "ask" },
+  edit_file:        { isConcurrencySafe: true,  isReadOnly: false, abortsSiblingsOnError: false, defaultPermission: "ask" },
+  create_directory: { isConcurrencySafe: true,  isReadOnly: false, abortsSiblingsOnError: false, defaultPermission: "allow" },
+  move_file:        { isConcurrencySafe: false, isReadOnly: false, abortsSiblingsOnError: false, defaultPermission: "ask" },
+  delete_file:      { isConcurrencySafe: false, isReadOnly: false, abortsSiblingsOnError: false, defaultPermission: "ask" },
+  run_command:      { isConcurrencySafe: false, isReadOnly: false, abortsSiblingsOnError: true,  defaultPermission: "ask" },
+  batch_write:      { isConcurrencySafe: true,  isReadOnly: false, abortsSiblingsOnError: false, defaultPermission: "ask" },
 }
 
 const DEFAULT_META: ToolMeta = {
   isConcurrencySafe: false,
   isReadOnly: false,
   abortsSiblingsOnError: false,
+  defaultPermission: "ask",
 }
 
 export function getToolMeta(tool: string): ToolMeta {
