@@ -20,7 +20,7 @@ import { updatePipelineProgress, completePipeline, clearPipeline, getPipeline, h
 import { getScaffoldChoice, storeScaffoldChoice, parseScaffoldResponse, clearScaffoldState } from "../services/scaffold-options.js"
 import { getPendingError, clearPendingError, setPendingError, buildFixInstructions, setPendingFileContent, hasPendingErrors, popNextPendingError } from "../services/error-autofix.js"
 import { applyToolResultBudget, estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
-import { classifyToolError } from "../services/tool-error-classifier.js"
+import { classifyToolError, classifyToolErrorFromResult } from "../services/tool-error-classifier.js"
 import { persistLargeToolResult } from "../store/tool-result-persistence.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
@@ -536,12 +536,12 @@ function enrichSingleError(tool: string, result: Record<string, unknown>): Recor
   const error = (result.error as string) || ""
   if (!error) return result
 
-  // First: structured classification with rich hint (replaces the legacy regex chain).
-  const classified = classifyToolError(tool, error)
+  // Trust _errorCategory if the CLI's validation/permission layer already set it.
+  const classified = classifyToolErrorFromResult(tool, result)
   if (classified.category !== "unknown") {
     return {
       ...result,
-      error: `${error}\n\n${classified.hint}`,
+      error: result._errorCategory ? error : `${error}\n\n${classified.hint}`,
       _errorCategory: classified.category,
     }
   }

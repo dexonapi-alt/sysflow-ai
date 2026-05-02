@@ -27,6 +27,22 @@ export interface ClassifiedToolError {
   hint: string
 }
 
+/**
+ * If the result already carries an `_errorCategory` field (set by the CLI's
+ * Zod validation layer or the permission gate), trust it and short-circuit
+ * with the existing error string. Otherwise run the regex chain below.
+ */
+export function classifyToolErrorFromResult(tool: string, result: Record<string, unknown>): ClassifiedToolError {
+  const preset = (result?._errorCategory as string | undefined)
+  if (preset === "validation") {
+    return { category: "validation", hint: (result.error as string) || hintForValidation(tool) }
+  }
+  if (preset === "permission") {
+    return { category: "permission", hint: (result.error as string) || hintForPermission(tool) }
+  }
+  return classifyToolError(tool, (result?.error as string) || "")
+}
+
 export function classifyToolError(tool: string, error: string): ClassifiedToolError {
   const e = (error || "").toLowerCase()
 
