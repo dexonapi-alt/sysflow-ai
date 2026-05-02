@@ -38,6 +38,8 @@ export interface ProviderPayload {
   command?: string
   /** Absolute path of the user's project root — used for project-memory discovery. */
   cwd?: string
+  /** When true, the prompt's plan-mode section is injected and the agent stays read-only. */
+  planMode?: boolean
 }
 
 export interface ProviderContext {

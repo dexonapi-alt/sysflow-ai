@@ -118,6 +118,7 @@ export class GeminiProvider extends BaseProvider {
       cwd: payload.cwd,
       projectMemory: memory.content || undefined,
       projectMemoryFiles: memory.files,
+      planMode: payload.planMode,
     })
   }
 

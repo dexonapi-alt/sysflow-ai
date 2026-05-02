@@ -3,7 +3,7 @@ import path from "node:path"
 import readline from "node:readline"
 import ora from "ora"
 import { callServer, callServerStream, type ServerError } from "../lib/server.js"
-import { ensureSysbase, getSelectedModel, getSysbasePath, getReasoningEnabled, getAuthToken } from "../lib/sysbase.js"
+import { ensureSysbase, getSelectedModel, getSysbasePath, getReasoningEnabled, getAuthToken, getPlanMode } from "../lib/sysbase.js"
 import { executeTool, executeToolsBatch } from "./executor.js"
 import { readFileTool, computeLineDiff } from "./tools.js"
 import { clearRunDiffs } from "./diff.js"
@@ -77,6 +77,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
 
   const selectedModel = model || (await getSelectedModel())
   const hasReasoning = await getReasoningEnabled()
+  const planMode = await getPlanMode()
 
   const chatUid = await ensureActiveChat()
   if (!chatUid) {
@@ -122,6 +123,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
     directoryTree: dirTree,
     mentionedFiles,
     chatUid: chatUid || undefined,
+    planMode,
     client: { platform: os.platform(), arch: os.arch() }
   }
 

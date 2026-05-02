@@ -16,10 +16,11 @@ import { getOutputEfficiencySection } from "./sections/output-efficiency.js"
 import { getEnvInfoSection, type EnvInfoCtx } from "./sections/env-info.js"
 import { getModelSpecificSection } from "./sections/model-specific.js"
 import { getProjectMemorySection, type ProjectMemoryCtx } from "./sections/project-memory.js"
+import { getPlanModeSection, type PlanModeCtx } from "./sections/plan-mode.js"
 
 export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "═══ SYSTEM_PROMPT_DYNAMIC_BOUNDARY ═══"
 
-export interface PromptCtx extends EnvInfoCtx, ProjectMemoryCtx {
+export interface PromptCtx extends EnvInfoCtx, ProjectMemoryCtx, PlanModeCtx {
   model?: string
 }
 
@@ -48,6 +49,7 @@ export function buildSystemPrompt(ctx: PromptCtx = {}): BuiltPrompt {
     { id: "output_efficiency", priority: 40, cacheable: true, content: getOutputEfficiencySection() },
     { id: "env_info", priority: 100, cacheable: false, content: getEnvInfoSection(ctx) },
     { id: "project_memory", priority: 105, cacheable: false, content: getProjectMemorySection(ctx) },
+    { id: "plan_mode", priority: 108, cacheable: false, content: getPlanModeSection(ctx) },
     { id: "model_specific", priority: 110, cacheable: false, content: getModelSpecificSection(ctx.model) },
   ]
 

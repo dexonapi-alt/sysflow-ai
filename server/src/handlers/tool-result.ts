@@ -37,6 +37,7 @@ interface ToolResultBody {
   tool: string
   result: Record<string, unknown>
   toolResults?: Array<{ id: string; tool: string; result: Record<string, unknown> }>
+  planMode?: boolean
 }
 
 export async function handleToolResult(body: ToolResultBody): Promise<ClientResponse> {
@@ -198,6 +199,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     command: run.command as string | undefined,
     projectId: run.projectId,
     cwd: run.cwd as string | undefined,
+    planMode: body.planMode === true,
     userId: run.userId || null,
     chatId: run.chatId || null
   }

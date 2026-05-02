@@ -29,6 +29,7 @@ interface UserMessageBody {
   directoryTree?: Array<{ name: string; type: string }>
   userId?: string | null
   chatId?: string | null
+  planMode?: boolean
 }
 
 export async function handleUserMessage(body: UserMessageBody): Promise<ClientResponse> {
@@ -228,6 +229,7 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     directoryTree: (body.directoryTree || []) as never,
     projectId: body.projectId,
     cwd: body.cwd,
+    planMode: body.planMode === true,
     userId: body.userId || null,
     chatId: body.chatId || null
   } as never)

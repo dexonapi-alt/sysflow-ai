@@ -130,6 +130,25 @@ export async function setPermissionMode(mode: PermissionMode): Promise<void> {
   await fs.writeFile(MODELS_META_FILE, JSON.stringify(data, null, 2), "utf8")
 }
 
+export async function getPlanMode(): Promise<boolean> {
+  await ensureSysbase()
+  try {
+    const raw = await fs.readFile(MODELS_META_FILE, "utf8")
+    const data = JSON.parse(raw)
+    return data.planMode === true
+  } catch {
+    return false
+  }
+}
+
+export async function setPlanMode(enabled: boolean): Promise<void> {
+  await ensureSysbase()
+  const raw = await fs.readFile(MODELS_META_FILE, "utf8")
+  const data = JSON.parse(raw)
+  data.planMode = enabled === true
+  await fs.writeFile(MODELS_META_FILE, JSON.stringify(data, null, 2), "utf8")
+}
+
 async function ensureSysflowHome(): Promise<void> {
   await fs.mkdir(SYSFLOW_HOME, { recursive: true })
 }
