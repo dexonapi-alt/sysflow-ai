@@ -8,6 +8,8 @@ interface ParsedInput {
   /** Subcommand + arg for /permissions {list|remove|clear}. */
   permissionSub?: string
   permissionArg?: string
+  /** Argument for /plan-mode: 'on' | 'off' | 'toggle'. */
+  planModeArg?: string
 }
 
 export function parseCliInput(argv: string[]): ParsedInput {
@@ -100,6 +102,11 @@ export function parseUiLine(line: string): ParsedInput | null {
   if (trimmed === "/permissions" || trimmed.startsWith("/permissions ")) {
     const rest = trimmed.replace("/permissions", "").trim().split(/\s+/).filter(Boolean)
     return { mode: "permissions", permissionSub: rest[0] || "list", permissionArg: rest[1] }
+  }
+
+  if (trimmed === "/plan-mode" || trimmed.startsWith("/plan-mode ")) {
+    const arg = trimmed === "/plan-mode" ? "" : trimmed.replace("/plan-mode", "").trim()
+    return { mode: "plan-mode", planModeArg: arg || "toggle" }
   }
 
   if (trimmed === "/pull") {

@@ -12,12 +12,15 @@ export async function startUi(): Promise<void> {
   const currentModel = await getSelectedModel()
   const user = await getAuthUser()
   const chatInfo = await getActiveChatInfo()
+  const { getPlanMode } = await import("../lib/sysbase.js")
+  const planOn = await getPlanMode()
 
   console.log("")
   const userTag = user ? chalk.green(String(user.username)) : chalk.yellow("not logged in")
   const chatTag = chatInfo?.title ? chalk.cyan(String(chatInfo.title)) : chalk.dim("no chat")
-  console.log(chalk.dim(`  sys v0.1  ${chalk.white(path.basename(process.cwd()))}  model: ${chalk.white(currentModel)}  user: ${userTag}  chat: ${chatTag}`))
-  console.log(chalk.dim("  /model /mode /permissions /chats /billing /usage /login /whoami /continue /exit"))
+  const planTag = planOn ? "  " + chalk.yellow("plan-mode") : ""
+  console.log(chalk.dim(`  sys v0.1  ${chalk.white(path.basename(process.cwd()))}  model: ${chalk.white(currentModel)}  user: ${userTag}  chat: ${chatTag}`) + planTag)
+  console.log(chalk.dim("  /model /mode /permissions /plan-mode /chats /billing /usage /login /whoami /continue /exit"))
   console.log("")
 
   let working = false
@@ -210,6 +213,23 @@ export async function startUi(): Promise<void> {
       } else {
         console.log(chalk.dim(`  usage: /permissions [list|remove <n>|clear]`))
       }
+      console.log("")
+      rl.prompt()
+      return
+    }
+
+    if (parsed.mode === "plan-mode") {
+      const { getPlanMode, setPlanMode } = await import("../lib/sysbase.js")
+      const current = await getPlanMode()
+      const arg = parsed.planModeArg ?? "toggle"
+      let next: boolean
+      if (arg === "on") next = true
+      else if (arg === "off") next = false
+      else next = !current
+      await setPlanMode(next)
+      console.log(next
+        ? chalk.green(`  plan mode ON`) + chalk.dim(` — agent will only propose plans, not write files`)
+        : chalk.green(`  plan mode OFF`) + chalk.dim(` — agent runs normally`))
       console.log("")
       rl.prompt()
       return

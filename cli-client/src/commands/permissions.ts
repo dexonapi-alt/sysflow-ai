@@ -4,17 +4,18 @@
  */
 
 import { colors, BOX } from "../cli/render.js"
-import { getSysbasePath, getPermissionMode, setPermissionMode } from "../lib/sysbase.js"
+import { getSysbasePath, getPermissionMode, setPermissionMode, getPlanMode } from "../lib/sysbase.js"
 import { loadRules, removeRule, type PermissionMode } from "../agent/permissions.js"
 
 export async function showPermissions(): Promise<void> {
   const sysbasePath = getSysbasePath()
   const mode = await getPermissionMode()
+  const planOn = await getPlanMode()
   const rules = await loadRules(sysbasePath)
 
   console.log("")
   console.log("  " + colors.accent.bold("permissions"))
-  console.log("  " + colors.muted("mode: ") + colors.bright(mode))
+  console.log("  " + colors.muted("mode: ") + colors.bright(mode) + (planOn ? colors.muted("  · plan-mode: ") + colors.warning("ON") : ""))
   console.log("")
   if (rules.length === 0) {
     console.log("  " + colors.muted("no persistent rules"))
