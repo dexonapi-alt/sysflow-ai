@@ -27,6 +27,9 @@ import { createSnapshot, cleanupSnapshot, rollback, getSnapshot, detectGit } fro
 import { lintFile, lintFiles, displayLintErrors, resetTscCache } from "./lint.js"
 import { partitionToolCalls, getToolMeta } from "./tool-meta.js"
 import { validateToolInput } from "./validate-tool-input.js"
+import { checkPermissions, loadRules, saveRule, lookupAnswer, rememberAnswer, primaryPath, type Rule } from "./permissions.js"
+import { getSysbasePath, getPermissionMode } from "../lib/sysbase.js"
+import { askPermission } from "../cli/permission-prompt.js"
 
 interface ToolResponse {
   tool: string
@@ -42,6 +45,31 @@ interface ToolCallEntry {
 }
 
 // ─── Local tool execution (no server call) ───
+
+async function resolvePermission(tool: string, args: Record<string, unknown>, runId?: string): Promise<"allow" | "deny"> {
+  const mode = await getPermissionMode()
+  const sysbasePath = getSysbasePath()
+  const rules: Rule[] = await loadRules(sysbasePath)
+  const target = primaryPath(tool, args)
+  const runScope = runId ?? "no-run"
+
+  // Run-scoped cache hit (e.g., user previously chose 'allow once' for this tool/path).
+  const cached = lookupAnswer(runScope, tool, target)
+  if (cached === "allow") return "allow"
+  if (cached === "deny") return "deny"
+
+  const decision = checkPermissions({ tool, args, mode, rules })
+  if (decision.decision === "allow") return "allow"
+  if (decision.decision === "deny") return "deny"
+
+  // 'ask' — prompt interactively; persist if requested.
+  const promptResult = await askPermission({ tool, args })
+  if (promptResult.persist) {
+    await saveRule(sysbasePath, { tool, pattern: promptResult.pattern, decision: promptResult.decision })
+  }
+  rememberAnswer(runScope, tool, target, promptResult.decision)
+  return promptResult.decision === "allow" ? "allow" : "deny"
+}
 
 export async function executeToolLocally(tool: string, args: Record<string, unknown>, runId?: string): Promise<Record<string, unknown>> {
   if (!args) args = {}
@@ -62,6 +90,16 @@ export async function executeToolLocally(tool: string, args: Record<string, unkn
     }
   }
   args = validated.args
+
+  // ─── Permission gate: ask the user, persist rules, deny when configured ───
+  const permResult = await resolvePermission(tool, args, runId)
+  if (permResult === "deny") {
+    return {
+      error: `⛔ PERMISSION DENIED: tool "${tool}" was denied by the active permission policy.`,
+      success: false,
+      _errorCategory: "permission",
+    }
+  }
 
   switch (tool) {
     case "list_directory": {
