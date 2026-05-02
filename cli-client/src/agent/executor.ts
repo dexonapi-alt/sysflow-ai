@@ -30,6 +30,10 @@ import { validateToolInput } from "./validate-tool-input.js"
 import { checkPermissions, loadRules, saveRule, lookupAnswer, rememberAnswer, primaryPath, type Rule } from "./permissions.js"
 import { getSysbasePath, getPermissionMode } from "../lib/sysbase.js"
 import { askPermission } from "../cli/permission-prompt.js"
+import { runHooks } from "./hooks.js"
+import { registerBuiltinHooks } from "./builtin-hooks.js"
+
+registerBuiltinHooks()
 
 interface ToolResponse {
   tool: string
@@ -91,16 +95,55 @@ export async function executeToolLocally(tool: string, args: Record<string, unkn
   }
   args = validated.args
 
-  // ─── Permission gate: ask the user, persist rules, deny when configured ───
-  const permResult = await resolvePermission(tool, args, runId)
+  // ─── Pre-tool-use hooks: may override permission or prevent execution ───
+  const preHooks = await runHooks("pre_tool_use", { event: "pre_tool_use", tool, args, runId })
+  if (preHooks.prevent) {
+    return {
+      error: `⛔ HOOK PREVENTED: tool "${tool}" was blocked by a pre-tool-use hook (${preHooks.notes.map((n) => n.source).join(", ") || "unknown"}).`,
+      success: false,
+      _errorCategory: "permission",
+      _hookNotes: preHooks.notes,
+    }
+  }
+
+  // ─── Permission gate: hook override > rule > tool default ───
+  let permResult: "allow" | "deny"
+  if (preHooks.override === "allow") permResult = "allow"
+  else if (preHooks.override === "deny") permResult = "deny"
+  else permResult = await resolvePermission(tool, args, runId)
+
   if (permResult === "deny") {
     return {
       error: `⛔ PERMISSION DENIED: tool "${tool}" was denied by the active permission policy.`,
       success: false,
       _errorCategory: "permission",
+      _hookNotes: preHooks.notes.length > 0 ? preHooks.notes : undefined,
     }
   }
 
+  // Helper to wrap any branch's return so post-hooks fire.
+  const finalize = async (result: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const event = result.success === false || result.error ? "post_tool_use_failure" : "post_tool_use"
+    await runHooks(event, { event, tool, args, runId, result })
+    return result
+  }
+
+  // The dispatch switch below historically returns directly. We wrap each
+  // branch's return value through `finalize` via the trailing `_finalized`
+  // marker — simpler than rewriting every case, post-hooks fire after the
+  // switch via the wrapper at the bottom of the function.
+  let dispatched: Record<string, unknown>
+  try {
+    dispatched = await dispatch(tool, args, runId)
+  } catch (err) {
+    const errResult = { error: (err as Error).message, success: false }
+    await runHooks("post_tool_use_failure", { event: "post_tool_use_failure", tool, args, runId, result: errResult, error: err as Error })
+    throw err
+  }
+  return finalize(dispatched)
+}
+
+async function dispatch(tool: string, args: Record<string, unknown>, runId?: string): Promise<Record<string, unknown>> {
   switch (tool) {
     case "list_directory": {
       const entries = await listDirectoryTool(args.path as string)
