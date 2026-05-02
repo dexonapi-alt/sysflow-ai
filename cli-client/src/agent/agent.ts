@@ -29,6 +29,8 @@ import {
 } from "../cli/diff-preview.js"
 import { renderToolResultPreview } from "../cli/tool-result-preview.js"
 import { classifyResponse, makeRetryBudget, noteSuccess, type RetryBudget } from "./state-machine.js"
+import { recordRunSummary } from "./usage-log.js"
+import { estimateTokens as cliEstimateTokens } from "./token-estimate.js"
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -184,7 +186,28 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   const currentRunId = (response.runId as string) || ""
   let lastPipelineStepId: string | null = null
 
+  // ─── Usage telemetry: tally counters during the run ───
+  const startedAtMs = Date.now()
+  let toolCount = 0
+  let errorCount = 0
+  const inputTokens = cliEstimateTokens(serverPayload)
+  let outputTokens = 0
+
   const cleanupDiffListener = startDiffKeyListener(spinner)
+  const recordTelemetry = async (terminalReason: string): Promise<void> => {
+    await recordRunSummary(getSysbasePath(), {
+      runId: currentRunId || null,
+      prompt: cleanPrompt,
+      model: selectedModel,
+      durationMs: Date.now() - startedAtMs,
+      stepCount,
+      toolCount,
+      errorCount,
+      estimatedInputTokens: inputTokens,
+      estimatedOutputTokens: outputTokens,
+      terminalReason,
+    })
+  }
 
   while (true) {
     // Safety: detect misclassified responses — "completed" but message contains needs_tool JSON
@@ -275,6 +298,8 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
           cleanupDiffListener()
           disableDiffExpand()
           if (currentRunId) clearRunDiffs(currentRunId)
+          outputTokens = cliEstimateTokens(response.message || response.content || "")
+          await recordTelemetry("completed")
           return response
         }
         case "session_expired": {
@@ -284,6 +309,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
           console.log(colors.muted("  Run your prompt again with ") + colors.accent("sys \"your prompt\"") + colors.muted(" or ") + colors.accent("sys continue"))
           console.log("")
           cleanupDiffListener()
+          await recordTelemetry("session_expired")
           return response
         }
         case "prompt_too_long": {
@@ -293,6 +319,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
           console.log(colors.muted("  Try a shorter prompt or fewer @file mentions, or run ") + colors.accent("sys chat new") + colors.muted(" to start fresh."))
           console.log("")
           cleanupDiffListener()
+          await recordTelemetry("prompt_too_long")
           return response
         }
         case "malformed_response_exhausted": {
@@ -302,6 +329,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
           console.log(colors.muted("  " + ((response.error as string) || "")))
           console.log("")
           cleanupDiffListener()
+          await recordTelemetry("malformed_response_exhausted")
           throw new Error((response.error as string) || "malformed_response")
         }
         default: {
@@ -309,6 +337,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
           cleanupDiffListener()
           disableDiffExpand()
           if (currentRunId) clearRunDiffs(currentRunId)
+          await recordTelemetry(transition.reason)
           throw new Error(`Unexpected terminal: ${transition.reason}`)
         }
       }
@@ -318,6 +347,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
     switch (transition.reason) {
       case "tool_executed":
       case "tool_batch_executed": {
+        toolCount += transition.reason === "tool_batch_executed" ? Math.max(1, ((response.tools as unknown[]) || []).length) : 1
         const result = await handleNeedsTool(
           response,
           spinner,
