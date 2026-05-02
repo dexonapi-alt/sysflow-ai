@@ -8,6 +8,7 @@
  */
 
 import { colors, BOX } from "./render.js"
+import { getFlag } from "../agent/flags.js"
 
 export interface PreviewableResult {
   tool: string
@@ -18,6 +19,8 @@ const MAX_PREVIEW_CHARS = 200
 
 export function renderToolResultPreview({ tool, result }: PreviewableResult): string | null {
   if (!result) return null
+  // Flag-gated: a user can disable the preview if it's too noisy.
+  try { if (!getFlag<boolean>("cli.tool_result_preview_enabled")) return null } catch { /* fall through */ }
   if (result.aborted_by_sibling) {
     return `      ${colors.muted(BOX.dash)} ${colors.warning("↯ aborted")} ${colors.muted("(sibling failed)")}`
   }

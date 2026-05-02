@@ -44,6 +44,8 @@ export const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   "swe": 200_000,
 }
 
+import { getFlag } from "./flags.js"
+
 /** Tokens reserved as a safety margin for output + non-deterministic tokeniser drift. */
 export const AUTOCOMPACT_BUFFER_TOKENS = 13_000
 
@@ -56,7 +58,8 @@ export function getEffectiveContextWindow(model: string): number {
 
 export function shouldBlockOnTokens(estimatedTokens: number, model: string): boolean {
   const window = getEffectiveContextWindow(model)
-  const limit = window - AUTOCOMPACT_BUFFER_TOKENS - Math.floor(window * SAFETY_MARGIN)
+  const buffer = getFlag<number>("compaction.autocompact_threshold_buffer")
+  const limit = window - buffer - Math.floor(window * SAFETY_MARGIN)
   return estimatedTokens > limit
 }
 
@@ -150,6 +153,13 @@ const COMPACTABLE_TOOLS = new Set([
 
 /** Default: keep the most recent N compactable results; clear everything older. */
 const DEFAULT_KEEP_LAST_N = 5
+function defaultKeepLastN(): number {
+  try {
+    return getFlag<number>("compaction.microcompact_keep_last_n")
+  } catch {
+    return DEFAULT_KEEP_LAST_N
+  }
+}
 
 /**
  * Gemini "user" turns from `chat.getHistory()` look like:
@@ -168,7 +178,7 @@ export interface GeminiContent {
 
 export function microcompactGeminiHistory(
   history: GeminiContent[],
-  keepLastN: number = DEFAULT_KEEP_LAST_N,
+  keepLastN: number = defaultKeepLastN(),
 ): GeminiContent[] {
   // Find user turns whose first part starts with "Tool result:" / "Tool results (parallel):"
   const toolResultIndices: number[] = []

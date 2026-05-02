@@ -12,8 +12,16 @@
 
 import fs from "node:fs/promises"
 import path from "node:path"
+import { getFlag } from "../services/flags.js"
 
-const PERSISTENCE_THRESHOLD_BYTES = 10 * 1024  // 10 KiB
+const FALLBACK_PERSISTENCE_THRESHOLD_BYTES = 10 * 1024  // 10 KiB
+function persistenceThresholdBytes(): number {
+  try {
+    return getFlag<number>("tool.persist_threshold_bytes")
+  } catch {
+    return FALLBACK_PERSISTENCE_THRESHOLD_BYTES
+  }
+}
 
 export interface PersistArgs {
   sysbasePath?: string | null
@@ -44,7 +52,7 @@ export async function persistLargeToolResult(args: PersistArgs): Promise<Persist
     return { path: null, originalSize: 0 }
   }
   const size = Buffer.byteLength(serialised, "utf8")
-  if (size < PERSISTENCE_THRESHOLD_BYTES) return { path: null, originalSize: size }
+  if (size < persistenceThresholdBytes()) return { path: null, originalSize: size }
 
   const dir = path.join(args.sysbasePath, "tool-results", args.runId)
   const file = path.join(dir, `${args.toolId}.json`)

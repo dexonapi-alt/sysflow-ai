@@ -7,6 +7,7 @@
  */
 
 import type { ServerError } from "../lib/server.js"
+import { getFlag } from "./flags.js"
 
 export type RetryClass =
   | "usage_limit"
@@ -43,11 +44,19 @@ export interface RetryOptions {
   onRetry?: (attempt: number, delayMs: number, cls: RetryClass, err: Error) => void
 }
 
+function defaultMaxRetries(): number {
+  try {
+    return getFlag<number>("cli.retry_max_default")
+  } catch {
+    return 10
+  }
+}
+
 const DEFAULT_OPTIONS: RetryOptions = {
-  maxRetries: 10,
+  get maxRetries() { return defaultMaxRetries() },
   baseDelayMs: 1_000,
   maxDelayMs: 32_000,
-}
+} as RetryOptions
 
 /**
  * Run `fn` with classification-aware exponential backoff. Returns the resolved
