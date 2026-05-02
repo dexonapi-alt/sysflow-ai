@@ -227,6 +227,7 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     command: body.command,
     directoryTree: (body.directoryTree || []) as never,
     projectId: body.projectId,
+    cwd: body.cwd,
     userId: body.userId || null,
     chatId: body.chatId || null
   } as never)

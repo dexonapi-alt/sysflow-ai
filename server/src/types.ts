@@ -36,6 +36,8 @@ export interface ProviderPayload {
   userId?: string | null
   chatId?: string | null
   command?: string
+  /** Absolute path of the user's project root — used for project-memory discovery. */
+  cwd?: string
 }
 
 export interface ProviderContext {

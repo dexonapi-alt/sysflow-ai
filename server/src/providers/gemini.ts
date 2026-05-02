@@ -1,6 +1,7 @@
 import { GoogleGenerativeAI, SchemaType, type ChatSession, type GenerateContentResult } from "@google/generative-ai"
 import { BaseProvider, getSystemPrompt } from "./base-provider.js"
 import { microcompactGeminiHistory, type GeminiContent } from "../services/context-budget.js"
+import { discoverProjectMemory } from "../services/project-memory.js"
 import type { ProviderPayload, NormalizedResponse, TokenUsage } from "../types.js"
 
 /** Threshold: once the chat history has more than this many user-turn tool-results, run microcompact. */
@@ -102,8 +103,14 @@ export class GeminiProvider extends BaseProvider {
     super()
   }
 
-  private buildPrompt(payload: ProviderPayload): string {
-    return getSystemPrompt({ model: payload.model })
+  private async buildPrompt(payload: ProviderPayload): Promise<string> {
+    const memory = await discoverProjectMemory(payload.cwd)
+    return getSystemPrompt({
+      model: payload.model,
+      cwd: payload.cwd,
+      projectMemory: memory.content || undefined,
+      projectMemoryFiles: memory.files,
+    })
   }
 
   // All broken-arg recovery, loop detection, and read-before-edit enforcement
@@ -130,13 +137,15 @@ export class GeminiProvider extends BaseProvider {
   async call(payload: ProviderPayload): Promise<NormalizedResponse> {
     const genAI = this.getGenAI()
     const geminiModelName = this.getModelName(payload.model)
+    // Assemble the prompt once per request (covers project-memory discovery I/O).
+    const systemInstruction = await this.buildPrompt(payload)
 
     try {
       if (!payload.toolResult && !payload.toolResults) {
         // First call — create a new chat session
         const model = genAI.getGenerativeModel({
           model: geminiModelName,
-          systemInstruction: this.buildPrompt(payload),
+          systemInstruction,
           generationConfig: {
             responseMimeType: "application/json",
             responseSchema: RESPONSE_SCHEMA as never,
@@ -177,7 +186,7 @@ export class GeminiProvider extends BaseProvider {
         // Session lost — recreate
         const model = genAI.getGenerativeModel({
           model: geminiModelName,
-          systemInstruction: this.buildPrompt(payload),
+          systemInstruction,
           generationConfig: {
             responseMimeType: "application/json",
             responseSchema: RESPONSE_SCHEMA as never,
@@ -205,7 +214,7 @@ export class GeminiProvider extends BaseProvider {
           const compacted = microcompactGeminiHistory(history)
           const model = genAI.getGenerativeModel({
             model: geminiModelName,
-            systemInstruction: this.buildPrompt(payload),
+            systemInstruction,
             generationConfig: {
               responseMimeType: "application/json",
               responseSchema: RESPONSE_SCHEMA as never,

@@ -171,6 +171,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     userMessage: run.content,
     command: run.command as string | undefined,
     projectId: run.projectId,
+    cwd: run.cwd as string | undefined,
     userId: run.userId || null,
     chatId: run.chatId || null
   }
