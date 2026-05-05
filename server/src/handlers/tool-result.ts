@@ -22,11 +22,17 @@ import { getPendingError, clearPendingError, setPendingError, buildFixInstructio
 import { applyToolResultBudget, estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import { classifyToolError, classifyToolErrorFromResult } from "../services/tool-error-classifier.js"
 import { persistLargeToolResult } from "../store/tool-result-persistence.js"
+import { runReasoning } from "../reasoning/task-reasoner.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 /** Track how many times completion was rejected per run (prevent infinite loops) */
 const completionRejections = new Map<string, number>()
 const MAX_COMPLETION_REJECTIONS = 3
+
+/** Phase 5: per-run consecutive-error counter + on-error reasoning budget. */
+const consecutiveToolErrors = new Map<string, number>()
+const onErrorReasoningCount = new Map<string, number>()
+const MAX_ON_ERROR_REASONING_PER_RUN = 2
 
 /** Track frontend quality rejections per run (separate from structural completion guard) */
 const frontendQualityRejections = new Map<string, number>()
@@ -200,6 +206,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     projectId: run.projectId,
     cwd: run.cwd as string | undefined,
     planMode: body.planMode === true,
+    reasoningBrief: onErrorBrief,
     userId: run.userId || null,
     chatId: run.chatId || null
   }
@@ -299,6 +306,43 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
         `Do NOT create new files or directories.`
       )
     }
+  }
+
+  // ─── Phase 5: on-error reasoning trigger ───
+  // Count consecutive errors in the incoming results; if ≥ 2 AND we haven't
+  // exhausted the per-run reasoning budget, run the bug pipeline and inject
+  // the brief into the next provider payload so the agent benefits.
+  let onErrorBrief: unknown = null
+  const incomingErrors = isBatch
+    ? body.toolResults!.filter((tr) => (tr.result as Record<string, unknown>).error || (tr.result as Record<string, unknown>).success === false)
+    : (body.result.error || body.result.success === false ? [{ id: "single", tool: body.tool, result: body.result }] : [])
+  if (incomingErrors.length > 0) {
+    const prev = consecutiveToolErrors.get(body.runId) ?? 0
+    const next = prev + 1
+    consecutiveToolErrors.set(body.runId, next)
+    const used = onErrorReasoningCount.get(body.runId) ?? 0
+    if (next >= 2 && used < MAX_ON_ERROR_REASONING_PER_RUN) {
+      onErrorReasoningCount.set(body.runId, used + 1)
+      try {
+        const lastError = incomingErrors[incomingErrors.length - 1]
+        const briefResult = await runReasoning({
+          trigger: "on_error",
+          userMessage: `Tool ${lastError.tool} failed: ${(lastError.result as Record<string, unknown>).error ?? "unspecified"}`,
+          model: run.model,
+          cwd: run.cwd as string | undefined,
+          sysbasePath: run.sysbasePath as string | undefined,
+          context: { tool: lastError.tool, result: lastError.result, recentErrors: incomingErrors.length },
+        })
+        onErrorBrief = briefResult
+        if (briefResult && briefResult.pipeline === "bug") {
+          console.log(`[reasoning] on_error bug brief: ${briefResult.bugBrief?.suspectedBoundary}`)
+        }
+      } catch (err) {
+        console.warn(`[reasoning] on_error failed:`, (err as Error).message)
+      }
+    }
+  } else {
+    consecutiveToolErrors.set(body.runId, 0)
   }
 
   // ─── Pre-API token guard ───
@@ -448,6 +492,55 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     }
   }
 
+  // ─── Phase 5: on-completion reasoning ───
+  // For non-trivial runs (≥ 5 actions OR ≥ 3 files modified), refine the
+  // user-facing summary via the summary pipeline before returning it.
+  let onCompletionBrief: unknown = null
+  if (normalized.kind === "completed" && !isFatal) {
+    const runLog = getRunActions(body.runId)
+    const isNonTrivial = runLog.actions.length >= 5 || runLog.filesModified.length >= 3
+    if (isNonTrivial) {
+      try {
+        const briefResult = await runReasoning({
+          trigger: "on_completion",
+          userMessage: `Refine this completion summary for the user. Original task: "${run.content}".`,
+          model: run.model,
+          cwd: run.cwd as string | undefined,
+          sysbasePath: run.sysbasePath as string | undefined,
+          context: {
+            originalTask: run.content,
+            filesModified: runLog.filesModified.slice(0, 30),
+            actionCount: runLog.actions.length,
+            draftMessage: normalized.content || "",
+          },
+        })
+        onCompletionBrief = briefResult
+        if (briefResult && briefResult.pipeline === "summary" && briefResult.summaryBrief) {
+          // Replace the draft message with a rendered summary.
+          const sb = briefResult.summaryBrief
+          const lines: string[] = []
+          for (const c of sb.clusters) {
+            lines.push(`## ${c.heading}`)
+            for (const p of c.points) lines.push(`- ${p}`)
+            lines.push("")
+          }
+          if (sb.constraints.length > 0) {
+            lines.push("## Notes")
+            for (const c of sb.constraints) lines.push(`- ${c}`)
+            lines.push("")
+          }
+          if (sb.whatMatters.length > 0) {
+            lines.push("## What matters")
+            for (const w of sb.whatMatters) lines.push(`- ${w}`)
+          }
+          normalized.content = lines.join("\n").trim() || normalized.content
+        }
+      } catch (err) {
+        console.warn(`[reasoning] on_completion failed:`, (err as Error).message)
+      }
+    }
+  }
+
   // Clean up state on terminal states
   if (normalized.kind === "completed" || normalized.kind === "failed") {
     completionRejections.delete(body.runId)
@@ -456,6 +549,8 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     actionPlanner.clear(body.runId)
     clearRunContext(body.runId)
     clearFrontendContent(body.runId)
+    consecutiveToolErrors.delete(body.runId)
+    onErrorReasoningCount.delete(body.runId)
   }
 
   // ─── Task Pipeline: create from AI plan if not yet created, then track progress ───
@@ -495,6 +590,8 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
   // (updatePipelineProgress sets stepTransition based on actual tool execution)
 
   const response = mapNormalizedResponseToClient(body.runId, normalized)
+  if (onErrorBrief) response.reasoningBrief = onErrorBrief
+  if (onCompletionBrief) response.reasoningBrief = onCompletionBrief
 
   if (response.status === "completed" || response.status === "failed") {
     if (response.status === "completed") {
