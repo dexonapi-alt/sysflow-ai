@@ -57,6 +57,13 @@ defineFlag("reasoning.max_output_tokens", 2_500, parseNumber)
 defineFlag("reasoning.max_self_invocations_per_run", 5, parseNumber)
 defineFlag("reasoning.cache_ttl_minutes", 30, parseNumber)
 
+// ─── Phase 8: persistent reasoning memory ───
+defineFlag("prompt.learned_memory_enabled", true, parseBool)
+defineFlag("memory.stale_after_days", 60, parseNumber)
+defineFlag("memory.stale_after_days_high_use", 180, parseNumber)
+defineFlag("memory.file_max_bytes", 102_400, parseNumber)
+defineFlag("memory.max_recall_entries", 12, parseNumber)
+
 export function getFlag<T = unknown>(name: string, sysbasePath?: string | null): T {
   const memoKey = `${name}::${sysbasePath ?? ""}`
   if (memo.has(memoKey)) return memo.get(memoKey) as T

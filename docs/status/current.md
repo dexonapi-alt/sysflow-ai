@@ -4,6 +4,27 @@
 
 ## Recent Work
 
+**Phase 8 persistent reasoning memory pass** (`.claude/plans/applied/2026-05-02-phase-8-persistent-reasoning-memory.md`):
+
+The agent no longer re-deliberates the same decisions every fresh session. Phase 5 reasoning briefs + decision-tool outputs + completion summaries + user corrections now persist to a project-local `.sysflow-memory.md` (sibling of the user's hand-written `.sysflow.md`). **Anti-staleness is first-class** — every entry passes through three read-time validators before reaching the prompt.
+
+- **`server/src/memory-store/`** *(new module)* — eight files:
+  - `entry-schema.ts` — Zod envelope for entries: `{ id, kind, content, createdAt, lastConfirmedAt, lastUsedAt, sourceRef: { runId, trigger, filePaths, packageDeps }, status: 'active'|'stale'|'contradicted', useCount, contradictionCount, tags }`. `id` is sha256(kind+content) so re-records dedupe.
+  - `file-format.ts` — markdown-with-frontmatter (HTML-comment-flavoured `<!--frontmatter ... frontmatter-->` block). Human-auditable, machine-parseable, tolerant of CRLF + extra whitespace + malformed entries.
+  - `store.ts` — load (mtime-cached, walks one parent up for discovery) + save (atomic via temp+rename, Windows EPERM/EBUSY retry) + upsert (dedupe by id, bumps useCount on re-record).
+  - `validators.ts` — three pure validators: **fileRefValidator** (every `sourceRef.filePaths` must exist), **depRefValidator** (every `sourceRef.packageDeps` must appear in `package.json`'s deps/devDeps/peerDeps/optionalDeps), **ageValidator** (60 days unconfirmed → stale, 180 days for high-use entries with useCount ≥ 5). `runAllValidators` partitions into `{ active, stale, contradicted }`.
+  - `confirmation-tracker.ts` — `noteAgreement` bumps useCount + lastConfirmedAt; `noteContradiction` bumps counter and at threshold 2 flips status to 'contradicted' permanently; `noteAccessed` touches lastUsedAt only.
+  - `compaction.ts` — at 100 KB serialised, drops contradicted → stale → low-use → oldest. **Never drops `user_correction`** entries (the user typed those — sacred).
+  - `recall.ts` — `recallForReasoning(cwd, userMessage)` scores active entries by `recency*1 + useCount*3 + tokenOverlap*5 + 50-bonus-for-user-correction`, caps at 12.
+  - `recorder.ts` — four best-effort writers: `recordDecision` (skips LOW confidence), `recordImplementSummary` (auto-adds stack libraries to packageDeps so dep-removal triggers stale), `recordUserCorrection` (always persists non-secret), `recordBugPattern`. All run a **secret-pattern guard** that refuses Stripe/AWS/Google/Slack/GitHub/PEM-shaped content.
+- **Reasoner integration** — `gemini.ts buildPrompt()` calls `recallForReasoning` and threads `learnedMemoryLines + summary` into the new `learned_memory` prompt section (priority 106, between user-written project_memory at 105 and reasoning_brief at 107).
+- **Handler integration** — `user-message.ts` persists implement briefs from preflight (HIGH/MEDIUM confidence + decision=proceed only). `tool-result.ts` persists summary briefs on completion + bug briefs on on-error trigger.
+- **Slash commands**: `/memory list` (color-coded active/stale/contradicted with use count + age + last-confirmed + stale reasons), `/memory forget <id>`, `/memory clear stale`, `/memory clear all confirm` (literal 'confirm' word required), `/remember "..."`. CLI in `cli-client/src/commands/memory.ts` talks to the server's new `/memory/*` Fastify routes.
+- **Five flags** (env-only kill switches): `prompt.learned_memory_enabled`, `memory.stale_after_days` (60), `memory.stale_after_days_high_use` (180), `memory.file_max_bytes` (102 400), `memory.max_recall_entries` (12).
+- **~40 new test cases** across file-format roundtrip, store load/save/upsert + mtime cache + cache invalidation, all three validators + partition behaviour, confirmation lifecycle + contradiction-at-threshold, compaction eviction order + user_correction sanctity, recall ranking + filtering + secret refusal in recorder.
+
+Targeted result: session 1 → reasoner picks Drizzle for ORM, persisted as a `decision` entry. Session 2 (next day, same project) → reasoner sees the entry in the prompt, doesn't re-deliberate, uses Drizzle. Session 3 → user removes drizzle-orm from package.json → on next read the dep-ref validator marks the entry stale → reasoner doesn't see it → asks fresh.
+
 **Phase 7 background jobs pass** (`.claude/plans/applied/2026-05-02-phase-7-background-jobs.md`):
 
 Install commands no longer block the agent. Previously `npm install` was in `SLOW_COMMAND_PATTERNS` and got skipped entirely — the agent literally couldn't install deps without user intervention. Phase 7 fixes both halves: install commands now run, *and* they run in the background.
