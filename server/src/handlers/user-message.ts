@@ -200,6 +200,45 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     return mapNormalizedResponseToClient(runId, searchAction)
   }
 
+  // ─── Phase 5 pre-flight reasoning: classify task, recommend stack, surface missing context ───
+  let reasoningBrief: unknown = null
+  try {
+    const briefResult = await runReasoning({
+      trigger: "preflight",
+      userMessage: body.content,
+      model: body.model,
+      cwd: body.cwd,
+      sysbasePath: body.sysbasePath,
+    })
+    reasoningBrief = briefResult
+    // If the reasoner says ask_user, short-circuit immediately with the consolidated questions.
+    if (briefResult && briefResult.pipeline !== "simple" && briefResult.decision === "ask_user" && briefResult.missingContext.length > 0) {
+      const lines: string[] = []
+      lines.push(`Before I start, I need a few things to avoid guessing:`)
+      lines.push("")
+      for (const m of briefResult.missingContext) {
+        lines.push(`• **${m.field}** — ${m.suggestedQuestion}` + (m.exampleValue ? `\n   _e.g._ \`${m.exampleValue}\`` : ""))
+      }
+      lines.push("")
+      if (briefResult.pipeline === "implement" && briefResult.implementBrief) {
+        lines.push(`I'm planning to use **${briefResult.implementBrief.recommendedStack.language}**` +
+          (briefResult.implementBrief.recommendedStack.frameworks.length ? ` + ${briefResult.implementBrief.recommendedStack.frameworks.join(" + ")}` : "") +
+          ` — ${briefResult.implementBrief.recommendedStack.rationale}`)
+      } else if (briefResult.pipeline === "bug" && briefResult.bugBrief) {
+        lines.push(`I suspect a **${briefResult.bugBrief.suspectedBoundary}** issue — paste the requested context and I'll narrow it down.`)
+      }
+      console.log(`[reasoning] preflight ask_user with ${briefResult.missingContext.length} questions`)
+      return {
+        status: "waiting_for_user",
+        runId,
+        message: lines.join("\n"),
+        reasoningBrief: briefResult,
+      } as ClientResponse
+    }
+  } catch (err) {
+    console.warn(`[reasoning] preflight failed:`, (err as Error).message)
+  }
+
   // ─── Pre-API token guard: refuse oversized payloads instead of wasting an API call ───
   const estimatedTokens =
     estimateTokens(body.content) +
@@ -230,6 +269,7 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     projectId: body.projectId,
     cwd: body.cwd,
     planMode: body.planMode === true,
+    reasoningBrief,
     userId: body.userId || null,
     chatId: body.chatId || null
   } as never)
@@ -311,5 +351,7 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     }
   }
 
-  return mapNormalizedResponseToClient(runId, normalized)
+  const clientResp = mapNormalizedResponseToClient(runId, normalized)
+  if (reasoningBrief) clientResp.reasoningBrief = reasoningBrief
+  return clientResp
 }

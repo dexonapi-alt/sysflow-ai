@@ -48,6 +48,15 @@ defineFlag("tool.persist_threshold_bytes", 10 * 1024, parseNumber)
 defineFlag("prompt.dynamic_boundary_enabled", true, parseBool)
 defineFlag("prompt.frontend_section_only_when_relevant", false, parseBool)
 
+// ─── Phase 5: reasoning system kill switches + tunables ───
+defineFlag("prompt.preflight_reasoning_enabled", true, parseBool)
+defineFlag("prompt.self_invoked_reasoning_enabled", true, parseBool)
+defineFlag("prompt.on_error_reasoning_enabled", true, parseBool)
+defineFlag("prompt.on_completion_reasoning_enabled", true, parseBool)
+defineFlag("reasoning.max_output_tokens", 2_500, parseNumber)
+defineFlag("reasoning.max_self_invocations_per_run", 5, parseNumber)
+defineFlag("reasoning.cache_ttl_minutes", 30, parseNumber)
+
 export function getFlag<T = unknown>(name: string, sysbasePath?: string | null): T {
   const memoKey = `${name}::${sysbasePath ?? ""}`
   if (memo.has(memoKey)) return memo.get(memoKey) as T

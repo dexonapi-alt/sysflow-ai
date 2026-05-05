@@ -40,6 +40,8 @@ export interface ProviderPayload {
   cwd?: string
   /** When true, the prompt's plan-mode section is injected and the agent stays read-only. */
   planMode?: boolean
+  /** Phase 5 reasoning brief from preflight / on-error / on-completion. Untyped here to avoid an import cycle. */
+  reasoningBrief?: unknown
 }
 
 export interface ProviderContext {
