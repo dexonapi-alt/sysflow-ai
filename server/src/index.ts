@@ -7,6 +7,7 @@ import { authRoutes } from "./routes/auth.js"
 import { chatRoutes } from "./routes/chats.js"
 import { stripeRoutes } from "./routes/billing.js"
 import { reasonRoute } from "./routes/reason.js"
+import { memoryRoute } from "./routes/memory.js"
 import { initDatabase, closeDatabase } from "./db/connection.js"
 
 const fastify = Fastify({
@@ -35,6 +36,7 @@ await fastify.register(stripeRoutes)
 await fastify.register(agentRunRoute)
 await fastify.register(agentStreamRoute)
 await fastify.register(reasonRoute)
+await fastify.register(memoryRoute)
 
 fastify.get("/health", async () => {
   return { status: "ok", timestamp: new Date().toISOString() }

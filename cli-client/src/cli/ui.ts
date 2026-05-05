@@ -20,7 +20,7 @@ export async function startUi(): Promise<void> {
   const chatTag = chatInfo?.title ? chalk.cyan(String(chatInfo.title)) : chalk.dim("no chat")
   const planTag = planOn ? "  " + chalk.yellow("plan-mode") : ""
   console.log(chalk.dim(`  sys v0.1  ${chalk.white(path.basename(process.cwd()))}  model: ${chalk.white(currentModel)}  user: ${userTag}  chat: ${chatTag}`) + planTag)
-  console.log(chalk.dim("  /model /mode /permissions /plan-mode /chats /billing /usage /login /whoami /continue /exit"))
+  console.log(chalk.dim("  /model /mode /permissions /plan-mode /memory /remember /chats /billing /usage /login /whoami /continue /exit"))
   console.log("")
 
   let working = false
@@ -213,6 +213,38 @@ export async function startUi(): Promise<void> {
       } else {
         console.log(chalk.dim(`  usage: /permissions [list|remove <n>|clear]`))
       }
+      console.log("")
+      rl.prompt()
+      return
+    }
+
+    if (parsed.mode === "memory") {
+      const { showMemoryList, forgetMemoryEntry, clearStaleEntries, clearAllEntries } = await import("../commands/memory.js")
+      const sub = parsed.memorySub || "list"
+      if (sub === "list") {
+        await showMemoryList()
+      } else if (sub === "forget" && parsed.memoryArg) {
+        await forgetMemoryEntry(parsed.memoryArg)
+      } else if (sub === "clear") {
+        const arg = (parsed.memoryArg || "").trim()
+        if (arg === "stale") {
+          await clearStaleEntries()
+        } else if (arg.startsWith("all")) {
+          await clearAllEntries(arg === "all confirm")
+        } else {
+          console.log(chalk.dim("  usage: /memory clear stale  ·  /memory clear all confirm"))
+        }
+      } else {
+        console.log(chalk.dim("  usage: /memory [list|forget <id>|clear stale|clear all confirm]"))
+      }
+      console.log("")
+      rl.prompt()
+      return
+    }
+
+    if (parsed.mode === "remember") {
+      const { recordExplicitMemory } = await import("../commands/memory.js")
+      await recordExplicitMemory(parsed.rememberText || "")
       console.log("")
       rl.prompt()
       return

@@ -10,6 +10,12 @@ interface ParsedInput {
   permissionArg?: string
   /** Argument for /plan-mode: 'on' | 'off' | 'toggle'. */
   planModeArg?: string
+  /** Subcommand for /memory: 'list' | 'forget' | 'clear' | 'show'. */
+  memorySub?: string
+  /** Argument for /memory: id (forget/show) or 'stale' / 'all' / 'all confirm' (clear). */
+  memoryArg?: string
+  /** Text payload for /remember "...". */
+  rememberText?: string
 }
 
 export function parseCliInput(argv: string[]): ParsedInput {
@@ -107,6 +113,16 @@ export function parseUiLine(line: string): ParsedInput | null {
   if (trimmed === "/plan-mode" || trimmed.startsWith("/plan-mode ")) {
     const arg = trimmed === "/plan-mode" ? "" : trimmed.replace("/plan-mode", "").trim()
     return { mode: "plan-mode", planModeArg: arg || "toggle" }
+  }
+
+  if (trimmed === "/memory" || trimmed.startsWith("/memory ")) {
+    const rest = trimmed.replace("/memory", "").trim().split(/\s+/).filter(Boolean)
+    return { mode: "memory", memorySub: rest[0] || "list", memoryArg: rest.slice(1).join(" ") }
+  }
+
+  if (trimmed === "/remember" || trimmed.startsWith("/remember ")) {
+    const text = trimmed.replace(/^\/remember\s*/, "").trim()
+    return { mode: "remember", rememberText: text }
   }
 
   if (trimmed === "/pull") {
