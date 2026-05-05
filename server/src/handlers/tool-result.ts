@@ -23,6 +23,7 @@ import { applyToolResultBudget, estimateTokens, shouldBlockOnTokens } from "../s
 import { classifyToolError, classifyToolErrorFromResult } from "../services/tool-error-classifier.js"
 import { persistLargeToolResult } from "../store/tool-result-persistence.js"
 import { runReasoning } from "../reasoning/task-reasoner.js"
+import { recordImplementSummary, recordBugPattern } from "../memory-store/index.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 /** Track how many times completion was rejected per run (prevent infinite loops) */
@@ -354,6 +355,23 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
         onErrorBrief = briefResult
         if (briefResult && briefResult.pipeline === "bug") {
           console.log(`[reasoning] on_error bug brief: ${briefResult.bugBrief?.suspectedBoundary}`)
+          // Phase 8: persist the bug brief as a bug_pattern entry so future
+          // runs see the diagnosis the next time the same symptom appears.
+          if (briefResult.bugBrief) {
+            const bb = briefResult.bugBrief
+            const summary = [
+              `Symptom: ${bb.symptom}`,
+              `Boundary: ${bb.suspectedBoundary}`,
+              bb.rootCauseGuess ? `Root cause: ${bb.rootCauseGuess}` : null,
+              `Fix: ${bb.proposedFix?.description ?? "(none)"} (scope: ${bb.proposedFix?.scope ?? "?"})`,
+            ].filter(Boolean).join("\n")
+            recordBugPattern(
+              run.cwd as string,
+              summary,
+              bb.proposedFix?.filesAffected,
+              { runId: body.runId, trigger: "on_error" },
+            ).catch(() => { /* best-effort */ })
+          }
         }
       } catch (err) {
         console.warn(`[reasoning] on_error failed:`, (err as Error).message)
@@ -534,6 +552,12 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
         })
         onCompletionBrief = briefResult
         if (briefResult && briefResult.pipeline === "summary" && briefResult.summaryBrief) {
+          // Phase 8: persist the summary brief as memory so future runs see it.
+          recordImplementSummary(
+            run.cwd as string,
+            { implementBrief: { intent: run.content, recommendedStack: undefined, consistencyNotes: briefResult.summaryBrief.constraints } },
+            { runId: body.runId, trigger: "on_completion" },
+          ).catch(() => { /* best-effort */ })
           // Replace the draft message with a rendered summary.
           const sb = briefResult.summaryBrief
           const lines: string[] = []
