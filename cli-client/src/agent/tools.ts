@@ -589,11 +589,24 @@ const LONG_RUNNING_PATTERNS = [
   /^bun\s+run/
 ]
 
-// Commands that are too slow, obsolete, or should be user-run — auto-skip
-const SLOW_COMMAND_PATTERNS = [
-  /npm\s+(install|i|ci)\b/,
-  /yarn\s+(install|add)\b/,
-  /pnpm\s+(install|i|add)\b/,
+// Phase 7: install-class commands run in the BACKGROUND so the agent can
+// keep working while they finish. Carved out of SLOW_COMMAND_PATTERNS — the
+// agent USED to skip these entirely, which meant deps never got installed.
+const BACKGROUND_BY_DEFAULT_PATTERNS: RegExp[] = [
+  /\bnpm\s+(install|i|ci)\b/,
+  /\byarn\s+(install|add)\b/,
+  /\bpnpm\s+(install|i|add)\b/,
+  /\bbun\s+(install|add|i)\b/,
+  /\bpip\s+install\s+-r\b/,
+  /\bpip3\s+install\s+-r\b/,
+  /\bbundle\s+install\b/,
+  /\bcargo\s+build\b/,
+  /\bgo\s+mod\s+download\b/,
+]
+
+// Commands that are too slow, obsolete, or should be user-run — auto-skip.
+// Install commands moved to BACKGROUND_BY_DEFAULT_PATTERNS above.
+const SLOW_COMMAND_PATTERNS: RegExp[] = [
   /npx\s+(--yes\s+)?prisma\b/,
   /npx\s+(--yes\s+)?shadcn/,
   /tailwindcss\s+init/,           // removed in Tailwind v4
@@ -683,6 +696,18 @@ export async function runCommandTool(
   // Phase 7: install-class commands run in the BACKGROUND by default so the
   // agent can keep working. opts.background can force either direction.
   const wantsBackground = opts.background === true || (opts.background !== false && matchesBackgroundDefault)
+
+  // No runId + auto-background install: skip rather than run synchronously
+  // (could block for minutes). Caller should re-invoke with a runId.
+  if (matchesBackgroundDefault && !opts.runId && opts.background !== false) {
+    return {
+      stdout: "",
+      stderr: "",
+      skipped: true,
+      message: `SKIPPED (install-class command needs a runId to background): ${command}\n\nThis is a transient routing issue — the runner is missing context to track the job. Continue with other steps.`,
+    }
+  }
+
   if (wantsBackground && opts.runId) {
     const { start } = await import("./background-jobs.js")
     try {

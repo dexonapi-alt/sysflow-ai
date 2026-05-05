@@ -1,0 +1,23 @@
+{
+  "name": "sysflow-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sysflow — free AI coding agent. Workspace root.",
+  "workspaces": [
+    "server",
+    "cli-client"
+  ],
+  "scripts": {
+    "dev": "turbo run dev --parallel --no-cache",
+    "dev:server": "npm run dev -w server",
+    "dev:cli": "npm run dev -w cli-client",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "clean": "turbo run clean && rm -rf node_modules .turbo"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.3"
+  },
+  "packageManager": "npm@10.0.0"
+}

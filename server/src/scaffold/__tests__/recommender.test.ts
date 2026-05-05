@@ -11,7 +11,7 @@ const briefImplement = (
 })
 
 describe("recommendScaffold", () => {
-  it("HIGH confidence + React+Vite + empty cwd → autoTrust=true", () => {
+  it("HIGH confidence + React+Vite + empty cwd → shouldScaffold=true, autoTrust=false (Vite-family is opt-in)", () => {
     const r = recommendScaffold({
       brief: briefImplement("HIGH", { language: "TypeScript", frameworks: ["React", "Vite"], libraries: [] }),
       userMessage: "create a react app for a todo list",
@@ -20,7 +20,9 @@ describe("recommendScaffold", () => {
     })
     expect(r.shouldScaffold).toBe(true)
     expect(r.scaffolder?.stackKey).toBe("react-vite")
-    expect(r.autoTrust).toBe(true)
+    // Vite-family scaffolders are detected but NOT auto-trusted — the agent
+    // hand-writes those files instead of spawning `npm create vite`.
+    expect(r.autoTrust).toBe(false)
     expect(r.projectName).toBe("todo-list")
   })
 

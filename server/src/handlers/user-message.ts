@@ -218,7 +218,7 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     if (briefResult && briefResult.pipeline === "implement" && briefResult.decision === "proceed" && briefResult.confidence !== "LOW") {
       recordImplementSummary(
         body.cwd,
-        { implementBrief: briefResult.implementBrief },
+        { implementBrief: briefResult.implementBrief ?? undefined },
         { runId, trigger: "preflight" },
       ).catch(() => { /* best-effort */ })
     }

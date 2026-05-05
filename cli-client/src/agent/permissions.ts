@@ -83,17 +83,22 @@ export function primaryPath(tool: string, args: Record<string, unknown>): string
  * Tiny glob matcher: supports `*` (matches anything except `/`), `**` (matches
  * across `/`), and literal text. No character classes. Pattern matched against
  * the entire input string.
+ *
+ * Special-case: `/**\/` collapses to `(?:/.*?/|/)` so `foo/**\/bar.ts` matches
+ * both `foo/bar.ts` AND `foo/x/y/bar.ts` (standard glob semantics).
  */
 export function matchesGlob(input: string, pattern: string): boolean {
-  const re = new RegExp(
-    "^" +
-      pattern
-        .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
-        .replace(/\*\*/g, "::DOUBLESTAR::")
-        .replace(/\*/g, "[^/]*")
-        .replace(/::DOUBLESTAR::/g, ".*")
-      + "$",
-  )
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+  const translated = escaped
+    // /**\/ matches either nothing-between-slashes or any path-with-slashes.
+    .replace(/\/\*\*\//g, "::SLASHDOUBLESTARSLASH::")
+    // Bare ** outside slashes matches anything.
+    .replace(/\*\*/g, "::DOUBLESTAR::")
+    // Single * matches anything except /.
+    .replace(/\*/g, "[^/]*")
+    .replace(/::SLASHDOUBLESTARSLASH::/g, "(?:/|/.*?/)")
+    .replace(/::DOUBLESTAR::/g, ".*")
+  const re = new RegExp("^" + translated + "$")
   return re.test(input)
 }
 

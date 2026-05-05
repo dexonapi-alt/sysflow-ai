@@ -225,7 +225,10 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     projectId: run.projectId,
     cwd: run.cwd as string | undefined,
     planMode: body.planMode === true,
-    reasoningBrief: onErrorBrief,
+    // onErrorBrief is set later in the on-error trigger block; initialise the field here
+    // and let the on-error block patch it before the provider call (reasoningBrief is read
+    // by buildPrompt which runs inside callModelAdapter).
+    reasoningBrief: null as unknown,
     userId: run.userId || null,
     chatId: run.chatId || null
   }
@@ -353,6 +356,8 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
           context: { tool: lastError.tool, result: lastError.result, recentErrors: incomingErrors.length },
         })
         onErrorBrief = briefResult
+        // Patch the provider payload so the next model call sees the bug brief.
+        ;(providerPayload as Record<string, unknown>).reasoningBrief = briefResult
         if (briefResult && briefResult.pipeline === "bug") {
           console.log(`[reasoning] on_error bug brief: ${briefResult.bugBrief?.suspectedBoundary}`)
           // Phase 8: persist the bug brief as a bug_pattern entry so future

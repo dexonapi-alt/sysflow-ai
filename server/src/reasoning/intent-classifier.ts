@@ -15,6 +15,7 @@ export type IntentHint = "simple" | "bug" | "summary" | "implement"
 
 const SIMPLE_PATTERNS: RegExp[] = [
   /^\s*(list|show|display|cat|print)\s+(files?|dirs?|directory|folder|content)/i,
+  /^\s*(list|show|display|cat|print)\s+(me\s+)?(the\s+)?(content\s+of\s+)?[\w./-]+\s*(content)?\s*$/i,
   /^\s*(what|which)\s+(file|dir|folder|module|function|class|export)s?\s+(is|are|does|do|exist)/i,
   /^\s*ls\b/i,
   /^\s*pwd\b/i,
@@ -38,7 +39,8 @@ const BUG_PATTERNS: RegExp[] = [
 
 const SUMMARY_PATTERNS: RegExp[] = [
   /^\s*(explain|summari[sz]e|describe|recap|overview)\b/i,
-  /\b(what\s+does|what\s+is)\s+(this|the|that)\s+(file|module|function|class|component|service|repo|project|code)/i,
+  // Allow one optional word between the article and the noun: "what does the action-planner service do"
+  /\b(what\s+does|what\s+is)\s+(this|the|that)\s+(\S+\s+)?(file|module|function|class|component|service|repo|project|code|tool|hook|registry|store|module)/i,
   /\bwalk\s+me\s+through\b/i,
   /^\s*(tldr|tl;dr|tl\s+dr)\b/i,
   /\bgive\s+me\s+(a|an)\s+(summary|overview|breakdown)/i,

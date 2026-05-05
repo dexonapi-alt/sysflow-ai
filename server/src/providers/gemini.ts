@@ -139,7 +139,10 @@ export class GeminiProvider extends BaseProvider {
       projectMemory: memory.content || undefined,
       projectMemoryFiles: memory.files,
       planMode: payload.planMode,
-      reasoningBrief: payload.reasoningBrief,
+      // payload.reasoningBrief is typed `unknown` on ProviderPayload to avoid
+      // an import cycle into the reasoning module; cast here so the prompt
+      // section receives the typed shape it expects.
+      reasoningBrief: payload.reasoningBrief as never,
       learnedMemoryLines,
       learnedMemorySummary,
     })

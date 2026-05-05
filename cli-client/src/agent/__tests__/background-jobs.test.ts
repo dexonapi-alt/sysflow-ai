@@ -1,9 +1,20 @@
 import { describe, it, expect, beforeEach } from "vitest"
+import path from "node:path"
+import { fileURLToPath } from "node:url"
 import { start, poll, list, wait, cleanupRun, forget, _resetForTests, _CONFIG } from "../background-jobs.js"
 
-const SLEEP_MS = (ms: number): string => `node -e "setTimeout(()=>process.exit(0), ${ms})"`
-const FAIL_FAST = `node -e "process.exit(7)"`
-const SLOW_OUTPUT = `node -e "console.log('hi'); setTimeout(()=>process.exit(0), 200)"`
+const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures")
+
+// Forward-slash paths so Windows cmd.exe doesn't mangle backslashes (\t, \f
+// in path segments get interpreted as escapes inside `/c "..."`).
+const fwd = (p: string): string => p.replace(/\\/g, "/")
+const SLEEPER = fwd(path.join(FIXTURES, "sleeper.cjs"))
+const FAIL_FAST_FIXTURE = fwd(path.join(FIXTURES, "fail-fast.cjs"))
+const SAY_HI = fwd(path.join(FIXTURES, "say-hi.cjs"))
+
+const SLEEP_MS = (ms: number): string => `node ${SLEEPER} ${ms}`
+const FAIL_FAST = `node ${FAIL_FAST_FIXTURE} 7`
+const SLOW_OUTPUT = `node ${SAY_HI}`
 
 describe("background-jobs", () => {
   beforeEach(() => {

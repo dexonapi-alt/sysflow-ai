@@ -51,9 +51,11 @@ describe("applyCriticalContextDetector", () => {
   })
 
   it("flips decision to ask_user if proceed but missing items remain", () => {
-    const brief = briefWith("proceed", [{ field: "stripe_price_id" }])
-    const out = applyCriticalContextDetector(brief, "build a stripe checkout")
-    // Reasoner said proceed but didn't address stripe_price_id; we force ask.
+    const brief = briefWith("proceed", [{ field: "subscription_plan_price_id" }])
+    // Use a userMessage that doesn't contain ANY token from the field name
+    // so the prune step can't satisfy it.
+    const out = applyCriticalContextDetector(brief, "build a checkout integration")
+    // Reasoner said proceed but didn't address subscription_plan_price_id; we force ask.
     expect(out.decision).toBe("ask_user")
     expect(out.missingContext.length).toBe(1)
   })

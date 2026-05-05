@@ -21,6 +21,9 @@ desktop.ini
 dist/
 build/
 
+# Turborepo cache
+.turbo/
+
 # Logs
 *.log
 npm-debug.log*

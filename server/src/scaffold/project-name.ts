@@ -11,11 +11,21 @@ const STOPWORDS = new Set([
   "scaffold", "bootstrap", "initialize", "give", "me", "my",
   "want", "need", "please", "called", "named",
   "app", "application", "project", "thing",
+  // Stack/framework tokens — these describe technology, not the project's
+  // identity. "create a react app for a todo list" should resolve to
+  // "todo-list", not "react-todo-list".
+  "react", "vue", "svelte", "solid", "preact", "angular", "next", "nextjs",
+  "nuxt", "remix", "astro", "qwik", "sveltekit", "vite", "tauri", "expo",
+  "electron", "nest", "nestjs", "django", "laravel", "rails", "bun",
+  "typescript", "javascript", "ts", "js",
 ])
 
 const TRIGGER = /\b(?:create|build|make|set\s+up|initialize|init|new|start|bootstrap|scaffold)\b\s+(?:a\s+|an\s+|the\s+|me\s+a\s+|me\s+an\s+)?(.+?)(?:\s+(?:that|which|to|using|with)\s+|[.!?]|$)/i
 
-const NAMED_AS = /(?:called|named|name(?:d)?\s+(?:it\s+)?(?:["']?))(["'`]?)([a-z][a-z0-9._-]*)\1/i
+// Match "called X", "named X", "name X" (with optional "it" + optional quote
+// around the name). Important: the `\s+` MUST live OUTSIDE the alternation so
+// every variant requires whitespace before the name.
+const NAMED_AS = /\b(?:called|named|name(?:d)?(?:\s+it)?)\s+(["'`]?)([a-z][a-z0-9._-]*)\1/i
 
 export function extractProjectName(userMessage: string, cwd?: string | null): string {
   const explicit = explicitName(userMessage)
@@ -25,8 +35,10 @@ export function extractProjectName(userMessage: string, cwd?: string | null): st
   if (phraseName) return phraseName
 
   if (cwd) {
-    const base = path.basename(cwd).replace(/[^a-z0-9-_]/gi, "-").toLowerCase()
-    if (base && base.length > 1) return base
+    // Run the cwd basename through slug() so underscores → dashes, weird
+    // chars stripped, kebab-case enforced.
+    const base = slug(path.basename(cwd))
+    if (base && base !== "my-app") return base
   }
 
   return "my-app"
@@ -58,7 +70,8 @@ function inferFromTriggerPhrase(msg: string): string | null {
 function slug(s: string): string {
   return s
     .toLowerCase()
-    .replace(/[^a-z0-9-_]+/g, "-")
+    .replace(/_/g, "-")
+    .replace(/[^a-z0-9-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .replace(/-{2,}/g, "-")
     .slice(0, 60) || "my-app"

@@ -45,10 +45,14 @@ describe("extractProjectName", () => {
   })
 
   it("kebab-cases and lower-cases", () => {
-    expect(extractProjectName("Create A Cool React APP")).toBe("cool-react")
+    // "Create A Cool Habit Tracker" — phrase capture is case-insensitive; the
+    // resulting tokens get lowercased and kebab-joined.
+    expect(extractProjectName("Create A Cool Habit Tracker")).toBe("cool-habit-tracker")
   })
 
   it("handles cwd with weird chars", () => {
-    expect(extractProjectName("xyz", "/Users/dev/My_Project!")).toBe("my-project-")
+    // slug() strips trailing dashes, so "My_Project!" → "my-project" (the "!"
+    // becomes "-" and is then trimmed).
+    expect(extractProjectName("xyz", "/Users/dev/My_Project!")).toBe("my-project")
   })
 })

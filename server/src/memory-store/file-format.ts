@@ -121,9 +121,11 @@ function parseOne(block: string): MemoryEntry | null {
   if (fmStart < 0 || fmEnd < 0 || fmEnd <= fmStart) return null
   const fmBody = block.slice(fmStart + ENTRY_OPEN.length, fmEnd).trim()
 
-  // Body comes after the frontmatter close.
+  // Body comes after the frontmatter close. Strip the trailing entry-separator
+  // ("\n\n---\n\n") that was attached when split() kept the lead-in of the
+  // next block — it's a serialisation artefact, not part of this entry's body.
   const bodyStart = fmEnd + ENTRY_CLOSE.length
-  const content = block.slice(bodyStart).trim()
+  const content = block.slice(bodyStart).replace(/\s*\n+---\s*$/, "").trim()
   if (!content) return null
 
   const fields = parseFrontmatter(fmBody)
