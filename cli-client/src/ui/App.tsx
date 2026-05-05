@@ -5,8 +5,9 @@ import { StatusLine } from "./components/StatusLine.js"
 import { ChatInput } from "./components/ChatInput.js"
 import { Spinner } from "./components/Spinner.js"
 import { palette } from "./theme.js"
-import { ensureSysbase, getSelectedModel, getAuthUser, getActiveChatInfo, getPlanMode } from "../lib/sysbase.js"
+import { ensureSysbase, getSelectedModel, getAuthUser, getActiveChatInfo, getPlanMode, getSysbasePath } from "../lib/sysbase.js"
 import { runAgent } from "../agent/agent.js"
+import { loadHistory, appendHistory } from "./state/history.js"
 
 interface Status {
   model: string
@@ -26,16 +27,18 @@ export function App(): React.ReactElement {
   const [status, setStatus] = useState<Status | null>(null)
   const [working, setWorking] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [history, setHistory] = useState<string[]>([])
 
   useEffect(() => {
     let cancelled = false
     void (async () => {
       await ensureSysbase()
-      const [model, user, chatInfo, planMode] = await Promise.all([
+      const [model, user, chatInfo, planMode, hist] = await Promise.all([
         getSelectedModel(),
         getAuthUser(),
         getActiveChatInfo(),
         getPlanMode(),
+        loadHistory(getSysbasePath()),
       ])
       if (cancelled) return
       setStatus({
@@ -44,6 +47,7 @@ export function App(): React.ReactElement {
         chatTitle: chatInfo?.title ? String(chatInfo.title) : null,
         planMode: Boolean(planMode),
       })
+      setHistory(hist)
     })()
     return () => { cancelled = true }
   }, [])
@@ -51,6 +55,8 @@ export function App(): React.ReactElement {
   const handleSubmit = async (prompt: string): Promise<void> => {
     setError(null)
     setWorking(true)
+    setHistory((h) => [...h.filter((p) => p !== prompt), prompt].slice(-100))
+    void appendHistory(getSysbasePath(), prompt)
     try {
       await runAgent({ prompt, command: null })
     } catch (err) {
@@ -81,7 +87,7 @@ export function App(): React.ReactElement {
       <Box marginTop={1}>
         {working
           ? <Spinner />
-          : <ChatInput onSubmit={handleSubmit} />}
+          : <ChatInput onSubmit={handleSubmit} history={history} />}
       </Box>
       {error && (
         <Box marginTop={1}>
