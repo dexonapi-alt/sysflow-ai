@@ -69,6 +69,12 @@ interface RunAgentParams {
 }
 
 export async function runAgent({ prompt, command = null, model = null }: RunAgentParams): Promise<Record<string, unknown> | undefined> {
+  // TEMP debug — find out who's calling runAgent on startup. Remove once
+  // the "Could not establish a chat session" mystery is resolved.
+  if (process.env.SYS_DEBUG_AGENT === "1") {
+    process.stderr.write(`\n[debug] runAgent called with prompt=${JSON.stringify(prompt).slice(0, 80)} command=${JSON.stringify(command)}\n`)
+    process.stderr.write(new Error("runAgent call site").stack + "\n")
+  }
   await ensureSysbase()
 
   const authToken = await getAuthToken()
