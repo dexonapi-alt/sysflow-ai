@@ -14,7 +14,7 @@ import { isFrontendTask, detectFrontendStack, getFrontendPatterns } from "../kno
 import { accumulateFrontendContent } from "../services/frontend-quality-guard.js"
 import { detectErrorForSearch, buildErrorSearchOverride } from "../services/setup-intelligence.js"
 import { detectErrorContext, setPendingError, detectAllErrors, setPendingErrorQueue } from "../services/error-autofix.js"
-import { createPipelineFromAiPlan, createFallbackPipeline, pipelineToTaskMeta } from "../services/task-pipeline.js"
+import { createPipelineFromAiPlan, createFallbackPipeline, pipelineToTaskMeta, markPipelineSkipped } from "../services/task-pipeline.js"
 import { detectScaffoldingNeed, buildScaffoldConfirmationMessage } from "../scaffold/index.js"
 import { estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import { runReasoning } from "../reasoning/task-reasoner.js"
@@ -389,7 +389,14 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
   }
 
   // ─── Task Pipeline: use AI's plan if provided, otherwise fallback ───
-  if (normalized.kind === "needs_tool") {
+  // Skip for read-only intents — a "what's on this repo?" question shouldn't
+  // sprout a generic "Setup project / Implement features / Polish & finalize"
+  // box at the top. The agent will just emit reads + a final summary.
+  const briefPipeline = (reasoningBrief as { pipeline?: string } | null)?.pipeline
+  const skipPipeline = briefPipeline === "summary" || briefPipeline === "simple"
+  if (skipPipeline) markPipelineSkipped(runId)
+
+  if (normalized.kind === "needs_tool" && !skipPipeline) {
     let pipelinePrompt = body.content
     const isContinue = /^\s*(continue|go on|keep going|next|proceed|finish)\s*$/i.test(body.content.trim()) || body.command === "/continue"
     if (isContinue && lastSession) {

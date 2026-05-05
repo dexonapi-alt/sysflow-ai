@@ -16,7 +16,7 @@ import { validateFrontendQuality, buildFrontendRejectionPayload, accumulateFront
 import { actionPlanner } from "../services/action-planner.js"
 import { isFrontendTask } from "../knowledge/frontend-patterns.js"
 import { ingestToolResult, clearRunContext, buildWorkingContextString } from "../services/context-manager.js"
-import { updatePipelineProgress, completePipeline, clearPipeline, getPipeline, hasPipeline, pipelineToTaskMeta, createPipelineFromAiPlan, createFallbackPipeline } from "../services/task-pipeline.js"
+import { updatePipelineProgress, completePipeline, clearPipeline, getPipeline, hasPipeline, pipelineToTaskMeta, createPipelineFromAiPlan, createFallbackPipeline, isPipelineSkipped } from "../services/task-pipeline.js"
 import { getScaffoldChoice, storeScaffoldChoice, parseScaffoldResponse, clearScaffoldState } from "../scaffold/index.js"
 import { getPendingError, clearPendingError, setPendingError, buildFixInstructions, setPendingFileContent, hasPendingErrors, popNextPendingError } from "../services/error-autofix.js"
 import { applyToolResultBudget, estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
@@ -601,7 +601,8 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
   }
 
   // ─── Task Pipeline: create from AI plan if not yet created, then track progress ───
-  if (normalized.kind === "needs_tool") {
+  // Honour the skip flag set on the initial turn for summary/simple intents.
+  if (normalized.kind === "needs_tool" && !isPipelineSkipped(body.runId)) {
     // If AI sent a taskPlan and we don't have a pipeline yet, create one
     if (normalized.taskPlan && normalized.taskPlan.steps.length > 0 && !hasPipeline(body.runId)) {
       const pipeline = createPipelineFromAiPlan(body.runId, run.content, normalized.taskPlan)
