@@ -34,19 +34,24 @@ async function main(): Promise<void> {
     }
   }
 
+  // Phase 9 Stage 1: SYS_INK=1 mounts the new Ink UI; without the flag the
+  // legacy console renderer keeps running so we can iterate without breaking
+  // trunk. The flag goes away in Stage 9.
+  const inkEnabled = process.env.SYS_INK === "1"
+
   // Support: echo "prompt" | sys  OR  cat prompt.txt | sys
-  if (!process.stdin.isTTY && args.length === 0) {
+  // Skipped when SYS_INK is on — Windows + the bin/sys.js spawn shim
+  // sometimes misreports stdin as non-TTY in interactive PowerShell, which
+  // would route us into readStdin() and then runAgent() before Ink mounts
+  // (manifests as a "Could not establish a chat session" warning above the
+  // status line). Ink mode owns its own input.
+  if (!inkEnabled && !process.stdin.isTTY && args.length === 0) {
     const piped = await readStdin()
     if (piped) {
       await runAgent({ prompt: piped, command: null })
       return
     }
   }
-
-  // Phase 9 Stage 1: SYS_INK=1 mounts the new Ink UI; without the flag the
-  // legacy console renderer keeps running so we can iterate without breaking
-  // trunk. The flag goes away in Stage 9.
-  const inkEnabled = process.env.SYS_INK === "1"
 
   if (args.length === 0) {
     if (inkEnabled) {
