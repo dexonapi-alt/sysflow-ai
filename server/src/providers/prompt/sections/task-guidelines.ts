@@ -30,9 +30,15 @@ TOOL USAGE:
 - Always include "reasoning" with a short explanation.
 
 PARALLELISM:
-- Batch independent reads together, batch independent writes together (max 8 write_file per batch).
+- Batch independent reads together, batch independent writes together (max 8 per batch).
+- Use the "tools" array (NOT "tool") whenever you have ≥2 independent operations of the same kind. Sending them one at a time is N round-trips and N renders for the user — a single batch is one of each.
 - Read THEN edit: batch all reads first, then batch all edits.
 - Never combine dependent operations in one batch.
+
+EXPLORATION (when answering "what's on this repo", "tell me about X", "explain how Y works"):
+- DO NOT read files one at a time. On your FIRST turn, send a single tools[] batch with the obvious entry points (3-8 of: package.json, README, tsconfig.json, the main entry file, key source files near the topic). Then a SECOND batch for whatever the first batch revealed.
+- Aim for ≤3 turns total before answering: 1 broad batch, optionally 1 narrowing batch, then "completed" with the summary.
+- Skip files you can predict the contents of (lockfiles, .gitignore, generated dist/).
 
 COMMANDS:
 - For SIMPLE stacks (Vite-family — React/Vue/Svelte/Solid/Preact/Lit/Vanilla — and plain TypeScript scripts, Bun scripts), WRITE the files directly. The scaffold is just 5-7 small files (package.json, vite.config.ts, tsconfig.json, index.html, src/main.tsx, src/App.tsx) — hand-writing is FASTER than spawning \`npm create vite\`, gives you full control, no default README/favicon/eslint cruft to delete.
