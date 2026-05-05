@@ -51,4 +51,20 @@ describe("classifyIntent", () => {
   it("stack trace shape → bug", () => {
     expect(classifyIntent("foo.ts:12 TypeError: Cannot read property")).toBe("bug")
   })
+
+  it("'what's on/in this repo' → summary (read, don't implement)", () => {
+    expect(classifyIntent("what's on this repo?")).toBe("summary")
+    expect(classifyIntent("whats in this project")).toBe("summary")
+    expect(classifyIntent("what is in the src folder")).toBe("summary")
+    expect(classifyIntent("what is inside this repo")).toBe("summary")
+  })
+
+  it("'tell me about / show me what' → summary", () => {
+    expect(classifyIntent("tell me about the auth flow")).toBe("summary")
+    expect(classifyIntent("show me what the test suite covers")).toBe("summary")
+  })
+
+  it("'give me a tour' → summary", () => {
+    expect(classifyIntent("give me a tour of the codebase")).toBe("summary")
+  })
 })

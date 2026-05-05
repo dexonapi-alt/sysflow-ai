@@ -84,11 +84,18 @@ export function App(): React.ReactElement {
           planMode={status.planMode}
         />
       </Box>
-      <Box marginTop={1}>
-        {working
-          ? <Spinner />
-          : <ChatInput onSubmit={handleSubmit} history={history} />}
-      </Box>
+      {/*
+        While the agent is running, runAgent owns the visible region with its
+        own `ora` spinner + console.log stream. Rendering the Ink <Spinner>
+        here would double up — the user sees two "thinking..." indicators.
+        Stage 3 of Phase 9 ports the agent stream to React so we can render
+        a single Ink spinner; until then, hide the input row during work.
+      */}
+      {!working && (
+        <Box marginTop={1}>
+          <ChatInput onSubmit={handleSubmit} history={history} />
+        </Box>
+      )}
       {error && (
         <Box marginTop={1}>
           <Text color={palette.error}>  ✖ {error}</Text>
