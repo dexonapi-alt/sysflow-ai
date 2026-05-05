@@ -31,5 +31,12 @@ export function getToolsSection(): string {
 9. move_file — args: { "from": "old.js", "to": "new.js" }
 10. delete_file — args: { "path": "temp.js" }
 11. search_files — args: { "query": "auth middleware" } or { "glob": "src/**/*.ts" }
-12. web_search — args: { "query": "..." } — use before any scaffolding command or config file writing`
+12. web_search — args: { "query": "..." } — use before any scaffolding command or config file writing
+13. reason — args: { "question": "...", "context"?: "...", "options"?: ["...", "..."], "kind"?: "choice"|"implement"|"bug"|"gotcha" }
+    Self-invoked reasoning. Use BEFORE making non-trivial decisions you're not HIGH-confident about.
+    Examples: choosing a library when the project doesn't pin one ("Drizzle vs Prisma?"); deciding
+    whether to delete a file you didn't create; picking an architectural pattern; investigating a
+    suspicious gotcha. The tool returns { recommendation, alternatives, riskNotes, proceedHint }.
+    Cost: one short reasoning call. Benefit: not making a wrong call you'll have to undo.
+    DO NOT overuse — for HIGH-confidence routine moves, just act. Hard cap: 5 calls per run.`
 }

@@ -103,6 +103,18 @@ export const batchWriteSchema = z.object({
   })).min(1, "files must be a non-empty array"),
 }).strict()
 
+/**
+ * Phase 5: self-invoked reasoning tool. Agent calls this when it hits a
+ * non-trivial decision (library choice, deletion safety, architectural
+ * fork). Returns a DecisionBrief from the server's /reason endpoint.
+ */
+export const reasonSchema = z.object({
+  question: z.string().min(1).max(500),
+  context: z.string().max(1500).optional(),
+  options: z.array(z.string().max(100)).max(6).optional(),
+  kind: z.enum(["bug", "implement", "choice", "gotcha"]).optional(),
+}).strict()
+
 export const TOOL_SCHEMAS: Record<string, z.ZodTypeAny> = {
   read_file: readFileSchema,
   batch_read: batchReadSchema,
@@ -118,6 +130,7 @@ export const TOOL_SCHEMAS: Record<string, z.ZodTypeAny> = {
   run_command: runCommandSchema,
   web_search: webSearchSchema,
   batch_write: batchWriteSchema,
+  reason: reasonSchema,
 }
 
 export type ToolName = keyof typeof TOOL_SCHEMAS

@@ -50,6 +50,39 @@ interface ToolCallEntry {
 
 // ─── Local tool execution (no server call) ───
 
+async function callReasonEndpoint(args: Record<string, unknown>, runId?: string): Promise<Record<string, unknown>> {
+  const { getAuthToken, getSysbasePath, getSelectedModel } = await import("../lib/sysbase.js")
+  const SERVER_URL = process.env.SYS_SERVER_URL || "http://localhost:4000"
+  const token = (await getAuthToken()) || process.env.SYS_TOKEN || ""
+  const model = await getSelectedModel()
+
+  const payload = {
+    runId: runId ?? "no-run",
+    question: args.question,
+    context: args.context,
+    options: args.options,
+    kind: args.kind,
+    cwd: process.cwd(),
+    sysbasePath: getSysbasePath(),
+    model,
+  }
+  try {
+    const res = await fetch(`${SERVER_URL}/reason`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    })
+    if (!res.ok) {
+      const text = await res.text()
+      return { error: `reason endpoint failed: ${res.status} ${text.slice(0, 200)}`, success: false }
+    }
+    const data = await res.json() as Record<string, unknown>
+    return data
+  } catch (err) {
+    return { error: `reason endpoint unreachable: ${(err as Error).message}`, success: false }
+  }
+}
+
 async function resolvePermission(tool: string, args: Record<string, unknown>, runId?: string): Promise<"allow" | "deny"> {
   const mode = await getPermissionMode()
   const sysbasePath = getSysbasePath()
@@ -144,6 +177,11 @@ export async function executeToolLocally(tool: string, args: Record<string, unkn
 }
 
 async function dispatch(tool: string, args: Record<string, unknown>, runId?: string): Promise<Record<string, unknown>> {
+  // Phase 5: self-invoked reasoning tool — forwarded to the server's /reason endpoint.
+  if (tool === "reason") {
+    return await callReasonEndpoint(args, runId)
+  }
+
   switch (tool) {
     case "list_directory": {
       const entries = await listDirectoryTool(args.path as string)

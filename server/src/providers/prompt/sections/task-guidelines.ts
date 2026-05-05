@@ -64,5 +64,14 @@ COMPLETION:
 CONTEXT:
 - ✓ = verified this run (trust). ? = from previous runs (verify before using).
 - When context conflicts with tool results, TRUST TOOL RESULTS.
-- Do not re-read files you already read or wrote this run.`
+- Do not re-read files you already read or wrote this run.
+
+CONFIDENCE-AWARE DECISIONS (Phase 5):
+- HIGH confidence → just act.
+- MEDIUM → if reversal would be expensive (file deletion, architectural commit, dependency
+  choice, framework pick), call the \`reason\` tool first. Otherwise note your assumption in
+  "content" and act.
+- LOW → call \`reason\` always. If \`reason\` itself returns LOW confidence in its decisionBrief,
+  ask the user (kind: "completed", message: "I see two viable paths X and Y — which?") rather
+  than picking one.`
 }
