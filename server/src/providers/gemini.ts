@@ -10,6 +10,8 @@ import {
   type GeminiContent,
 } from "../services/context-budget.js"
 import { discoverProjectMemory } from "../services/project-memory.js"
+import { recallForReasoning } from "../memory-store/index.js"
+import { renderEntryLine } from "./prompt/sections/learned-memory.js"
 import type { ProviderPayload, NormalizedResponse, TokenUsage } from "../types.js"
 
 /** Threshold: once the chat history has more than this many user-turn tool-results, run microcompact. */
@@ -113,6 +115,24 @@ export class GeminiProvider extends BaseProvider {
 
   private async buildPrompt(payload: ProviderPayload): Promise<string> {
     const memory = await discoverProjectMemory(payload.cwd)
+    // Phase 8: also pull in validated auto-memory entries.
+    let learnedMemoryLines: string[] | undefined
+    let learnedMemorySummary: { totalConsidered: number; staleCount: number; contradictedCount: number } | undefined
+    if (payload.cwd) {
+      try {
+        const recall = await recallForReasoning({ cwd: payload.cwd, userMessage: payload.userMessage ?? "" })
+        if (recall.entries.length > 0) {
+          learnedMemoryLines = recall.entries.map((e) => renderEntryLine(e))
+          learnedMemorySummary = {
+            totalConsidered: recall.totalConsidered,
+            staleCount: recall.staleCount,
+            contradictedCount: recall.contradictedCount,
+          }
+        }
+      } catch (err) {
+        console.warn(`[memory-store] recall failed:`, (err as Error).message)
+      }
+    }
     return getSystemPrompt({
       model: payload.model,
       cwd: payload.cwd,
@@ -120,6 +140,8 @@ export class GeminiProvider extends BaseProvider {
       projectMemoryFiles: memory.files,
       planMode: payload.planMode,
       reasoningBrief: payload.reasoningBrief,
+      learnedMemoryLines,
+      learnedMemorySummary,
     })
   }
 

@@ -18,10 +18,11 @@ import { getModelSpecificSection } from "./sections/model-specific.js"
 import { getProjectMemorySection, type ProjectMemoryCtx } from "./sections/project-memory.js"
 import { getPlanModeSection, type PlanModeCtx } from "./sections/plan-mode.js"
 import { getReasoningBriefSection, type ReasoningBriefCtx } from "./sections/reasoning-brief.js"
+import { getLearnedMemorySection, type LearnedMemoryCtx } from "./sections/learned-memory.js"
 
 export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "═══ SYSTEM_PROMPT_DYNAMIC_BOUNDARY ═══"
 
-export interface PromptCtx extends EnvInfoCtx, ProjectMemoryCtx, PlanModeCtx, ReasoningBriefCtx {
+export interface PromptCtx extends EnvInfoCtx, ProjectMemoryCtx, PlanModeCtx, ReasoningBriefCtx, LearnedMemoryCtx {
   model?: string
 }
 
@@ -50,6 +51,7 @@ export function buildSystemPrompt(ctx: PromptCtx = {}): BuiltPrompt {
     { id: "output_efficiency", priority: 40, cacheable: true, content: getOutputEfficiencySection() },
     { id: "env_info", priority: 100, cacheable: false, content: getEnvInfoSection(ctx) },
     { id: "project_memory", priority: 105, cacheable: false, content: getProjectMemorySection(ctx) },
+    { id: "learned_memory", priority: 106, cacheable: false, content: getLearnedMemorySection(ctx) },
     { id: "reasoning_brief", priority: 107, cacheable: false, content: getReasoningBriefSection(ctx) },
     { id: "plan_mode", priority: 108, cacheable: false, content: getPlanModeSection(ctx) },
     { id: "model_specific", priority: 110, cacheable: false, content: getModelSpecificSection(ctx.model) },
