@@ -2,19 +2,19 @@
 
 # Sysflow
 
-### The AI coding agent that works **inside your terminal** — not above it.
+### The **free** AI coding agent — Claude-Code workflow, no API bill.
 
-Build faster, stay in control, and let AI execute real work on your machine with full visibility.
+Powered by **OpenRouter Auto** (free tier) and **Gemini Flash** (free tier). Same multi-step agent loop, same scaffold-and-customise flow, same reasoning system you'd pay for elsewhere — running on your terminal for $0.
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://typescriptlang.org/)
 [![Fastify](https://img.shields.io/badge/Fastify-000000?style=flat-square&logo=fastify&logoColor=white)](https://fastify.dev/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=flat-square&logo=postgresql&logoColor=white)](https://postgresql.org/)
-[![Google Gemini](https://img.shields.io/badge/Gemini-8E75B2?style=flat-square&logo=googlegemini&logoColor=white)](https://ai.google.dev/)
 [![OpenRouter](https://img.shields.io/badge/OpenRouter-6366F1?style=flat-square&logo=openai&logoColor=white)](https://openrouter.ai/)
+[![Google Gemini](https://img.shields.io/badge/Gemini-8E75B2?style=flat-square&logo=googlegemini&logoColor=white)](https://ai.google.dev/)
 [![Docker](https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white)](https://docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
 
-**Prompt it. Watch it think. Let it ship.**
+**Prompt it. Watch it think. Let it ship — without burning credits.**
 
 </div>
 
@@ -22,243 +22,279 @@ Build faster, stay in control, and let AI execute real work on your machine with
 
 ## Why Sysflow exists
 
-Most AI coding tools feel impressive in demos and frustrating in real work.
+Claude Code, Cursor, and the other premium AI coding agents are great. They're also expensive. Every prompt is a per-token bill. Every iteration is a few cents. A real day of work adds up.
 
-They hide too much.  
-They lock you into one model.  
-They act like magic until they break something you care about.
+**Sysflow gives you the same kind of agent — multi-step reasoning, tool use, scaffold-first project init, mid-execution decisions — running on free models.**
 
-**Sysflow was built for developers who want speed without surrendering control.**
+The model isn't what makes those tools good. The orchestrator is — the loop that decides what to do next, the reasoner that asks before guessing, the permission system that keeps your machine safe, the scaffold-recommender that runs `npm create vite` instead of hand-writing 15 config files. Sysflow ships all of that and points it at OpenRouter Auto + Gemini Flash.
 
-It is an AI coding agent that runs from your terminal, understands your project, proposes actions, and executes work locally on your machine. You see the loop. You keep ownership of the environment. And instead of hoping the AI did the right thing, you can actually follow what it’s doing.
-
-This is not “AI that writes snippets.”
-
-This is **AI that can move work forward**.
+You get a real agent workflow. You don't get a real bill.
 
 ---
 
-## What makes Sysflow different
+## What you get
 
-### 1. It runs where real work happens
-Sysflow lives in the CLI, inside the project you are already working on. No context switching. No bloated browser workflow. No fake “developer experience” built for screenshots.
+### The same agent capabilities, free
+- **Pre-flight reasoning** that classifies your task, picks a stack, and asks for missing context (Sheet ID, API keys, schema) before guessing
+- **Self-invoked `reason` tool** the agent calls itself when it hits a fork (which ORM? safe to delete this file?)
+- **On-error recovery** with ranked hypotheses + invalidating tests after consecutive tool failures
+- **On-completion summary** that rewrites the final message into clusters + what-matters + verification steps
+- **22-stack scaffold-first init** — `create a react app for a todo list` runs `npm create vite@latest todo-list -- --template react-ts` and then customises, instead of hand-writing files
+- **Permission system** with allow/deny/ask + persistent rules + 4 modes (default / auto / plan / bypass)
+- **Hook registry** with built-in audit log + secrets-block (refuses writes to `.env*`, `*.pem`, `id_rsa*`, `secrets.*`)
+- **Plan mode** that produces a plan and waits for your nod before touching disk
+- **Daily-rotated audit log** + per-run usage telemetry under `<sysbasePath>/`
 
-### 2. The AI decides — your machine executes
-The model does not directly touch your files. It returns actions. The CLI executes them locally. That means more transparency, more trust, and less black-box behavior.
+### Free model defaults
+- **OpenRouter Auto** routes to the best available *free* model for each prompt — DeepSeek, Llama, Mistral, Gemini-via-OR, Qwen
+- **Gemini Flash** has a generous free tier (15 RPM / 1000 RPD) directly from Google AI Studio
+- **Both providers swap in seconds** via `/model` — your work isn't tied to a single vendor
 
-### 3. You choose the brain
-Use Gemini, OpenRouter, and an architecture that is already designed for multi-provider support. You are not trapped in a one-model product.
+### Local-first, transparent
+- The model decides; **your machine executes** every tool call
+- Reasoning brief renders in the terminal so you see *why* it picked the stack before it runs
+- Diffs are previewed inline; Tab expands the full change
 
-### 4. It remembers the work
-Session history is persisted, so Sysflow can carry context across prompts in the same chat session instead of starting from zero every time.
+---
 
-### 5. It is built like a product, not a hack
-Auth, usage tracking, billing, project context, session handling, model routing, local execution — this is not just an experiment. It is the foundation of a serious AI developer product.
+## How it differs from "just another AI coder"
+
+| | Sysflow | Premium agents | Toy wrappers |
+|---|---|---|---|
+| **Cost** | Free model defaults | $$$ per prompt | Free but shallow |
+| **Multi-step loop** | Yes — full agent | Yes | One-shot only |
+| **Reasoning before acting** | Pre-flight + self-invoked + on-error + on-completion | Varies | None |
+| **Ask vs guess on missing context** | Strict ask-gate | Strict | Guesses |
+| **Scaffold-first project init** | 22 stacks, auto-trusted | Hand-writes files | Hand-writes files |
+| **Permission system** | 4 modes + per-tool gates + persistent rules | Yes | None |
+| **Audit + telemetry** | Daily-rotated JSONL | Hosted | None |
+| **Local execution** | Yes — model never touches your files | Yes | Yes |
+| **Pluggable providers** | OpenRouter, Gemini, Claude scaffolds | One vendor | One vendor |
 
 ---
 
 ## The promise
 
-**Sysflow helps developers go from idea to working code with less friction, less repetition, and more control.**
+**A real coding agent. Free models by default. Your control.**
 
-Whether you are scaffolding a backend, refactoring a file, planning a feature, or iterating inside an existing repo, Sysflow is designed to feel like a capable technical operator sitting in your terminal with you.
+Sysflow goes from idea → working code with the same tool-use sophistication as the agents you'd pay for. The multi-step loop, the reasoning briefs, the scaffold-first project init, the permission system — all of it works on OpenRouter's free tier.
 
-Not replacing you.  
-Not fighting you.  
-**Accelerating you.**
+If you want to upgrade later, the architecture supports paid providers (Claude scaffolds are in the codebase). But the default works for free, and most projects never need anything else.
 
 ---
 
-## Core capabilities
+## Quick start
 
-- **Terminal-native AI workflow** — run prompts directly from your CLI
-- **Local tool execution** — file writes and command execution happen on your machine
-- **Project-aware context** — scans your working directory to understand the repo
-- **Persistent session memory** — remembers prior work inside the same chat flow
-- **Model switching** — choose between available providers and models
-- **Interactive and one-shot modes** — use it for fast commands or longer working sessions
-- **File targeting with `@mentions`** — reference files directly in prompts
-- **Planning + implementation flow** — create plans, then execute against them
-- **Authentication and billing support** — ready for real user accounts and subscription logic
-- **Docker-friendly setup** — easy local bootstrapping for the stack
+### Prerequisites
+- Node.js 20+
+- PostgreSQL 15+ (or Docker)
+- Free API key from [OpenRouter](https://openrouter.ai/keys) and/or [Google AI Studio](https://aistudio.google.com/apikey)
+
+### 1. Clone
+
+```bash
+git clone https://github.com/dexonapi-alt/sysflow-ai.git
+cd sysflow-ai
+```
+
+### 2. Start Postgres
+
+```bash
+docker compose up -d postgres
+```
+
+### 3. Set up the server
+
+```bash
+cd server
+npm install
+cp .env.example .env
+# Fill in OPENROUTER_API_KEY and/or GEMINI_API_KEY
+npm run dev
+```
+
+### 4. Set up the CLI (in a new terminal)
+
+```bash
+cd cli-client
+npm install
+npm link    # makes `sys` globally available
+```
+
+### 5. Use it
+
+```bash
+sys register
+sys login
+cd ~/my-project
+sys "create a react app for a todo list"
+```
+
+Default model is **`openrouter-auto`** (free). Switch with `sys model gemini-flash` (also free).
+
+---
+
+## Example workflows
+
+### One-shot
+
+```bash
+sys "create a discord bot that posts daily memes"
+```
+
+The reasoner asks for the bot token + channel ID + meme source before writing a single file.
+
+### Scaffold + customise
+
+```bash
+sys "build me a portfolio site"
+```
+
+In an empty dir, the recommender runs `npm create vite@latest portfolio-site -- --template react-ts`, the permission system asks once for `npm install`, then the agent customises App.tsx for the user's content.
+
+### Interactive mode
+
+```bash
+sys
+```
+
+REPL stays in one chat — context survives prompts.
+
+### Plan first, then implement
+
+```bash
+sys
+> /plan-mode on
+> build a REST API for user management
+# agent proposes a plan; nothing touches disk
+> /plan-mode off
+> go ahead, implement it
+```
+
+### Switch model mid-conversation
+
+```bash
+> /model gemini-flash
+```
+
+### Target a file
+
+```bash
+sys "refactor @src/app.js to use async/await"
+```
+
+---
+
+## CLI commands
+
+| Command | What it does |
+|---|---|
+| `sys` | Start interactive mode |
+| `sys "prompt"` | Run a one-shot prompt |
+| `sys register` / `sys login` | Account management |
+| `sys whoami` / `sys usage` | View account + usage |
+| `sys model [<id>]` | Open the model picker or switch directly |
+| `sys chats` / `sys delete chat` | Manage chat sessions |
+| `sys billing` | Optional — only if you upgrade to paid plans |
+
+### Inside interactive mode
+
+| Slash | What it does |
+|---|---|
+| `/model [<id>]` | Pick a model |
+| `/mode <default\|auto\|plan\|bypass>` | Switch the permission mode |
+| `/permissions [list\|remove n\|clear]` | Manage saved allow/deny rules |
+| `/plan-mode [on\|off]` | Toggle plan mode |
+| `/continue` | Resume the last interrupted run |
+| `/exit` / `/quit` | Leave |
+
+---
+
+## Available models
+
+Default visible options:
+
+- **`openrouter-auto`** — best available **free** model via OpenRouter (DeepSeek / Llama / Qwen / etc.)
+- **`gemini-flash`** — Google AI Studio direct, generous free tier
+
+Provider scaffolds for Claude Sonnet / Opus exist in the codebase for users who want to plug in a paid key.
 
 ---
 
 ## How it works
 
-At a high level, Sysflow is made of two parts:
+### Two parts
 
-### CLI Client
-The CLI is what you use day to day. It:
-- runs in your terminal
-- scans your project
-- sends prompts and context to the server
-- displays reasoning and actions
-- executes tools locally on your machine
+**CLI Client** — what you use day to day. Scans the project, sends prompts + context to the server, displays the reasoning brief, executes tool calls locally on your machine.
 
-### API Server
-The server handles orchestration. It:
-- authenticates users
-- checks usage limits
-- loads session history
-- manages project context
-- routes requests to AI providers
-- normalizes responses
-- tracks usage and billing
+**API Server** — orchestration: auth, usage limits, session history, project context, model routing, reasoning pipelines, response normalization.
 
 ### The loop
 
 ```text
 You type a prompt
       ↓
-CLI scans project context
+Pre-flight reasoner classifies the task + picks a stack + checks missing context
       ↓
-Server loads auth, usage, memory, and model
+If context is missing → ask the user. Otherwise:
       ↓
-AI decides the next action
+If fresh project + canonical scaffolder → run it directly
       ↓
-CLI executes that action locally
+Otherwise the main agent loop runs:
       ↓
-Result is sent back
+Model returns an action (read / write / edit / search / run_command / reason)
       ↓
-Loop continues until the task is complete
+CLI executes locally — permission system gates anything risky
+      ↓
+Result POSTs back; on-error reasoner kicks in if 2 tools failed
+      ↓
+Loop continues until the task is done
+      ↓
+On-completion reasoner refines the final summary
 ```
-
-The key idea is simple:
 
 The model thinks. The CLI acts. You stay in control.
 
-Quick start
-Prerequisites
-Node.js 20+
-PostgreSQL 15+ or Docker
-An API key for at least one provider
-1. Clone the repo
-git clone https://github.com/dexonapi-alt/sysflow-ai.git
-cd sysflow-ai
-2. Start PostgreSQL
-docker compose up -d postgres
-3. Set up the server
-cd server
-npm install
-cp .env.example .env
+---
 
-Fill in your environment variables in server/.env.
+## Tech stack
 
-4. Start the server
-npm run dev
-5. Set up the CLI
+**Server:** Fastify · TypeScript · PostgreSQL · Stripe (optional) · Zod · vitest
+**CLI:** Node.js · TypeScript · Chalk · Ora · Zod · vitest
+**Providers:** OpenRouter · Google Gemini · Anthropic-ready scaffolds
+**Tooling:** Docker · tsx
 
-Open a new terminal:
+---
 
-cd cli-client
-npm install
-npm link
+## Architecture
 
-This makes the sys command available globally.
-
-6. Start using Sysflow
-sys register
-sys login
-sys model
-cd ~/my-project
-sys "create a REST API with Express"
-Example workflows
-One-shot execution
-sys "create an express server with a health check endpoint"
-Interactive mode
-sys
-
-Useful when you want to keep iterating in one session.
-
-Switch models
-sys model
-
-Or set one directly:
-
-sys model gemini-flash
-Target a specific file
-sys "refactor @src/app.js to use async/await"
-Plan first, then implement
-
-Inside interactive mode:
-
-/plan build a REST API for user management
-/implement build a REST API for user management
-CLI commands
-Command	What it does
-sys	Start interactive mode
-sys "prompt"	Run a one-shot prompt
-sys register	Create an account
-sys login	Log in
-sys logout	Clear local auth
-sys whoami	View account and usage
-sys model	Open model picker
-sys billing	Manage subscription
-sys usage	View token usage
-sys chats	Manage chat sessions
-sys delete-chat	Delete active chat
-Interactive commands
-Command	What it does
-/model	Open the model picker
-/model gemini-flash	Switch model directly
-/plan ...	Create a plan
-/implement ...	Execute a saved plan
-/continue	Continue the last interrupted run
-/exit or /quit	Leave interactive mode
-Available models
-
-Current visible options include:
-
-openrouter-auto — best available model via OpenRouter
-gemini-flash — fast direct Gemini option
-
-The codebase is also structured for broader provider support, including additional hidden or placeholder model paths.
-
-Tech stack
-Server
-Fastify
-TypeScript
-PostgreSQL
-Stripe
-AI providers
-Google Gemini
-OpenRouter
-Anthropic-ready provider structure
-CLI
-Node.js
-TypeScript
-Chalk
-Ora
-WebSocket support
-Tooling
-Docker
-tsx
-Architecture
+```text
 sysflow-ai/
-├── cli-client/        # Terminal client and local execution layer
-├── server/            # API server and orchestration engine
-├── docs/              # Project documentation
+├── cli-client/                 # Terminal client + local tool execution
+│   └── src/
+│       ├── agent/              # Agent loop, state machine, retry, permissions, hooks
+│       ├── cli/                # Rendering, REPL, slash command parsing
+│       └── lib/                # Server transport, sysbase config
+├── server/                     # API server + orchestration
+│   └── src/
+│       ├── reasoning/          # Phase 5: pre-flight / self-invoked / on-error / on-completion
+│       ├── scaffold/           # Phase 6: 22-stack scaffolder registry + recommender
+│       ├── providers/prompt/   # Modular system prompt sections
+│       ├── handlers/           # user_message + tool_result handlers
+│       ├── routes/             # Fastify routes
+│       └── store/              # Run, session, tool-result, memory, audit storage
+├── docs/                       # Architecture + improvement docs
 ├── docker-compose.yml
 └── README.md
-Server responsibilities
-auth and identity
-model orchestration
-session history
-project context loading
-usage tracking
-billing logic
-provider normalization
-CLI responsibilities
-terminal interface
-local tool execution
-project scanning
-prompt submission
-interactive workflow
-Environment variables
+```
 
-Create server/.env from the example file:
+---
 
+## Environment variables
+
+Create `server/.env` from the example:
+
+```bash
 # Database
 DB_HOST=localhost
 DB_PORT=5432
@@ -266,46 +302,50 @@ DB_USER=postgres
 DB_PASSWORD=postgres
 DB_NAME=sysflow
 
-# AI Providers
-GEMINI_API_KEY=
-OPENROUTER_API_KEY=
+# AI Providers — at least one required, both are free
+OPENROUTER_API_KEY=     # https://openrouter.ai/keys
+GEMINI_API_KEY=         # https://aistudio.google.com/apikey
 
 # Auth
 JWT_SECRET=change-me-in-production
 
-# Billing
+# Optional — only if running paid plans
 STRIPE_SECRET_KEY=
 STRIPE_WEBHOOK_SECRET=
-Who this is for
+```
+
+---
+
+## Who this is for
 
 Sysflow is for:
 
-developers who want AI help without losing control
-builders who prefer the terminal over glossy dashboards
-teams exploring AI-native developer workflows
-founders creating serious coding agents, not toy wrappers
-anyone who believes speed matters, but trust matters more
-Current direction
+- Developers who want a **real agent workflow** without paying per token
+- Builders who prefer the **terminal** over a hosted IDE plugin
+- Indie hackers shipping side projects on a budget
+- Teams evaluating AI tooling without burning a budget line on a proof-of-concept
+- Anyone who's been told "the model is what matters" — and wants proof that the **orchestrator** is what actually matters
 
-Sysflow is already more than a CLI wrapper. It is shaping into a full execution layer for AI-assisted development — one where model flexibility, local action, persistent memory, and product-grade orchestration come together in one system.
+---
 
-That matters because the future of developer tools will not be won by whoever has the flashiest demo.
+## Documentation
 
-It will be won by whoever builds the tool developers trust enough to use every day.
+- `docs/general-doc.md` — full product and architecture guide
+- `docs/server.md` — server deep dive
+- `docs/cli-client.md` — CLI deep dive
+- `docs/sysflow-improvement/` — the 227-item gap inventory + phased roadmap
+- `.claude/plans/applied/` — every shipped phase plan with completion notes
 
-That is what Sysflow is aiming to become.
+---
 
-Documentation
-docs/general-doc.md — full product and architecture guide
-docs/server.md — server deep dive
-docs/cli-client.md — CLI deep dive
-License
+## License
 
 MIT
 
 <div align="center">
-Build faster. Stay in control. Ship with confidence.
 
-Sysflow — AI execution for developers who still want the last word.
+**Build for free. Stay in control. Ship with confidence.**
 
-</div> 
+Sysflow — Claude-Code-grade agent, OpenRouter-Auto-grade bill.
+
+</div>
