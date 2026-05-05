@@ -18,6 +18,7 @@ import { createPipelineFromAiPlan, createFallbackPipeline, pipelineToTaskMeta, m
 import { detectScaffoldingNeed, buildScaffoldConfirmationMessage } from "../scaffold/index.js"
 import { estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import { runReasoning } from "../reasoning/task-reasoner.js"
+import { classifyIntent } from "../reasoning/intent-classifier.js"
 import { recommendScaffold, resolveCommand, getInstallCommand } from "../scaffold/index.js"
 import { recordImplementSummary } from "../memory-store/index.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
@@ -392,8 +393,15 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
   // Skip for read-only intents — a "what's on this repo?" question shouldn't
   // sprout a generic "Setup project / Implement features / Polish & finalize"
   // box at the top. The agent will just emit reads + a final summary.
+  // Skip the task-pipeline box for read-only intents. Prefer the LLM
+  // reasoner's verdict (richer signal); fall back to the cheap regex
+  // classifier so this still works when GEMINI_API_KEY isn't configured
+  // and runReasoning returned null.
   const briefPipeline = (reasoningBrief as { pipeline?: string } | null)?.pipeline
-  const skipPipeline = briefPipeline === "summary" || briefPipeline === "simple"
+  const classifierHint = !briefPipeline ? classifyIntent(body.content) : null
+  const skipPipeline =
+    briefPipeline === "summary" || briefPipeline === "simple" ||
+    classifierHint === "summary" || classifierHint === "simple"
   if (skipPipeline) markPipelineSkipped(runId)
 
   if (normalized.kind === "needs_tool" && !skipPipeline) {
