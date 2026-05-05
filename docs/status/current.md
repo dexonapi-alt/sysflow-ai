@@ -4,13 +4,25 @@
 
 ## Recent Work
 
-**Phase 4 productionisation pass** (`.claude/plans/applied/2026-05-02-phase-4-productionisation.md`):
+**Phase 5 reasoning system pass** (`.claude/plans/applied/2026-05-02-phase-5-pre-flight-reasoning.md`):
 
-- **Feature flag system**: typed registry on both server (`services/flags.ts`) and CLI (`agent/flags.ts`). Three sources, highest first: `SYSFLOW_FLAG_<NAME>` env var → `<sysbasePath>/flags.json` → registered default. Wired into `compaction.autocompact_threshold_buffer`, `compaction.microcompact_keep_last_n`, `tool.persist_threshold_bytes`, `cli.retry_max_default`, `cli.tool_result_preview_enabled`, and `cli.audit_retention_days`. All defaults match the prior hardcoded values.
-- **Plan mode**: new `prompt/sections/plan-mode.ts` injected at priority 108. When `planMode === true`, the system prompt tells the model to do read-only research + propose a plan and stop. `getPlanMode()`/`setPlanMode()` persist in `models.json`. Slash command `/plan-mode [on|off]` toggles; bare `/plan-mode` flips. The CLI header shows `plan-mode` when on; `/permissions` displays it next to the permission mode.
-- **Audit-log rotation**: `agent/audit-log.ts` writes to dated files `audit-YYYY-MM-DD.jsonl` and prunes older than `cli.audit_retention_days` (default 14) on the first call after the date changes. Replaces the bare `audit.jsonl` append used by the audit hook.
-- **Per-run usage telemetry**: `agent/usage-log.ts` appends one JSONL line per terminal exit to `<sysbasePath>/usage.jsonl` with prompt preview, model, durationMs, stepCount, toolCount, errorCount, estimated tokens, and the terminal reason from the state machine.
-- **Initial test suite**: vitest configured in both packages. 30+ test cases across `validate-tool-input`, `permissions`, `hooks`, `tool-meta`, `context-budget`, `project-memory`, and `tool-error-classifier`.
+Built-in reasoning system that fires across four lifecycle triggers, each with its own pipeline:
+
+- **Pre-flight** (`handlers/user-message.ts`): every fresh prompt runs through `runReasoning({ trigger: 'preflight' })`. The intent classifier short-circuits trivial prompts (`"list files in src"`) without a model call. Implement-shaped prompts get the implement pipeline (stack + rationale + missing context detection); the canonical "create an automation for spreadsheet" prompt now asks for Sheet ID + service-account JSON + reminds the user to share with the service-account email *before* writing code.
+- **Self-invoked** (`reason` tool + `POST /reason` endpoint): the agent calls `reason({ kind, question, context, options })` mid-execution when it hits a fork (library choice, deletion safety, architectural pattern). The decision pipeline returns `{ recommendation, alternatives with fitScore, riskNotes, proceedHint }`. Hard cap at 5 calls per run (flag-tunable); recursion guard prevents reasoning-about-reasoning.
+- **On-error** (`handlers/tool-result.ts`): after 2 consecutive tool failures the bug pipeline runs with the failing context. Brief is injected into the next provider call so the agent benefits from ranked hypotheses + invalidating tests + a minimal-safe proposed fix. Cap at 2 reasoning calls per run.
+- **On-completion** (`handlers/tool-result.ts`): non-trivial runs (≥5 actions OR ≥3 files modified) get their final user-facing message refined by the summary pipeline. Replaces the draft with clusters + what-matters + verification steps.
+
+Architecture:
+
+- `server/src/reasoning/` — new module: `reasoning-schema.ts` (Zod discriminated envelope), `meta-rules.ts` (six cross-cutting principles), `intent-classifier.ts` (cheap regex hint), `task-reasoner.ts` (orchestrator + recursion guard), `reasoning-cache.ts` (sha256-keyed, 30-min TTL, FIFO 200), `critical-context-detector.ts` (cross-check + prune), `examples.ts` (28 few-shot examples), `pipelines/{implement,bug,summary,decision}-pipeline.ts`.
+- All reasoning calls run on Gemini Flash regardless of the main model — cheap + fast and consistent.
+- `prompt/sections/reasoning-brief.ts` — non-cacheable section that renders pipeline-specific guidance for the main agent.
+- `cli/reasoning-display.ts` — terminal renderer with confidence color-coding (HIGH=green, MEDIUM=yellow, LOW=red); inline collapsed for self-invoked decisions, full box for the other triggers.
+- 37 new test cases across `reasoning-schema`, `intent-classifier`, `reasoning-cache`, `critical-context-detector`.
+- Seven new flags (env-only kill switches; all default true / sensible values).
+
+The CONFIDENCE-AWARE rule is now operational: HIGH = act, MEDIUM = call `reason` if reversal is expensive, LOW = always reason then ask if still LOW.
 
 **Phase 4 productionisation pass** (`.claude/plans/applied/2026-05-02-phase-4-productionisation.md`):
 
