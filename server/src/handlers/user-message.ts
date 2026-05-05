@@ -17,6 +17,7 @@ import { detectErrorContext, setPendingError, detectAllErrors, setPendingErrorQu
 import { createPipelineFromAiPlan, createFallbackPipeline, pipelineToTaskMeta } from "../services/task-pipeline.js"
 import { detectScaffoldingNeed, buildScaffoldConfirmationMessage } from "../services/scaffold-options.js"
 import { estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
+import { runReasoning } from "../reasoning/task-reasoner.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 interface UserMessageBody {
