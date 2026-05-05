@@ -19,6 +19,7 @@ import { detectScaffoldingNeed, buildScaffoldConfirmationMessage } from "../scaf
 import { estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import { runReasoning } from "../reasoning/task-reasoner.js"
 import { recommendScaffold, resolveCommand, getInstallCommand } from "../scaffold/index.js"
+import { recordImplementSummary } from "../memory-store/index.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 interface UserMessageBody {
@@ -213,6 +214,14 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
       sysbasePath: body.sysbasePath,
     })
     reasoningBrief = briefResult
+    // Phase 8: persist the implement brief if it's HIGH/MEDIUM confidence and decision === proceed.
+    if (briefResult && briefResult.pipeline === "implement" && briefResult.decision === "proceed" && briefResult.confidence !== "LOW") {
+      recordImplementSummary(
+        body.cwd,
+        { implementBrief: briefResult.implementBrief },
+        { runId, trigger: "preflight" },
+      ).catch(() => { /* best-effort */ })
+    }
     // If the reasoner says ask_user, short-circuit immediately with the consolidated questions.
     if (briefResult && briefResult.pipeline !== "simple" && briefResult.decision === "ask_user" && briefResult.missingContext.length > 0) {
       const lines: string[] = []
