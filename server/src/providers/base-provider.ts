@@ -653,19 +653,35 @@ export abstract class BaseProvider {
   parseJsonResponse(text: string, runId?: string): NormalizedResponse {
     let json: Record<string, unknown> | null = null
 
+    // Strip OpenAI-Harmony / GPT-OSS framing tokens before parsing.
+    // OpenRouter's `auto` model can route to gpt-oss variants which return:
+    //   <|channel|>analysis<|message|> ...thoughts...
+    //   <|channel|>commentary<|message|> {"name": "read_file", ...}
+    //   <|channel|>final<|message|> ...answer...
+    // Without stripping, JSON.parse sees the framing tokens and fails.
+    const cleaned = stripHarmonyFraming(text)
+
     try {
-      json = JSON.parse(text)
+      json = JSON.parse(cleaned)
     } catch {
-      const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/)
+      const fenceMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/)
       if (fenceMatch) {
         try { json = JSON.parse(fenceMatch[1].trim()) } catch { /* ignore */ }
       }
       if (!json) {
-        const jsonMatch = text.match(/\{[\s\S]*\}/)
+        const jsonMatch = cleaned.match(/\{[\s\S]*\}/)
         if (jsonMatch) {
           try { json = JSON.parse(jsonMatch[0]) } catch { /* ignore */ }
         }
       }
+    }
+
+    // If the parsed JSON looks like raw tool args (path/content/command but no
+    // `kind`), wrap it in a needs_tool envelope. Harmony "commentary" channels
+    // emit just the args object — we infer the tool from the arg shape.
+    if (json && !json.kind && hasToolArgShape(json)) {
+      const inferred = inferToolFromArgs(json, cleaned)
+      if (inferred) json = inferred
     }
 
     if (!json || !json.kind) {
@@ -884,4 +900,71 @@ export const SHARED_SYSTEM_PROMPT: string = buildSystemPrompt({}).full
 
 export function getSystemPrompt(ctx: PromptCtx = {}): string {
   return buildSystemPrompt(ctx).full
+}
+
+// ─── OpenAI-Harmony / GPT-OSS framing stripper ───
+//
+// gpt-oss models (and OpenRouter's "auto" route, when it lands there) emit
+// responses wrapped in tokens like:
+//   <|start|>assistant<|channel|>analysis<|message|>...thoughts...<|end|>
+//   <|start|>assistant<|channel|>commentary<|message|>{ "path": "..." }<|end|>
+//   <|start|>assistant<|channel|>final<|message|>...answer...<|return|>
+// JSON.parse on the raw text rejects everything because of the angle-bracket
+// tokens. Strip them so the parser can see the underlying JSON / text.
+
+export function stripHarmonyFraming(text: string): string {
+  if (!text || !text.includes("<|")) return text
+  // Drop the analysis (chain-of-thought) channel entirely — it's prose, not
+  // JSON, and pulling it into the JSON-parse window only adds noise.
+  let stripped = text.replace(/<\|start\|>[^<]*?<\|channel\|>analysis<\|message\|>[\s\S]*?(?=<\|(?:start|end|channel|return)\|>|$)/g, "")
+  // Strip remaining channel/message/start/end markers in place.
+  stripped = stripped
+    .replace(/<\|start\|>[^<]*?<\|message\|>/g, "")
+    .replace(/<\|start\|>[^<]*?<\|channel\|>[^<]*?<\|message\|>/g, "")
+    .replace(/<\|channel\|>[^<]*?<\|message\|>/g, "")
+    .replace(/<\|constrain\|>[^<]*?<\|message\|>/g, "")
+    .replace(/<\|recipient\|>[^<]*?<\|message\|>/g, "")
+    .replace(/<\|return\|>/g, "")
+    .replace(/<\|end\|>/g, "")
+    .replace(/<\|start\|>/g, "")
+    .replace(/<\|im_start\|>[^\n<]*\n?/g, "")
+    .replace(/<\|im_end\|>/g, "")
+  return stripped.trim()
+}
+
+/** True when the parsed JSON looks like tool args (no envelope kind). */
+function hasToolArgShape(obj: Record<string, unknown>): boolean {
+  if (obj.kind || obj.tool || obj.tools) return false
+  return typeof obj.path === "string"
+      || typeof obj.command === "string"
+      || typeof obj.from === "string"
+      || (Array.isArray(obj.paths) && obj.paths.length > 0)
+}
+
+/**
+ * Wrap raw tool args in a `needs_tool` envelope. Returns null if we can't
+ * confidently infer the tool name. Looks at the arg shape and any
+ * <|recipient|>functions.<name>… hint that survived the strip step.
+ */
+function inferToolFromArgs(args: Record<string, unknown>, originalText: string): Record<string, unknown> | null {
+  // The pre-strip text might carry a "<|recipient|>functions.read_file" hint.
+  const recipient = originalText.match(/functions\.([a-z_][a-z0-9_]*)/i)?.[1]
+  let tool: string | null = recipient ?? null
+
+  if (!tool) {
+    if (typeof args.command === "string") tool = "run_command"
+    else if (typeof args.from === "string" && typeof args.to === "string") tool = "move_file"
+    else if (typeof args.path === "string" && typeof args.content === "string") tool = "write_file"
+    else if (typeof args.path === "string" && (typeof args.search === "string" || typeof args.line_start === "number" || typeof args.insert_at === "number")) tool = "edit_file"
+    else if (typeof args.path === "string" && (typeof args.offset === "number" || typeof args.limit === "number")) tool = "read_file"
+    else if (typeof args.path === "string") tool = "read_file"
+    else if (Array.isArray(args.paths)) tool = "batch_read"
+  }
+  if (!tool) return null
+  return {
+    kind: "needs_tool",
+    tool,
+    args,
+    content: `Inferred tool=${tool} from harmony commentary args`,
+  }
 }
