@@ -18,6 +18,7 @@ import { createPipelineFromAiPlan, createFallbackPipeline, pipelineToTaskMeta } 
 import { detectScaffoldingNeed, buildScaffoldConfirmationMessage } from "../scaffold/index.js"
 import { estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import { runReasoning } from "../reasoning/task-reasoner.js"
+import { recommendScaffold, resolveCommand, getInstallCommand } from "../scaffold/index.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 interface UserMessageBody {
@@ -238,6 +239,50 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     }
   } catch (err) {
     console.warn(`[reasoning] preflight failed:`, (err as Error).message)
+  }
+
+  // ─── Phase 6 scaffold-first: when reasoning is HIGH confidence on a known stack and cwd is empty,
+  // skip the model call entirely and emit the scaffolder run_command directly. ───
+  try {
+    const briefAny = reasoningBrief as never as Parameters<typeof recommendScaffold>[0]["brief"]
+    const recommendation = recommendScaffold({
+      brief: briefAny,
+      userMessage: body.content,
+      cwd: body.cwd,
+      directoryTree: body.directoryTree as never,
+    })
+    if (recommendation.shouldScaffold && recommendation.autoTrust && recommendation.scaffolder) {
+      const scaffoldCmd = resolveCommand(recommendation.scaffolder, recommendation.projectName)
+      const installCmd = getInstallCommand(recommendation.scaffolder, recommendation.projectName)
+      console.log(`[scaffold-first] auto-trust ${recommendation.scaffolder.stackKey}: ${scaffoldCmd}`)
+
+      // Inject post-scaffold guidance so the agent knows what to do after the command returns.
+      const postScaffoldNote = recommendation.scaffolder.postScaffoldNote
+      const followUpLines: string[] = []
+      followUpLines.push(`[SCAFFOLD COMPLETE] You scaffolded "${recommendation.projectName}" using ${recommendation.scaffolder.displayName}.`)
+      followUpLines.push(`The scaffolder created the standard file layout — DO NOT recreate files it already produced. Read package.json first to see what's there.`)
+      if (installCmd) {
+        followUpLines.push(`Next: run \`${installCmd}\` to install deps. The permission system will ask the user once.`)
+      }
+      if (postScaffoldNote) followUpLines.push(`NOTE: ${postScaffoldNote}`)
+      followUpLines.push(`Then customise the scaffold for the user's actual task: "${body.content}".`)
+      actionPlanner.injectContext(runId, followUpLines.join("\n"))
+
+      // Synthesize the scaffold action as the agent's first response.
+      const synthesizedNormalized: NormalizedResponse = {
+        kind: "needs_tool",
+        tool: "run_command",
+        args: { command: scaffoldCmd, cwd: "." },
+        content: `Scaffolding ${recommendation.scaffolder.displayName} into ./${recommendation.projectName}`,
+        reasoning: `HIGH-confidence single registry match for ${recommendation.scaffolder.stackKey}; running the scaffolder beats hand-writing config files.`,
+        usage: { inputTokens: 0, outputTokens: 0 },
+      }
+      const clientResp = mapNormalizedResponseToClient(runId, synthesizedNormalized)
+      clientResp.reasoningBrief = reasoningBrief
+      return clientResp
+    }
+  } catch (err) {
+    console.warn(`[scaffold-first] recommender failed:`, (err as Error).message)
   }
 
   // ─── Pre-API token guard: refuse oversized payloads instead of wasting an API call ───
