@@ -4,7 +4,7 @@ Managed by `memex-md`. Each plan is a design artifact written before implementat
 
 ## Plans
 
-_None active._
+- [2026-05-02-phase-6-scaffold-first.md](2026-05-02-phase-6-scaffold-first.md) — Phase 6: scaffold-first project init. New `server/src/scaffold/` registry covering 15+ stacks; reasoning-driven recommender that auto-runs the scaffolder + auto-installs deps for HIGH-confidence single-scaffolder cases; rewrites the COMMANDS prompt section that previously forbade scaffolders.  *(in-progress)*
 
 ## Applied
 

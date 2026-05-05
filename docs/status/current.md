@@ -4,6 +4,22 @@
 
 ## Recent Work
 
+**Phase 6 scaffold-first pass** (`.claude/plans/applied/2026-05-02-phase-6-scaffold-first.md`):
+
+Stop hand-writing config files for fresh projects when a canonical scaffolder exists. Resolved the system-prompt vs scaffold-options.ts contradiction.
+
+- **New `server/src/scaffold/` module** — replaces `services/scaffold-options.ts` (deleted). Contains:
+  - `registry.ts`: 22 canonical scaffolders covering Vite-family (React/Vue/Svelte/Solid/Preact/Lit/Vanilla), full-stack frameworks (Next/Nuxt/SvelteKit/Remix/Astro/Qwik), backend (Nest/Angular), desktop+mobile (Expo/Tauri/Electron-Vite), runtimes (Bun init), non-Node (Django/Laravel/Rails). Each entry pre-bakes non-interactive flags.
+  - `recommender.ts`: pure `recommendScaffold(brief, cwd, directoryTree)` consumes the Phase 5 implement brief. Three gates: fresh-project, implement-pipeline brief present, registry match. Returns `{ shouldScaffold, scaffolder, candidates, projectName, autoTrust, reason }`. autoTrust requires HIGH confidence + exactly one match + the entry's `autoTrustForHighConfidence` flag.
+  - `project-name.ts`: extracts kebab-case project names from prompts ("create a todo list app" → `todo-list`); falls back to cwd basename, then `my-app`.
+  - `legacy-shims.ts`: keeps the existing multi-candidate `waiting_for_user` flow working.
+- **Auto-trust path** in `handlers/user-message.ts`: when the recommender returns `autoTrust: true`, the handler skips the model call entirely and synthesizes a `needs_tool` response with `run_command` + the resolved scaffolder command. Post-scaffold guidance is queued via `actionPlanner.injectContext` so the next turn knows to read package.json, run `npm install`, and customise (not recreate).
+- **Post-scaffold safety net** in `handlers/tool-result.ts`: detects scaffolder commands by pattern (npm create, npx create-, npx @nestjs/cli new, etc.) and on success injects the same post-scaffold guidance. Catches the user-confirmed multi-candidate path too.
+- **COMMANDS prompt rewrite** in `task-guidelines.ts`: removed the line that previously forbade `npx <scaffolder> init` (it contradicted the scaffold-options system). New guidance actively encourages scaffolders for fresh projects, lists 16 stacks, requires running `npm install` during the run (not deferred to summary), and warns against recreating generated files.
+- ~25 new test cases across `registry`, `project-name`, `recommender`.
+
+Targeted result: `sys "create a react app for a todo list"` in an empty directory → reasoning brief renders showing React+Vite + HIGH confidence; `npm create vite@latest todo-list -- --template react-ts` runs without a user prompt; permission system asks once for `npm install`; agent then customises App.tsx.
+
 **Phase 5 reasoning system pass** (`.claude/plans/applied/2026-05-02-phase-5-pre-flight-reasoning.md`):
 
 Built-in reasoning system that fires across four lifecycle triggers, each with its own pipeline:
