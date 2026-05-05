@@ -4,9 +4,11 @@ import { Box, Text } from "ink"
 import { StatusLine } from "./components/StatusLine.js"
 import { ChatInput } from "./components/ChatInput.js"
 import { Spinner } from "./components/Spinner.js"
+import { AgentStream } from "./components/AgentStream.js"
 import { palette } from "./theme.js"
 import { ensureSysbase, getSelectedModel, getAuthUser, getActiveChatInfo, getPlanMode, getSysbasePath } from "../lib/sysbase.js"
 import { runAgent } from "../agent/agent.js"
+import { emitAgent } from "../agent/events.js"
 import { loadHistory, appendHistory } from "./state/history.js"
 
 interface Status {
@@ -57,12 +59,16 @@ export function App(): React.ReactElement {
     setWorking(true)
     setHistory((h) => [...h.filter((p) => p !== prompt), prompt].slice(-100))
     void appendHistory(getSysbasePath(), prompt)
+    // Reset the AgentStream's buffer + spinner state so the new run doesn't
+    // start with stale lines from a previous prompt.
+    emitAgent({ type: "clear" })
     try {
       await runAgent({ prompt, command: null })
     } catch (err) {
       setError((err as Error).message)
     } finally {
       setWorking(false)
+      emitAgent({ type: "spinner_stop" })
     }
   }
 
@@ -85,12 +91,14 @@ export function App(): React.ReactElement {
         />
       </Box>
       {/*
-        While the agent is running, runAgent owns the visible region with its
-        own `ora` spinner + console.log stream. Rendering the Ink <Spinner>
-        here would double up — the user sees two "thinking..." indicators.
-        Stage 3 of Phase 9 ports the agent stream to React so we can render
-        a single Ink spinner; until then, hide the input row during work.
+        Agent stream lives between the status line and the chat input. It's
+        always mounted so log events accumulate continuously; it just looks
+        empty when the agent isn't running. Stage 3 wires the spinner here
+        — Stage 3b will start emitting structured tool / task events.
       */}
+      <Box marginTop={1}>
+        <AgentStream />
+      </Box>
       {!working && (
         <Box marginTop={1}>
           <ChatInput onSubmit={handleSubmit} history={history} />

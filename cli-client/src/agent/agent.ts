@@ -35,9 +35,55 @@ import { estimateTokens as cliEstimateTokens } from "./token-estimate.js"
 import { startJobStatusBar, stopJobStatusBar } from "../cli/job-status.js"
 import { list as listBackgroundJobs, cleanupRun as cleanupBackgroundJobs } from "./background-jobs.js"
 import { registerSpinner, unregisterSpinner } from "../cli/spinner-control.js"
+import { emitAgent, isInkActive } from "./events.js"
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Spinner shim: lets the existing `spinner.text = …` / `spinner.start()` /
+ * `spinner.stop()` callsites work whether we're driving an `ora` instance
+ * (legacy console mode) or emitting events to the Ink `<AgentStream>`.
+ *
+ * In Ink mode we deliberately don't render anything to the terminal — the
+ * AgentStream component owns the visible region. Without this, ora and Ink
+ * would both draw a "thinking..." line at the same position.
+ */
+type Ora = ReturnType<typeof ora>
+
+function createSpinner(): Ora {
+  if (isInkActive()) {
+    let current = "thinking..."
+    emitAgent({ type: "spinner", text: current })
+    // Stub mimicking the slice of the ora interface the agent + diff-preview
+    // listener actually use. Anything unimplemented (succeed/render/clear/…)
+    // returns the stub so chained calls don't blow up.
+    const stub = {
+      get text() { return current },
+      set text(v: string) { current = v; emitAgent({ type: "spinner", text: v }) },
+      start(text?: string) { if (text) current = text; emitAgent({ type: "spinner", text: current }); return stub },
+      stop() { emitAgent({ type: "spinner_stop" }); return stub },
+      fail(text?: string) {
+        emitAgent({ type: "spinner_stop" })
+        if (text) emitAgent({ type: "log", level: "error", text })
+        return stub
+      },
+      succeed() { emitAgent({ type: "spinner_stop" }); return stub },
+      warn() { emitAgent({ type: "spinner_stop" }); return stub },
+      info() { emitAgent({ type: "spinner_stop" }); return stub },
+      clear() { return stub },
+      render() { return stub },
+      isSpinning: true,
+    }
+    return stub as unknown as Ora
+  }
+  return ora({
+    text: colors.muted("thinking..."),
+    prefixText: "  ",
+    spinner: "dots",
+    color: "magenta",
+  }).start()
 }
 
 // ─── User input prompt ───
@@ -111,13 +157,12 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
 
   console.log("")
 
-  const spinner = ora({
-    text: colors.muted("thinking..."),
-    prefixText: "  ",
-    spinner: "dots",
-    color: "magenta"
-  }).start()
-  registerSpinner(spinner)
+  const spinner = createSpinner()
+  // Legacy modal helpers (permission prompt, retry log) still call
+  // pauseSpinner/resumeSpinner via the registered ora ref. In Ink mode the
+  // spinner is event-driven so those pause/resume calls become no-ops on
+  // the registered instance — the AgentStream drives its own rendering.
+  if (!isInkActive()) registerSpinner(spinner)
 
   const serverPayload = {
     type: "user_message",
