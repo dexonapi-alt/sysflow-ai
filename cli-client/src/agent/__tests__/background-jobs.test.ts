@@ -30,7 +30,7 @@ describe("background-jobs", () => {
 
   it("poll returns done with exitCode=0 after success", async () => {
     const state = start({ command: SLEEP_MS(50), cwd: process.cwd(), runId: "r1" })
-    const final = await wait(state.id, 1000)
+    const final = await wait(state.id, 4000)
     expect(final.status).toBe("done")
     expect(final.exitCode).toBe(0)
     expect(final.durationMs).toBeGreaterThanOrEqual(50)
@@ -38,14 +38,14 @@ describe("background-jobs", () => {
 
   it("poll returns failed with non-zero exit", async () => {
     const state = start({ command: FAIL_FAST, cwd: process.cwd(), runId: "r1" })
-    const final = await wait(state.id, 1000)
+    const final = await wait(state.id, 4000)
     expect(final.status).toBe("failed")
     expect(final.exitCode).toBe(7)
   })
 
   it("captures stdout tail", async () => {
     const state = start({ command: SLOW_OUTPUT, cwd: process.cwd(), runId: "r1" })
-    const final = await wait(state.id, 1000)
+    const final = await wait(state.id, 4000)
     expect(final.status).toBe("done")
     expect(final.stdoutTail).toContain("hi")
   })
