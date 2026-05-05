@@ -628,6 +628,12 @@ interface CommandResult {
   interactive?: boolean
   message?: string
   verified?: boolean
+  /** Phase 7: when true, the command was handed off to JobRegistry; jobId is set. */
+  startedBackground?: boolean
+  jobId?: string
+  status?: "running" | "done" | "failed"
+  command?: string
+  success?: boolean
 }
 
 /**
@@ -644,13 +650,24 @@ function preprocessCommand(cmd: string): string {
   return cmd
 }
 
-export async function runCommandTool(command: string, cwd: string = process.cwd()): Promise<CommandResult> {
+export interface RunCommandOptions {
+  background?: boolean
+  runId?: string
+  label?: string
+}
+
+export async function runCommandTool(
+  command: string,
+  cwd: string = process.cwd(),
+  opts: RunCommandOptions = {},
+): Promise<CommandResult> {
   if (!command) {
     return { stdout: "", stderr: "No command provided", message: "run_command requires a command string." }
   }
   const trimmed = preprocessCommand(command.trim())
   const isLongRunning = LONG_RUNNING_PATTERNS.some((p) => p.test(trimmed))
   const isSlow = SLOW_COMMAND_PATTERNS.some((p) => p.test(trimmed))
+  const matchesBackgroundDefault = BACKGROUND_BY_DEFAULT_PATTERNS.some((p) => p.test(trimmed))
   // Commands with --no-interactive don't need terminal passthrough
   const isInteractive = INTERACTIVE_PATTERNS.some((p) => p.test(trimmed)) && !trimmed.includes("--no-interactive")
 
@@ -660,6 +677,32 @@ export async function runCommandTool(command: string, cwd: string = process.cwd(
       stderr: "",
       skipped: true,
       message: `This is a long-running command (server/watcher). The user should run it manually:\n\n  ${command}\n\nDo NOT attempt to run server-start commands. Instead, tell the user to run it themselves.`
+    }
+  }
+
+  // Phase 7: install-class commands run in the BACKGROUND by default so the
+  // agent can keep working. opts.background can force either direction.
+  const wantsBackground = opts.background === true || (opts.background !== false && matchesBackgroundDefault)
+  if (wantsBackground && opts.runId) {
+    const { start } = await import("./background-jobs.js")
+    try {
+      const job = start({ command: trimmed, cwd, runId: opts.runId, label: opts.label || trimmed.slice(0, 60) })
+      return {
+        stdout: "",
+        stderr: "",
+        startedBackground: true,
+        jobId: job.id,
+        status: "running",
+        command: trimmed,
+        message: `Started in background: ${trimmed}\nJob ID: ${job.id}\nUse check_jobs to poll status. Don't wait — keep working on other steps.`,
+      }
+    } catch (err) {
+      return {
+        stdout: "",
+        stderr: (err as Error).message,
+        success: false,
+        message: `Failed to start background job: ${(err as Error).message}`,
+      }
     }
   }
 
