@@ -43,15 +43,30 @@ async function main(): Promise<void> {
     }
   }
 
+  // Phase 9 Stage 1: SYS_INK=1 mounts the new Ink UI; without the flag the
+  // legacy console renderer keeps running so we can iterate without breaking
+  // trunk. The flag goes away in Stage 9.
+  const inkEnabled = process.env.SYS_INK === "1"
+
   if (args.length === 0) {
-    await startUi()
+    if (inkEnabled) {
+      const { startInkUi } = await import("./ui/start.js")
+      await startInkUi()
+    } else {
+      await startUi()
+    }
     return
   }
 
   const parsed = parseCliInput(args)
 
   if (parsed.mode === "ui") {
-    await startUi()
+    if (inkEnabled) {
+      const { startInkUi } = await import("./ui/start.js")
+      await startInkUi()
+    } else {
+      await startUi()
+    }
     return
   }
 

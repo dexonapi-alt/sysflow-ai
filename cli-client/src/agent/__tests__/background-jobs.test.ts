@@ -97,7 +97,9 @@ describe("background-jobs", () => {
   it("cleanupRun awaits running jobs and reports counts", async () => {
     start({ command: SLEEP_MS(30), cwd: process.cwd(), runId: "r1" })
     start({ command: SLEEP_MS(30), cwd: process.cwd(), runId: "r1" })
-    const result = await cleanupRun("r1", 1000)
+    // 4s cleanup window — the 1s default flakes when turbo runs the cli +
+    // server test suites in parallel and node spawn contends for CPU.
+    const result = await cleanupRun("r1", 4000)
     expect(result.awaited).toBe(2)
     expect(result.aborted).toBe(0)
   })
