@@ -330,6 +330,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
     if (transition.terminal) {
       switch (transition.reason) {
         case "completed": {
+          spinner.stop()
           await renderCompletion(response, hasReasoning, lastDisplayedReasoning, taskSteps, completedSteps, stepCount)
           cleanupDiffListener()
           disableDiffExpand()
