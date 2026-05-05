@@ -27,9 +27,14 @@ export function getToolsSection(): string {
       - Replaces entire file — only use when rewriting most of the file
 6. create_directory — args: { "path": "src/utils" }
 7. search_code — args: { "directory": ".", "pattern": "function auth" }
-8. run_command — args: { "command": "...", "cwd": "." }
+8. run_command — args: { "command": "...", "cwd": ".", "background"?: true }
    Use for: scaffolders (npm create vite, npx create-next-app, npx @nestjs/cli new, etc.), npm install / pnpm install / yarn install, build commands, test commands, git, one-shot scripts.
    Never use for: long-running servers (npm run dev, node server.js), interactive REPLs, or anything that doesn't terminate.
+   BACKGROUND MODE (Phase 7):
+   - INSTALL commands run in the BACKGROUND by default — npm install, pnpm install, yarn install, bun install, pip install -r, bundle install, cargo build, go mod download. The tool returns { startedBackground: true, jobId, status: "running" } IMMEDIATELY so you can keep working.
+   - DON'T WAIT — read package.json, customise files, write source, do anything else. Then call check_jobs after a few unrelated steps to verify the install finished.
+   - Pass "background": false ONLY when you explicitly need the install output (rare — e.g. parsing pip's resolver output to debug a conflict).
+   - Pass "background": true to FORCE background on a non-install command (e.g. a long codegen step you can poll later).
 9. move_file — args: { "from": "old.js", "to": "new.js" }
 10. delete_file — args: { "path": "temp.js" }
 11. search_files — args: { "query": "auth middleware" } or { "glob": "src/**/*.ts" }
@@ -40,5 +45,11 @@ export function getToolsSection(): string {
     whether to delete a file you didn't create; picking an architectural pattern; investigating a
     suspicious gotcha. The tool returns { recommendation, alternatives, riskNotes, proceedHint }.
     Cost: one short reasoning call. Benefit: not making a wrong call you'll have to undo.
-    DO NOT overuse — for HIGH-confidence routine moves, just act. Hard cap: 5 calls per run.`
+    DO NOT overuse — for HIGH-confidence routine moves, just act. Hard cap: 5 calls per run.
+14. check_jobs — args: { "jobId"?: "..." }
+   Phase 7. Polls the in-process JobRegistry for background-job status.
+   - Without jobId: lists all jobs for this run, running first, with status / exitCode / durationMs / stdoutTail / stderrTail / label.
+   - With jobId: returns just that one job's current state.
+   Cheap. Call AFTER you've done a few unrelated steps. DO NOT loop on it — that wastes turns.
+   Returns "done" with exitCode=0 on success; "running" if still in progress; "failed" with exitCode + stderrTail on failure.`
 }
