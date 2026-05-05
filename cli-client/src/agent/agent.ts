@@ -28,6 +28,7 @@ import {
   startDiffKeyListener,
 } from "../cli/diff-preview.js"
 import { renderToolResultPreview } from "../cli/tool-result-preview.js"
+import { renderReasoningBrief, renderDecisionBrief } from "../cli/reasoning-display.js"
 import { classifyResponse, makeRetryBudget, noteSuccess, type RetryBudget } from "./state-machine.js"
 import { recordRunSummary } from "./usage-log.js"
 import { estimateTokens as cliEstimateTokens } from "./token-estimate.js"
@@ -175,6 +176,13 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       spinner.stop()
       throw err
     }
+  }
+
+  // Phase 5: render the pre-flight reasoning brief if the server returned one.
+  if (response.reasoningBrief) {
+    spinner.stop()
+    renderReasoningBrief(response.reasoningBrief)
+    spinner.start(colors.muted("thinking..."))
   }
 
   let stepCount = 0
@@ -845,6 +853,19 @@ async function handleNeedsTool(
         console.log(preview)
         spinner.start(colors.muted("thinking..."))
       }
+      // Phase 5: render decision brief inline if the reason tool just returned one.
+      if (currentTool === "reason" && toolResult && (toolResult as Record<string, unknown>).brief) {
+        spinner.stop()
+        renderDecisionBrief((toolResult as Record<string, unknown>).brief)
+        spinner.start(colors.muted("thinking..."))
+      }
+    }
+
+    // Phase 5: server may have attached a brief (on-error / on-completion) on the response.
+    if (response.reasoningBrief) {
+      spinner.stop()
+      renderReasoningBrief(response.reasoningBrief)
+      spinner.start(colors.muted("thinking..."))
     }
 
     if (currentTool === "run_command") {
