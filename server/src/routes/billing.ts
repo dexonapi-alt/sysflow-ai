@@ -5,7 +5,19 @@ import { getSubscription, updateSubscriptionFromStripe, getUsageSummary, PLANS }
 import { onCheckoutComplete, removeCheckoutListener, emitCheckoutComplete } from "../store/checkout-events.js"
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify"
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || "")
+// Lazy: the Stripe SDK now throws at construction when no key is supplied,
+// so we defer it until a billing route actually fires. This lets the server
+// boot in dev without STRIPE_SECRET_KEY set.
+let _stripe: Stripe | null = null
+function getStripe(): Stripe {
+  if (_stripe) return _stripe
+  const key = process.env.STRIPE_SECRET_KEY
+  if (!key) {
+    throw new Error("STRIPE_SECRET_KEY is not set — billing routes are unavailable in this environment.")
+  }
+  _stripe = new Stripe(key)
+  return _stripe
+}
 
 function stripeDate(ts: number | null | undefined): Date {
   if (!ts || typeof ts !== "number") return new Date()
@@ -37,7 +49,7 @@ export async function stripeRoutes(fastify: FastifyInstance): Promise<void> {
     const sub = await getSubscription(user.userId)
     if (sub.plan === "free" && sub.stripe_customer_id) {
       try {
-        const subs = await stripe.subscriptions.list({
+        const subs = await getStripe().subscriptions.list({
           customer: sub.stripe_customer_id as string,
           status: "active",
           limit: 1
@@ -82,14 +94,14 @@ export async function stripeRoutes(fastify: FastifyInstance): Promise<void> {
 
     if (!customerId) {
       const userRow = await query("SELECT username FROM users WHERE id = $1", [user.userId])
-      const customer = await stripe.customers.create({
+      const customer = await getStripe().customers.create({
         metadata: { userId: String(user.userId), username: userRow.rows[0].username }
       })
       customerId = customer.id
       await query("UPDATE subscriptions SET stripe_customer_id = $1 WHERE user_id = $2", [customerId, user.userId])
     }
 
-    const session = await stripe.checkout.sessions.create({
+    const session = await getStripe().checkout.sessions.create({
       customer: customerId,
       mode: "subscription",
       line_items: [{ price: priceId, quantity: 1 }],
@@ -108,7 +120,7 @@ export async function stripeRoutes(fastify: FastifyInstance): Promise<void> {
     let event: Stripe.Event
     try {
       const rawBody = (request as unknown as { rawBody?: string }).rawBody || JSON.stringify(request.body)
-      event = stripe.webhooks.constructEvent(rawBody, sig, webhookSecret)
+      event = getStripe().webhooks.constructEvent(rawBody, sig, webhookSecret)
     } catch (err) {
       console.error("[stripe] Webhook signature verification failed:", (err as Error).message)
       return reply.code(400).send({ error: "Invalid signature" })
@@ -120,7 +132,7 @@ export async function stripeRoutes(fastify: FastifyInstance): Promise<void> {
         const userId = session.metadata?.userId
         const plan = session.metadata?.plan
         if (userId && plan && session.subscription) {
-          const subscription = await stripe.subscriptions.retrieve(session.subscription as string) as unknown as Record<string, unknown>
+          const subscription = await getStripe().subscriptions.retrieve(session.subscription as string) as unknown as Record<string, unknown>
           await updateSubscriptionFromStripe(userId, {
             plan,
             stripeCustomerId: session.customer as string,
@@ -146,7 +158,7 @@ export async function stripeRoutes(fastify: FastifyInstance): Promise<void> {
             const { user_id, plan } = subRow.rows[0]
             const planDef = PLANS[plan]
             if (planDef) {
-              const subscription = await stripe.subscriptions.retrieve(subId) as unknown as Record<string, unknown>
+              const subscription = await getStripe().subscriptions.retrieve(subId) as unknown as Record<string, unknown>
               await query(
                 `UPDATE subscriptions SET
                    credits_used_cents = 0,
@@ -224,12 +236,12 @@ export async function stripeRoutes(fastify: FastifyInstance): Promise<void> {
     const sessionId = (request.query as Record<string, string>).session_id
     if (sessionId) {
       try {
-        const session = await stripe.checkout.sessions.retrieve(sessionId)
+        const session = await getStripe().checkout.sessions.retrieve(sessionId)
         const userId = session.metadata?.userId
         const plan = session.metadata?.plan
 
         if (userId && plan && session.subscription) {
-          const subscription = await stripe.subscriptions.retrieve(session.subscription as string) as unknown as Record<string, unknown>
+          const subscription = await getStripe().subscriptions.retrieve(session.subscription as string) as unknown as Record<string, unknown>
           await updateSubscriptionFromStripe(userId, {
             plan,
             stripeCustomerId: session.customer as string,
