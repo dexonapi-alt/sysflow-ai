@@ -4,10 +4,11 @@ Managed by `memex-md`. Each plan is a design artifact written before implementat
 
 ## Plans
 
-- [2026-05-02-phase-7-background-jobs.md](2026-05-02-phase-7-background-jobs.md) — Phase 7: install commands (npm install, pip install, cargo build, etc.) auto-run in the background while the agent keeps working. New JobRegistry + check_jobs tool + bottom-of-screen status indicator. Hard caps: 3 concurrent jobs per run, 5min per-job timeout.  *(in-progress)*
+_None active._
 
 ## Applied
 
+- [applied/2026-05-02-phase-7-background-jobs.md](applied/2026-05-02-phase-7-background-jobs.md) — Phase 7 background jobs: `npm install` (and other install-class commands) auto-run in the background; new JobRegistry + check_jobs tool + bottom-of-screen status indicator; per-run cap of 3 concurrent jobs + 5-minute watchdog + 30-second wait-on-exit; 22 new test cases.  *(implemented 2026-05-02)*
 - [applied/2026-05-02-phase-6-scaffold-first.md](applied/2026-05-02-phase-6-scaffold-first.md) — Phase 6 scaffold-first: 22-stack registry under `server/src/scaffold/`; reasoning-driven recommender with auto-trust for HIGH-confidence single matches; post-scaffold guidance injection; COMMANDS prompt rewrite.  *(implemented 2026-05-02)*
 - [applied/2026-05-02-phase-5-pre-flight-reasoning.md](applied/2026-05-02-phase-5-pre-flight-reasoning.md) — Phase 5 reasoning system: four-trigger architecture (pre-flight / self-invoked via `reason` tool / on-error / on-completion) with four pipelines (implement / bug / summary / decision), Zod-validated discriminated envelope, sha256 cache, four-shape CLI rendering, 37 new test cases.  *(implemented 2026-05-02)*
 - [applied/2026-05-02-phase-4-productionisation.md](applied/2026-05-02-phase-4-productionisation.md) — Phase 4 productionisation: typed feature flag system, plan-mode toggle + slash command + status visibility, daily-rotated audit log with retention pruning, per-run CLI usage telemetry, vitest setup with ~30 cases across pure modules.  *(implemented 2026-05-02)*
