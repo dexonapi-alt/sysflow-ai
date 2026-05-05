@@ -1,4 +1,13 @@
+import chalk from "chalk"
 import { getAuthToken } from "./sysbase.js"
+import { pauseSpinner, resumeSpinner } from "../cli/spinner-control.js"
+
+/** Print a transient retry / network message without trampling the spinner. */
+function logRetry(message: string): void {
+  pauseSpinner()
+  console.log("  " + chalk.dim(message))
+  resumeSpinner()
+}
 
 const SERVER_URL = process.env.SYS_SERVER_URL || "http://localhost:4000"
 
@@ -87,7 +96,7 @@ export async function callServer(payload: Record<string, unknown>): Promise<Reco
         // API rate limit (429 but not billing) — retry with backoff
         if (res.status === 429 && attempt < MAX_SERVER_RETRIES) {
           const waitMs = SERVER_RETRY_BASE_MS * Math.pow(2, attempt)
-          console.error(`[server] 429 rate limit, retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_SERVER_RETRIES})`)
+          logRetry(`rate limited — retrying in ${Math.round(waitMs / 1000)}s (attempt ${attempt + 1}/${MAX_SERVER_RETRIES})`)
           await sleepMs(waitMs)
           continue
         }
@@ -107,7 +116,7 @@ export async function callServer(payload: Record<string, unknown>): Promise<Reco
       // Network/timeout errors — retry
       if (attempt < MAX_SERVER_RETRIES && !(err as Error).message?.includes("Server error")) {
         const waitMs = SERVER_RETRY_BASE_MS * Math.pow(2, attempt)
-        console.error(`[server] Request failed, retrying in ${waitMs}ms: ${(err as Error).message}`)
+        logRetry(`network error — retrying in ${Math.round(waitMs / 1000)}s`)
         await sleepMs(waitMs)
         continue
       }
@@ -158,7 +167,7 @@ export async function callServerStream(
         // API rate limit — retry with backoff
         if (res.status === 429 && attempt < MAX_SERVER_RETRIES) {
           const waitMs = SERVER_RETRY_BASE_MS * Math.pow(2, attempt)
-          console.error(`[stream] 429 rate limit, retrying in ${waitMs}ms (attempt ${attempt + 1}/${MAX_SERVER_RETRIES})`)
+          logRetry(`rate limited — retrying in ${Math.round(waitMs / 1000)}s (attempt ${attempt + 1}/${MAX_SERVER_RETRIES})`)
           await sleepMs(waitMs)
           continue
         }
@@ -237,7 +246,7 @@ export async function callServerStream(
       // Network/timeout errors — retry
       if (attempt < MAX_SERVER_RETRIES && !(err as Error).message?.includes("Server error")) {
         const waitMs = SERVER_RETRY_BASE_MS * Math.pow(2, attempt)
-        console.error(`[stream] Request failed, retrying in ${waitMs}ms: ${(err as Error).message}`)
+        logRetry(`network error — retrying in ${Math.round(waitMs / 1000)}s`)
         await sleepMs(waitMs)
         continue
       }

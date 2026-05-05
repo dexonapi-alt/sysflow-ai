@@ -5,8 +5,12 @@
  * whether the user wants the answer to persist.
  */
 
+import fs from "node:fs/promises"
+import path from "node:path"
 import { colors, BOX } from "./render.js"
 import { primaryPath, type PermissionDecision } from "../agent/permissions.js"
+import { computeDiff } from "../agent/diff.js"
+import { pauseSpinner, resumeSpinner } from "./spinner-control.js"
 
 export interface PromptArgs {
   tool: string
@@ -21,34 +25,185 @@ export interface PromptResult {
   pattern?: string
 }
 
+const BOX_WIDTH = 64
+const DIFF_PREVIEW_LINES = 12
+
 export async function askPermission({ tool, args }: PromptArgs): Promise<PromptResult> {
+  // Stop the agent's spinner so the modal paints on a clean line and isn't
+  // overdrawn by the next dot animation tick.
+  pauseSpinner()
+
   const target = primaryPath(tool, args) ?? "(no path)"
 
   console.log("")
-  console.log("  " + colors.warning(BOX.tl + BOX.h.repeat(2)) + colors.warning(" PERMISSION ") + colors.warning(BOX.h.repeat(34) + BOX.tr))
+  drawHeader(" PERMISSION ", BOX_WIDTH)
   console.log("  " + colors.warning(BOX.v) + " " + colors.bright.bold(tool) + " " + colors.muted(target))
+
+  // Inline diff preview for write_file / edit_file. Lets the user see the
+  // exact +/- lines before granting permission instead of clicking
+  // [Tab → diff] AFTER the fact.
+  if (tool === "write_file" || tool === "edit_file") {
+    const preview = await renderDiffInline(args)
+    if (preview.length > 0) {
+      console.log("  " + colors.warning(BOX.v))
+      for (const line of preview) console.log(line)
+    }
+  }
+
   console.log("  " + colors.warning(BOX.v))
   console.log("  " + colors.warning(BOX.v) + "  " + colors.success("[a]") + " allow once")
   console.log("  " + colors.warning(BOX.v) + "  " + colors.success("[A]") + " allow always for this " + colors.muted(`(${tool} on ${target})`))
   console.log("  " + colors.warning(BOX.v) + "  " + colors.error("[d]") + " deny once")
   console.log("  " + colors.warning(BOX.v) + "  " + colors.error("[D]") + " deny always")
-  console.log("  " + colors.warning(BOX.bl + BOX.h.repeat(48) + BOX.br))
+  console.log("  " + colors.warning(BOX.bl + BOX.h.repeat(BOX_WIDTH) + BOX.br))
   process.stdout.write("  > ")
 
   const key = await readSingleKey()
-  process.stdout.write(key + "\n")
+  // Echo the chosen key + visual gap before the agent stream resumes.
+  process.stdout.write(key + "\n\n")
 
+  let result: PromptResult
   switch (key) {
     case "a":
-      return { decision: "allow", persist: false }
+      result = { decision: "allow", persist: false }
+      break
     case "A":
-      return { decision: "allow", persist: true, pattern: target }
+      result = { decision: "allow", persist: true, pattern: target }
+      break
     case "D":
-      return { decision: "deny", persist: true, pattern: target }
+      result = { decision: "deny", persist: true, pattern: target }
+      break
     case "d":
     default:
-      return { decision: "deny", persist: false }
+      result = { decision: "deny", persist: false }
+      break
   }
+
+  resumeSpinner()
+  return result
+}
+
+function drawHeader(label: string, width: number): void {
+  const labelWidth = label.length
+  const left = 2
+  const right = Math.max(0, width - left - labelWidth)
+  console.log(
+    "  " +
+    colors.warning(BOX.tl + BOX.h.repeat(left)) +
+    colors.warning(label) +
+    colors.warning(BOX.h.repeat(right) + BOX.tr),
+  )
+}
+
+/**
+ * Build a few lines of `+ added / - removed` preview for a write/edit. Returns
+ * an array of pre-formatted lines (already prefixed with the box `│ `). Empty
+ * array means "no diff to show" (e.g., couldn't read source, or no change).
+ */
+async function renderDiffInline(args: Record<string, unknown>): Promise<string[]> {
+  const filePath = args.path as string | undefined
+  if (!filePath) return []
+
+  const newContent = await resolveNewContent(args)
+  if (newContent == null) return []
+
+  let oldContent: string | null = null
+  try {
+    const abs = path.isAbsolute(filePath) ? filePath : path.resolve(process.cwd(), filePath)
+    oldContent = await fs.readFile(abs, "utf8")
+  } catch {
+    oldContent = null  // brand-new file
+  }
+
+  const diff = computeDiff(oldContent, newContent, 1)
+  if (!diff.changed) return []
+
+  const lines: string[] = []
+  const verticalBar = "  " + colors.warning(BOX.v) + " "
+  const summary = formatSummary(diff.added, diff.removed)
+  lines.push(verticalBar + colors.muted(`diff: ${filePath}`) + "  " + summary)
+
+  let printed = 0
+  let truncated = 0
+  for (const hunk of diff.hunks) {
+    if (printed >= DIFF_PREVIEW_LINES) {
+      truncated += hunk.lines.filter((l) => l.type !== "context").length
+      continue
+    }
+    for (const line of hunk.lines) {
+      if (printed >= DIFF_PREVIEW_LINES) {
+        if (line.type !== "context") truncated += 1
+        continue
+      }
+      if (line.type === "add") {
+        lines.push(verticalBar + colors.success("+ ") + colors.success(truncate(line.content, BOX_WIDTH - 4)))
+        printed += 1
+      } else if (line.type === "remove") {
+        lines.push(verticalBar + colors.error("- ") + colors.error(truncate(line.content, BOX_WIDTH - 4)))
+        printed += 1
+      }
+      // skip context lines in the inline preview to keep it tight
+    }
+  }
+  if (truncated > 0) {
+    lines.push(verticalBar + colors.muted(`… ${truncated} more change line(s) hidden`))
+  }
+  return lines
+}
+
+/**
+ * Pull the would-be new file content out of the tool args. The shape varies:
+ *   - write_file: { path, content }
+ *   - edit_file (search/replace): { path, search, replace }
+ *   - edit_file (line-range): { path, line_start, line_end, content }
+ *   - edit_file (insert_at): { path, insert_at, content }
+ *
+ * For write_file we have full content. For edit_file variants we synthesise
+ * the post-edit content from the on-disk file + the patch so the diff is
+ * accurate. Returns null when we can't reconstruct (caller skips the preview).
+ */
+async function resolveNewContent(args: Record<string, unknown>): Promise<string | null> {
+  if (typeof args.content === "string" && args.search === undefined && args.line_start === undefined && args.insert_at === undefined) {
+    return args.content as string
+  }
+  const filePath = args.path as string
+  let current = ""
+  try {
+    const abs = path.isAbsolute(filePath) ? filePath : path.resolve(process.cwd(), filePath)
+    current = await fs.readFile(abs, "utf8")
+  } catch {
+    return null
+  }
+
+  if (typeof args.search === "string" && typeof args.replace === "string") {
+    return current.split(args.search).join(args.replace)
+  }
+
+  const lines = current.split("\n")
+  if (typeof args.line_start === "number") {
+    const start = (args.line_start as number) - 1
+    const end = ((args.line_end as number) || (args.line_start as number)) - 1
+    const replacement = (args.content as string || "").split("\n")
+    return [...lines.slice(0, start), ...replacement, ...lines.slice(end + 1)].join("\n")
+  }
+  if (typeof args.insert_at === "number") {
+    const at = (args.insert_at as number) - 1
+    const insert = (args.content as string || "").split("\n")
+    return [...lines.slice(0, at), ...insert, ...lines.slice(at)].join("\n")
+  }
+  return null
+}
+
+function formatSummary(added: number, removed: number): string {
+  const parts: string[] = []
+  if (added > 0) parts.push(colors.success(`+${added}`))
+  if (removed > 0) parts.push(colors.error(`-${removed}`))
+  return parts.join(" ")
+}
+
+function truncate(s: string, width: number): string {
+  if (s.length <= width) return s
+  return s.slice(0, Math.max(0, width - 1)) + "…"
 }
 
 /**
@@ -73,7 +228,7 @@ function readSingleKey(): Promise<string> {
     const onData = (chunk: string | Buffer): void => {
       const s = typeof chunk === "string" ? chunk : chunk.toString("utf8")
       // Ctrl-C: surface as deny + signal upstream so the run can be torn down.
-      if (s === "") {
+      if (s === "") {
         cleanup()
         process.kill(process.pid, "SIGINT")
         resolve("d")

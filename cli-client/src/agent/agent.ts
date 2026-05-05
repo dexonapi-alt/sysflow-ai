@@ -34,6 +34,7 @@ import { recordRunSummary } from "./usage-log.js"
 import { estimateTokens as cliEstimateTokens } from "./token-estimate.js"
 import { startJobStatusBar, stopJobStatusBar } from "../cli/job-status.js"
 import { list as listBackgroundJobs, cleanupRun as cleanupBackgroundJobs } from "./background-jobs.js"
+import { registerSpinner, unregisterSpinner } from "../cli/spinner-control.js"
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -116,6 +117,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
     spinner: "dots",
     color: "magenta"
   }).start()
+  registerSpinner(spinner)
 
   const serverPayload = {
     type: "user_message",
@@ -240,6 +242,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       backgroundJobsRun: bgJobsRun,
       backgroundJobsFailed: bgJobsFailed,
     })
+    unregisterSpinner()
   }
 
   while (true) {

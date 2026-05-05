@@ -5,7 +5,11 @@ import { ensureSysbase, getSelectedModel, setSelectedModel, getAuthUser, getActi
 import { runAgent } from "../agent/agent.js"
 import { parseUiLine } from "./parser.js"
 
-const PROMPT = chalk.blue("  | ")
+// Plain ASCII prompt — coloured prompts (ANSI escape codes) confuse
+// readline's column-width math on Windows, which redraws the prompt
+// when input wraps to a second visual row and produces "  | foo  | foo"
+// stutter. Keeping the prompt narrow + plain dodges that.
+const PROMPT = "  > "
 
 export async function startUi(): Promise<void> {
   await ensureSysbase()
