@@ -52,15 +52,16 @@ describe("checkPermissions", () => {
     expect(checkPermissions({ tool: "list_directory", args: { path: "." }, mode: "default", rules }).decision).toBe("allow")
   })
 
-  it("write tools default to ask in default mode", () => {
-    expect(checkPermissions({ tool: "write_file", args: { path: "x", content: "" }, mode: "default", rules }).decision).toBe("ask")
+  it("authoring tools default to allow; shell + destructive default to ask", () => {
+    expect(checkPermissions({ tool: "write_file", args: { path: "x", content: "" }, mode: "default", rules }).decision).toBe("allow")
+    expect(checkPermissions({ tool: "edit_file", args: { path: "x" }, mode: "default", rules }).decision).toBe("allow")
     expect(checkPermissions({ tool: "run_command", args: { command: "ls" }, mode: "default", rules }).decision).toBe("ask")
+    expect(checkPermissions({ tool: "delete_file", args: { path: "x" }, mode: "default", rules }).decision).toBe("ask")
   })
 
-  it("auto mode escalates read tools to allow", () => {
+  it("auto mode keeps read-tools allowed and authoring tools allowed", () => {
     expect(checkPermissions({ tool: "read_file", args: { path: "x" }, mode: "auto", rules }).decision).toBe("allow")
-    // Write tools still ask in auto mode (user must confirm once per pattern).
-    expect(checkPermissions({ tool: "write_file", args: { path: "x", content: "" }, mode: "auto", rules }).decision).toBe("ask")
+    expect(checkPermissions({ tool: "write_file", args: { path: "x", content: "" }, mode: "auto", rules }).decision).toBe("allow")
   })
 
   it("rules override defaults; longest pattern wins", () => {

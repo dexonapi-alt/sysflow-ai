@@ -25,7 +25,7 @@ import {
 import { runVerification } from "./verifier.js"
 import { createSnapshot, cleanupSnapshot, rollback, getSnapshot, detectGit } from "./git.js"
 import { lintFile, lintFiles, displayLintErrors, resetTscCache } from "./lint.js"
-import { partitionToolCalls, getToolMeta } from "./tool-meta.js"
+import { partitionToolCalls, getToolMeta, groupForParallelExecution } from "./tool-meta.js"
 import { validateToolInput } from "./validate-tool-input.js"
 import { checkPermissions, loadRules, saveRule, lookupAnswer, rememberAnswer, primaryPath, type Rule } from "./permissions.js"
 import { getSysbasePath, getPermissionMode } from "../lib/sysbase.js"
@@ -454,12 +454,32 @@ export async function executeToolsBatch(
       .filter(Boolean)
     if (writePaths.length > 0) setBatchWritePaths(writePaths)
 
-    const settled = await Promise.allSettled(
-      parallelTools.map(async (tc) => {
-        const result = await executeToolLocally(tc.tool, tc.args, runId)
-        return { id: tc.id, tool: tc.tool, result }
+    // Group same-path edit/write ops so they run sequentially within their
+    // group while different-path ops still parallelise. Without this, two
+    // edit_file calls targeting the same file race and one of them silently
+    // loses its changes.
+    const groups = groupForParallelExecution(parallelTools)
+    const settledGroups = await Promise.allSettled(
+      groups.map(async (group) => {
+        const groupResults: Array<{ id: string; tool: string; result: Record<string, unknown> }> = []
+        for (const tc of group) {
+          const result = await executeToolLocally(tc.tool, tc.args, runId)
+          groupResults.push({ id: tc.id, tool: tc.tool, result })
+        }
+        return groupResults
       })
     )
+
+    // Flatten group results into a flat list, preserving the original tool
+    // order via the {id} field that downstream code dedupes / matches on.
+    const settled: Array<PromiseSettledResult<{ id: string; tool: string; result: Record<string, unknown> }>> = []
+    for (const g of settledGroups) {
+      if (g.status === "fulfilled") {
+        for (const r of g.value) settled.push({ status: "fulfilled", value: r })
+      } else {
+        settled.push({ status: "rejected", reason: g.reason })
+      }
+    }
 
     if (writePaths.length > 0) clearBatchWritePaths()
 
