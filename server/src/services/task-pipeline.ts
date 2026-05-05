@@ -32,6 +32,14 @@ interface Pipeline {
 
 const pipelines = new Map<string, Pipeline>()
 
+// Runs whose intent (summary / simple) means we deliberately don't show a
+// task pipeline. Set on the initial turn in user-message.ts; honoured by
+// follow-up turns in tool-result.ts so the pipeline doesn't sneak in later.
+const skippedRuns = new Set<string>()
+export function markPipelineSkipped(runId: string): void { skippedRuns.add(runId) }
+export function isPipelineSkipped(runId: string): boolean { return skippedRuns.has(runId) }
+export function clearPipelineSkip(runId: string): void { skippedRuns.delete(runId) }
+
 // ─── Create from AI Plan ───
 
 export function createPipelineFromAiPlan(
@@ -269,6 +277,7 @@ export function getPipeline(runId: string): Pipeline | null {
 
 export function clearPipeline(runId: string): void {
   pipelines.delete(runId)
+  skippedRuns.delete(runId)
 }
 
 export function hasPipeline(runId: string): boolean {
