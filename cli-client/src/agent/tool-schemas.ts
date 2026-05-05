@@ -90,6 +90,11 @@ export const searchFilesSchema = z.object({
 export const runCommandSchema = z.object({
   command: z.string().min(1, "command must be non-empty"),
   cwd: z.string().min(1).optional(),
+  /** Phase 7: explicit override for the auto-background routing.
+   *  true  → start in background no matter the command shape (returns jobId immediately).
+   *  false → run synchronously even for install commands (use only when you NEED the output).
+   *  omitted → install patterns auto-background; everything else is synchronous. */
+  background: z.boolean().optional(),
 }).strict()
 
 export const webSearchSchema = z.object({
@@ -115,6 +120,15 @@ export const reasonSchema = z.object({
   kind: z.enum(["bug", "implement", "choice", "gotcha"]).optional(),
 }).strict()
 
+/**
+ * Phase 7: poll the JobRegistry for background-job status.
+ * Without jobId → list all jobs for this run (running first).
+ * With jobId    → return that one job's current state.
+ */
+export const checkJobsSchema = z.object({
+  jobId: z.string().min(1).optional(),
+}).strict()
+
 export const TOOL_SCHEMAS: Record<string, z.ZodTypeAny> = {
   read_file: readFileSchema,
   batch_read: batchReadSchema,
@@ -131,6 +145,7 @@ export const TOOL_SCHEMAS: Record<string, z.ZodTypeAny> = {
   web_search: webSearchSchema,
   batch_write: batchWriteSchema,
   reason: reasonSchema,
+  check_jobs: checkJobsSchema,
 }
 
 export type ToolName = keyof typeof TOOL_SCHEMAS

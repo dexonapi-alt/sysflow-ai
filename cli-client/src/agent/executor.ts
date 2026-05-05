@@ -182,6 +182,22 @@ async function dispatch(tool: string, args: Record<string, unknown>, runId?: str
     return await callReasonEndpoint(args, runId)
   }
 
+  // Phase 7: in-process JobRegistry poll. Never goes through the server.
+  if (tool === "check_jobs") {
+    const { poll, list } = await import("./background-jobs.js")
+    const targetRun = runId ?? "no-run"
+    if (typeof args.jobId === "string" && args.jobId) {
+      const job = poll(args.jobId)
+      return job ? { ok: true, job } : { ok: false, error: `unknown jobId: ${args.jobId}` }
+    }
+    const jobs = list(targetRun)
+    return {
+      ok: true,
+      jobs,
+      summary: `${jobs.length} job(s); ${jobs.filter((j) => j.status === "running").length} running, ${jobs.filter((j) => j.status === "done").length} done, ${jobs.filter((j) => j.status === "failed").length} failed`,
+    }
+  }
+
   switch (tool) {
     case "list_directory": {
       const entries = await listDirectoryTool(args.path as string)
@@ -299,7 +315,9 @@ async function dispatch(tool: string, args: Record<string, unknown>, runId?: str
         return { error: `run_command requires a "command" argument but received undefined.`, success: false }
       }
       const cmdCwd = (args.cwd as string) || process.cwd()
-      const output = await runCommandTool(cmd, cmdCwd)
+      // Phase 7: thread runId + background flag through so install commands can background.
+      const background = typeof args.background === "boolean" ? args.background : undefined
+      const output = await runCommandTool(cmd, cmdCwd, { runId, background, label: cmd.slice(0, 60) })
 
       // Post-scaffold verification: if command timed out or was interactive,
       // check if the expected output directory was created

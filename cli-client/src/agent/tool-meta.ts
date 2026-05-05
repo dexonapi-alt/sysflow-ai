@@ -36,6 +36,8 @@ export const TOOL_META: Record<string, ToolMeta> = {
   batch_write:      { isConcurrencySafe: true,  isReadOnly: false, abortsSiblingsOnError: false, defaultPermission: "ask" },
   // Phase 5: pure thinking — no permission prompt, no side effects.
   reason:           { isConcurrencySafe: true,  isReadOnly: true,  abortsSiblingsOnError: false, defaultPermission: "allow" },
+  // Phase 7: pure local poll of the in-memory JobRegistry.
+  check_jobs:       { isConcurrencySafe: true,  isReadOnly: true,  abortsSiblingsOnError: false, defaultPermission: "allow" },
 }
 
 const DEFAULT_META: ToolMeta = {
