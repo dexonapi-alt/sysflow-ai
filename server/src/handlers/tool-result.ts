@@ -17,7 +17,7 @@ import { actionPlanner } from "../services/action-planner.js"
 import { isFrontendTask } from "../knowledge/frontend-patterns.js"
 import { ingestToolResult, clearRunContext, buildWorkingContextString } from "../services/context-manager.js"
 import { updatePipelineProgress, completePipeline, clearPipeline, getPipeline, hasPipeline, pipelineToTaskMeta, createPipelineFromAiPlan, createFallbackPipeline } from "../services/task-pipeline.js"
-import { getScaffoldChoice, storeScaffoldChoice, parseScaffoldResponse, clearScaffoldState } from "../services/scaffold-options.js"
+import { getScaffoldChoice, storeScaffoldChoice, parseScaffoldResponse, clearScaffoldState } from "../scaffold/index.js"
 import { getPendingError, clearPendingError, setPendingError, buildFixInstructions, setPendingFileContent, hasPendingErrors, popNextPendingError } from "../services/error-autofix.js"
 import { applyToolResultBudget, estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import { classifyToolError, classifyToolErrorFromResult } from "../services/tool-error-classifier.js"
@@ -105,7 +105,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     // Check if this looks like a scaffold choice response (number or keyword)
     if (/^\s*[1-9]\s*$/.test(userAnswer.trim()) || /\b(vite|next|nest|manual|create)\b/i.test(userAnswer)) {
       // Import scaffold options dynamically to parse the choice
-      const { parseScaffoldResponse, detectScaffoldingNeed } = await import("../services/scaffold-options.js")
+      const { parseScaffoldResponse, detectScaffoldingNeed } = await import("../scaffold/index.js")
       // We need the original prompt to regenerate options
       const options = detectScaffoldingNeed(run.content, []) // empty tree since we already confirmed scaffolding is needed
       if (options) {

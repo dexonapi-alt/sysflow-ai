@@ -15,7 +15,7 @@ import { accumulateFrontendContent } from "../services/frontend-quality-guard.js
 import { detectErrorForSearch, buildErrorSearchOverride } from "../services/setup-intelligence.js"
 import { detectErrorContext, setPendingError, detectAllErrors, setPendingErrorQueue } from "../services/error-autofix.js"
 import { createPipelineFromAiPlan, createFallbackPipeline, pipelineToTaskMeta } from "../services/task-pipeline.js"
-import { detectScaffoldingNeed, buildScaffoldConfirmationMessage } from "../services/scaffold-options.js"
+import { detectScaffoldingNeed, buildScaffoldConfirmationMessage } from "../scaffold/index.js"
 import { estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import { runReasoning } from "../reasoning/task-reasoner.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
