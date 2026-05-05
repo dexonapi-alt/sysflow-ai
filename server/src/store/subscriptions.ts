@@ -60,6 +60,14 @@ interface UsageCheckResult {
 }
 
 export async function checkUsageAllowed(userId: string | null | undefined): Promise<UsageCheckResult> {
+  // Self-host escape hatch. When the operator is running their own server
+  // (the only case where they own the AI keys + the database), the
+  // 10-prompts-a-day Free-plan cap is just dev friction. Setting
+  // SYSFLOW_BILLING_DISABLED=true in server/.env bypasses the check.
+  // Default off so the SaaS deployment continues to enforce the cap.
+  if (process.env.SYSFLOW_BILLING_DISABLED === "true") {
+    return { allowed: true, remaining: null, plan: "self-hosted" }
+  }
   if (!userId) {
     return { allowed: true, remaining: null }
   }
