@@ -21,6 +21,10 @@ export interface RunSummary {
   estimatedOutputTokens: number
   /** Terminal reason from the state machine (e.g. 'completed', 'failed', 'session_expired'). */
   terminalReason: string
+  /** Phase 7: number of background jobs started during this run. */
+  backgroundJobsRun?: number
+  /** Phase 7: number of background jobs that ended in 'failed' status. */
+  backgroundJobsFailed?: number
 }
 
 const PROMPT_PREVIEW_CHARS = 200
@@ -40,6 +44,8 @@ export async function recordRunSummary(sysbasePath: string | undefined | null, s
     estimatedInputTokens: summary.estimatedInputTokens,
     estimatedOutputTokens: summary.estimatedOutputTokens,
     terminalReason: summary.terminalReason,
+    backgroundJobsRun: summary.backgroundJobsRun ?? 0,
+    backgroundJobsFailed: summary.backgroundJobsFailed ?? 0,
   }
   try {
     await fs.appendFile(file, JSON.stringify(entry) + "\n", "utf8")

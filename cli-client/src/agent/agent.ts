@@ -32,6 +32,8 @@ import { renderReasoningBrief, renderDecisionBrief } from "../cli/reasoning-disp
 import { classifyResponse, makeRetryBudget, noteSuccess, type RetryBudget } from "./state-machine.js"
 import { recordRunSummary } from "./usage-log.js"
 import { estimateTokens as cliEstimateTokens } from "./token-estimate.js"
+import { startJobStatusBar, stopJobStatusBar } from "../cli/job-status.js"
+import { list as listBackgroundJobs, cleanupRun as cleanupBackgroundJobs } from "./background-jobs.js"
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -202,7 +204,28 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   let outputTokens = 0
 
   const cleanupDiffListener = startDiffKeyListener(spinner)
+
+  // Phase 7: pinned bottom-row indicator for background jobs (e.g. npm install).
+  if (currentRunId) startJobStatusBar(currentRunId)
+
   const recordTelemetry = async (terminalReason: string): Promise<void> => {
+    // Phase 7: wait up to 30s for outstanding background jobs, then SIGTERM the rest.
+    let bgJobsRun = 0
+    let bgJobsFailed = 0
+    if (currentRunId) {
+      const allJobs = listBackgroundJobs(currentRunId)
+      bgJobsRun = allJobs.length
+      try {
+        const cleanupResult = await cleanupBackgroundJobs(currentRunId)
+        // Re-poll to get final statuses after cleanup.
+        const finalJobs = listBackgroundJobs(currentRunId)
+        bgJobsFailed = finalJobs.filter((j) => j.status === "failed").length
+        if (cleanupResult.aborted > 0) {
+          console.log(colors.warning(`  ⚠ ${cleanupResult.aborted} background job(s) aborted on exit (exceeded 30s wait window)`))
+        }
+      } catch { /* best-effort */ }
+      stopJobStatusBar()
+    }
     await recordRunSummary(getSysbasePath(), {
       runId: currentRunId || null,
       prompt: cleanPrompt,
@@ -214,6 +237,8 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       estimatedInputTokens: inputTokens,
       estimatedOutputTokens: outputTokens,
       terminalReason,
+      backgroundJobsRun: bgJobsRun,
+      backgroundJobsFailed: bgJobsFailed,
     })
   }
 
