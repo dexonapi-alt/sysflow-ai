@@ -143,6 +143,24 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     updatePipelineProgress(body.runId, body.tool, body.result)
   }
 
+  // ─── Phase 6: post-scaffold guidance — when a scaffolder run_command just succeeded,
+  // inject a follow-up so the agent knows not to recreate the generated files and to install deps. ───
+  if (!isBatch && body.tool === "run_command") {
+    const cmd = (body.result.command as string) || ""
+    const success = body.result.success !== false && !body.result.error && !body.result.skipped
+    if (success && looksLikeScaffoldCommand(cmd)) {
+      const projectName = extractScaffoldedDir(cmd) || "the new project"
+      actionPlanner.injectContext(body.runId,
+        `[POST-SCAFFOLD] The scaffolder finished. Files are in ./${projectName}.\n` +
+        `1. DO NOT recreate package.json, tsconfig, vite.config, or any file the scaffolder produced.\n` +
+        `2. Read the generated package.json first to see the actual stack + dep versions.\n` +
+        `3. Run \`cd ${projectName} && npm install\` (or pnpm/yarn equivalent if the scaffolder used a different manager). The permission system will ask the user once.\n` +
+        `4. Then customise the scaffold for the user's actual task — edit src files, don't recreate them.`
+      )
+      console.log(`[scaffold] post-scaffold guidance injected for ${projectName}`)
+    }
+  }
+
   // ─── Process verification results from client-side auto-verify ───
   if (isBatch) {
     for (const tr of body.toolResults!) {
@@ -696,6 +714,41 @@ interface RunLog {
   actions: Array<Record<string, unknown>>
   filesModified: string[]
   errors: Array<{ tool: string; error: string; actionIndex: number }>
+}
+
+// ─── Scaffold-command pattern detection ───
+const SCAFFOLD_COMMAND_PATTERNS: RegExp[] = [
+  /\bnpm\s+create\s+/i,
+  /\bnpx\s+(?:--yes\s+)?create-/i,
+  /\bnpx\s+(?:--yes\s+)?(?:@nestjs\/cli|@angular\/cli|nuxi|@quick-start\/electron)\b/i,
+  /\bdjango-admin\s+startproject\b/i,
+  /\bcomposer\s+create-project\b/i,
+  /\brails\s+new\b/i,
+  /\bbun\s+init\b/i,
+]
+
+function looksLikeScaffoldCommand(cmd: string): boolean {
+  if (!cmd) return false
+  return SCAFFOLD_COMMAND_PATTERNS.some((re) => re.test(cmd))
+}
+
+/** Extract the trailing project-name argument from a scaffolder command. */
+function extractScaffoldedDir(cmd: string): string | null {
+  // Skip the command tokens; find the first non-flag token after a known scaffolder verb.
+  const tokens = cmd.split(/\s+/).filter(Boolean)
+  let pastVerb = false
+  for (const t of tokens) {
+    if (!pastVerb) {
+      if (/^(create|new|init|startproject|create-project)$/i.test(t) || /^create-/i.test(t)) {
+        pastVerb = true
+      }
+      continue
+    }
+    if (t.startsWith("-")) continue       // flag
+    if (t === "--") continue
+    if (/^[a-zA-Z][a-zA-Z0-9._-]+$/.test(t)) return t
+  }
+  return null
 }
 
 async function autoSaveContext(run: RunRecord, runLog: RunLog, response: ClientResponse): Promise<void> {
