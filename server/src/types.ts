@@ -145,6 +145,8 @@ export interface ClientResponse {
   error?: string
   /** Stable code for the CLI; `error` remains the human-readable string. */
   errorCode?: ServerErrorCode
+  /** Phase 5: optional reasoning brief produced by the pre-flight / on-error / on-completion / self-invoked triggers. */
+  reasoningBrief?: unknown
 }
 
 // ─── Database ───
