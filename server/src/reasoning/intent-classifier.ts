@@ -43,8 +43,17 @@ const SUMMARY_PATTERNS: RegExp[] = [
   /\b(what\s+does|what\s+is)\s+(this|the|that)\s+(\S+\s+)?(file|module|function|class|component|service|repo|project|code|tool|hook|registry|store|module)/i,
   /\bwalk\s+me\s+through\b/i,
   /^\s*(tldr|tl;dr|tl\s+dr)\b/i,
-  /\bgive\s+me\s+(a|an)\s+(summary|overview|breakdown)/i,
+  /\bgive\s+me\s+(a|an)\s+(summary|overview|breakdown|tour)/i,
   /^\s*how\s+does\s+\S+\s+work\s*\??\s*$/i,
+  // "what's on / in / inside this repo / project / dir" — a tour request, not
+  // an implementation request. Match "what's", "whats", and "what is".
+  /^\s*what(?:'?s|s|\s+is)\s+(on|in|inside|under|at)\s+(this|the|my|our)\b/i,
+  // "tell me about ...", "show me what ..."
+  /^\s*tell\s+me\s+about\b/i,
+  /^\s*show\s+me\s+what\b/i,
+  // "any X here", "what kind of X"
+  /^\s*what\s+kind\s+of\b/i,
+  /^\s*anything\s+(special|interesting|notable)\s+(about|in)\b/i,
 ]
 
 export function classifyIntent(userMessage: string): IntentHint {
