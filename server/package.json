@@ -22,7 +22,8 @@
     "jsonwebtoken": "^9.0.3",
     "node-pg-migrate": "^8.0.4",
     "pg": "^8.20.0",
-    "stripe": "^20.4.1"
+    "stripe": "^20.4.1",
+    "zod": "^3.23.8"
   },
   "keywords": [
     "ai",
