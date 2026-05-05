@@ -242,6 +242,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   let lastDisplayedReasoning: string | null = null
   const currentRunId = (response.runId as string) || ""
   let lastPipelineStepId: string | null = null
+  let prevTool: string | null = null  // for read-coalescing in handleNeedsTool
 
   // ─── Usage telemetry: tally counters during the run ───
   const startedAtMs = Date.now()
@@ -433,7 +434,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         const result = await handleNeedsTool(
           response,
           spinner,
-          { hasReasoning, lastDisplayedAction, lastDisplayedReasoning, currentRunId, taskShown, taskSteps, completedSteps, lastPipelineStepId, budget },
+          { hasReasoning, lastDisplayedAction, lastDisplayedReasoning, currentRunId, taskShown, taskSteps, completedSteps, lastPipelineStepId, prevTool, budget },
           makeServerCall,
         )
         response = result.response
@@ -443,6 +444,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         lastDisplayedAction = result.lastDisplayedAction
         lastDisplayedReasoning = result.lastDisplayedReasoning
         lastPipelineStepId = result.lastPipelineStepId
+        prevTool = result.toolThisTurn
         noteSuccess(budget)
         break
       }
@@ -671,6 +673,8 @@ interface NeedsToolCtx {
   taskSteps: Array<{ id: string; label: string; status?: string }>
   completedSteps: Set<string>
   lastPipelineStepId: string | null
+  /** Tool name from the previous turn — lets us coalesce consecutive reads. */
+  prevTool: string | null
   budget: RetryBudget
 }
 
@@ -682,6 +686,8 @@ interface NeedsToolResult {
   lastDisplayedAction: string | null
   lastDisplayedReasoning: string | null
   lastPipelineStepId: string | null
+  /** What tool ran this turn — caller threads it back into ctx.prevTool. */
+  toolThisTurn: string | null
 }
 
 async function handleNeedsTool(
@@ -772,12 +778,12 @@ async function handleNeedsTool(
           tool: "_recovery",
           result: { error: (batchError as Error).message, success: false }
         })
-        return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId }
+        return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null }
       }
       console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.success("done")}`)
       console.log("")
       spinner.start(colors.muted("thinking..."))
-      return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId }
+      return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null }
     }
 
     spinner.start(colors.muted(`  executing ${toolCalls!.length} tools...`))
@@ -816,7 +822,7 @@ async function handleNeedsTool(
         result: { error: (batchError as Error).message, success: false }
       })
     }
-    return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId }
+    return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null }
   }
 
   // ── SINGLE TOOL PATH ──
@@ -837,13 +843,20 @@ async function handleNeedsTool(
 
   await sleep(hasReasoning ? 200 : 100 + Math.floor(Math.random() * 150))
 
+  // Coalesce consecutive read_file calls: when the agent reads files one at
+  // a time across turns, the per-turn reasoning narration ("I have read X.
+  // Now I need to read Y.") is pure noise — the user already sees the
+  // ▸ read X line. Skip the narration AND the heavy content preview when
+  // both this turn AND the previous turn were reads.
+  const isConsecutiveRead = response.tool === "read_file" && ctx.prevTool === "read_file"
+
   if (isHiddenStep(response.tool as string)) {
     spinner.text = colors.muted("scanning directory...")
   } else if (isDuplicate) {
     spinner.stop()
     spinner.start(colors.muted("thinking..."))
   } else {
-    if (hasReasoning && response.reasoning && response.reasoning !== lastDisplayedReasoning) {
+    if (hasReasoning && response.reasoning && response.reasoning !== lastDisplayedReasoning && !isConsecutiveRead) {
       lastDisplayedReasoning = response.reasoning as string
       spinner.stop()
       await revealReasoning(response.reasoning as string)
@@ -919,7 +932,8 @@ async function handleNeedsTool(
     })
 
     // ─── Tool-result preview: replace the silent spinner gap with a one-liner ───
-    if (!isHiddenStep(currentTool)) {
+    // Skip the preview on consecutive reads — the ▸ read X line is enough.
+    if (!isHiddenStep(currentTool) && !isConsecutiveRead) {
       const toolResult = response.lastToolResult as Record<string, unknown> | undefined
       const preview = renderToolResultPreview({ tool: currentTool, result: toolResult })
       if (preview) {
@@ -992,5 +1006,5 @@ async function handleNeedsTool(
     })
   }
 
-  return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId }
+  return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null }
 }
