@@ -53,14 +53,23 @@ export interface ScaffolderEntry {
 }
 
 export const SCAFFOLDER_REGISTRY: ScaffolderEntry[] = [
-  // ─── Vite-family ───
+  // ─── Vite-family — auto-trust DISABLED ───
+  // These scaffolds are 5-7 small files (package.json, vite.config.ts,
+  // tsconfig.json, index.html, src/main.tsx, src/App.tsx). Hand-writing
+  // is FASTER than spawning `npm create vite`, gives the agent full
+  // control over each file, no scaffolder defaults to delete (default
+  // README/favicon/eslint config), no waiting for create-vite to
+  // download itself. The recommender still detects the stack so the
+  // multi-candidate flow works if the agent or user wants to scaffold
+  // anyway, but auto-trust is off — the main agent loop takes over and
+  // writes the files directly.
   {
     stackKey: "react-vite",
     displayName: "React + Vite (TypeScript)",
     command: "npm create vite@latest {name} -- --template react-ts",
     matchTerms: ["react", "vite", "react+vite", "vite-react"],
     postScaffoldInstall: "npm",
-    autoTrustForHighConfidence: true,
+    autoTrustForHighConfidence: false,
   },
   {
     stackKey: "vue-vite",
@@ -68,7 +77,7 @@ export const SCAFFOLDER_REGISTRY: ScaffolderEntry[] = [
     command: "npm create vite@latest {name} -- --template vue-ts",
     matchTerms: ["vue", "vue.js", "vuejs"],
     postScaffoldInstall: "npm",
-    autoTrustForHighConfidence: true,
+    autoTrustForHighConfidence: false,
   },
   {
     stackKey: "svelte-vite",
@@ -76,7 +85,7 @@ export const SCAFFOLDER_REGISTRY: ScaffolderEntry[] = [
     command: "npm create vite@latest {name} -- --template svelte-ts",
     matchTerms: ["svelte"],
     postScaffoldInstall: "npm",
-    autoTrustForHighConfidence: true,
+    autoTrustForHighConfidence: false,
     postScaffoldNote: "If user mentioned routing or full-stack, SvelteKit may be a better fit — check the brief.",
   },
   {
@@ -85,7 +94,7 @@ export const SCAFFOLDER_REGISTRY: ScaffolderEntry[] = [
     command: "npm create vite@latest {name} -- --template solid-ts",
     matchTerms: ["solid", "solidjs", "solid.js"],
     postScaffoldInstall: "npm",
-    autoTrustForHighConfidence: true,
+    autoTrustForHighConfidence: false,
   },
   {
     stackKey: "preact-vite",
@@ -93,7 +102,7 @@ export const SCAFFOLDER_REGISTRY: ScaffolderEntry[] = [
     command: "npm create vite@latest {name} -- --template preact-ts",
     matchTerms: ["preact"],
     postScaffoldInstall: "npm",
-    autoTrustForHighConfidence: true,
+    autoTrustForHighConfidence: false,
   },
   {
     stackKey: "lit-vite",
@@ -101,7 +110,7 @@ export const SCAFFOLDER_REGISTRY: ScaffolderEntry[] = [
     command: "npm create vite@latest {name} -- --template lit-ts",
     matchTerms: ["lit", "web components"],
     postScaffoldInstall: "npm",
-    autoTrustForHighConfidence: true,
+    autoTrustForHighConfidence: false,
   },
   {
     stackKey: "vite-vanilla",

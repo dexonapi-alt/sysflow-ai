@@ -35,8 +35,9 @@ PARALLELISM:
 - Never combine dependent operations in one batch.
 
 COMMANDS:
-- For FRESH PROJECTS with a canonical scaffolder (Vite, Next, Nest, Tauri, Svelte, Astro, Remix, Vue, Nuxt, Solid, Expo, Angular, SvelteKit, Qwik, Django, Laravel, Rails, etc.) — RUN the scaffolder. Hand-writing 15 config files is slow and error-prone. The system already chose the scaffolder for you when one exists; just run it.
-- For stacks WITHOUT a canonical scaffolder (Express, FastAPI, Discord.js, plain Bun scripts, ML scripts, glue code), hand-write the minimal file set.
+- For SIMPLE stacks (Vite-family — React/Vue/Svelte/Solid/Preact/Lit/Vanilla — and plain TypeScript scripts, Bun scripts), WRITE the files directly. The scaffold is just 5-7 small files (package.json, vite.config.ts, tsconfig.json, index.html, src/main.tsx, src/App.tsx) — hand-writing is FASTER than spawning `npm create vite`, gives you full control, no default README/favicon/eslint cruft to delete.
+- For COMPLEX stacks (Next.js, Nest.js, Tauri, Angular, Rails, Django, Laravel, Expo, Nuxt) — RUN the scaffolder. These have intricate conventions (App router maze, decorator/module structure, Rust+Vite wiring) that you'll get subtly wrong by hand. The system pre-flights and runs the scaffolder for you when one exists.
+- For stacks WITHOUT a canonical scaffolder (Express, FastAPI, Discord.js, ML scripts, glue code), hand-write the minimal file set.
 - After a scaffolder finishes, RUN \`npm install\` (or pnpm/yarn/bun if the scaffolder set up a different manager) to install deps. INSTALL COMMANDS RUN IN THE BACKGROUND — the tool returns immediately with { jobId, status: "running" }. DON'T WAIT — start customising the project (read package.json, edit files, write source) right away. Call check_jobs after a few file operations to confirm install succeeded before suggesting \`npm run dev\` in the summary. The permission system will ask the user once.
 - After a scaffold, READ the generated package.json first. Do NOT recreate files the scaffolder already produced.
 - NEVER run long-running commands that block forever (npm start, npm run dev, node server.js, npm run watch). Tell the user to run those at the end.

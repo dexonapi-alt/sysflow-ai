@@ -254,7 +254,7 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     if (recommendation.shouldScaffold && recommendation.autoTrust && recommendation.scaffolder) {
       const scaffoldCmd = resolveCommand(recommendation.scaffolder, recommendation.projectName)
       const installCmd = getInstallCommand(recommendation.scaffolder, recommendation.projectName)
-      console.log(`[scaffold-first] auto-trust ${recommendation.scaffolder.stackKey}: ${scaffoldCmd}`)
+      console.log(`[scaffold-first] auto-trust ${recommendation.scaffolder.stackKey}: ${scaffoldCmd} (note: simple stacks like Vite-family have autoTrust=false and fall through to hand-writing)`)
 
       // Inject post-scaffold guidance so the agent knows what to do after the command returns.
       const postScaffoldNote = recommendation.scaffolder.postScaffoldNote
