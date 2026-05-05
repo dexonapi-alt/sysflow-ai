@@ -24,6 +24,13 @@ const SIMPLE_PATTERNS: RegExp[] = [
   /^\s*read\s+(the\s+)?\S+\s*$/i,
   /^\s*continue\s*$/i,
   /^\s*go\s+on\s*$/i,
+  // Continuation phrasings — "continue the task", "keep going",
+  // "carry on", "proceed", "finish it", "resume", "go ahead", optionally
+  // followed by "the task / previous / work / job / build / implementation".
+  // The server-side handler swaps these for the previous run's prompt,
+  // so the request is "pick up where we left off" not a fresh implement.
+  // No fake task pipeline should appear.
+  /^\s*(continue|carry\s+on|keep\s+going|proceed|next|finish(\s+(it|up))?|resume|go\s+ahead)(\s+(the\s+)?((previous|prev|last|same)\s+)?(task|work|job|build|implementation))?\s*[.!?]?\s*$/i,
 ]
 
 const BUG_PATTERNS: RegExp[] = [

@@ -67,4 +67,23 @@ describe("classifyIntent", () => {
   it("'give me a tour' → summary", () => {
     expect(classifyIntent("give me a tour of the codebase")).toBe("summary")
   })
+
+  it("continuation phrasings → simple (handler swaps for the previous prompt)", () => {
+    expect(classifyIntent("continue")).toBe("simple")
+    expect(classifyIntent("continue the task")).toBe("simple")
+    expect(classifyIntent("continue the previous task")).toBe("simple")
+    expect(classifyIntent("keep going")).toBe("simple")
+    expect(classifyIntent("carry on")).toBe("simple")
+    expect(classifyIntent("proceed")).toBe("simple")
+    expect(classifyIntent("finish it")).toBe("simple")
+    expect(classifyIntent("finish up")).toBe("simple")
+    expect(classifyIntent("resume")).toBe("simple")
+    expect(classifyIntent("go ahead")).toBe("simple")
+    expect(classifyIntent("continue the build.")).toBe("simple")
+  })
+
+  it("'continue' followed by an actual task description → implement (not bare continuation)", () => {
+    expect(classifyIntent("continue and add a logout endpoint")).toBe("implement")
+    expect(classifyIntent("continue with payment integration")).toBe("implement")
+  })
 })
