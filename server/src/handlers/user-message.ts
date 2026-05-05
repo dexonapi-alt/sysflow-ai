@@ -14,11 +14,10 @@ import { isFrontendTask, detectFrontendStack, getFrontendPatterns } from "../kno
 import { accumulateFrontendContent } from "../services/frontend-quality-guard.js"
 import { detectErrorForSearch, buildErrorSearchOverride } from "../services/setup-intelligence.js"
 import { detectErrorContext, setPendingError, detectAllErrors, setPendingErrorQueue } from "../services/error-autofix.js"
-import { createPipelineFromAiPlan, createFallbackPipeline, pipelineToTaskMeta, markPipelineSkipped } from "../services/task-pipeline.js"
+import { createPipelineFromAiPlan, createFallbackPipeline, pipelineToTaskMeta } from "../services/task-pipeline.js"
 import { detectScaffoldingNeed, buildScaffoldConfirmationMessage } from "../scaffold/index.js"
 import { estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import { runReasoning } from "../reasoning/task-reasoner.js"
-import { classifyIntent } from "../reasoning/intent-classifier.js"
 import { recommendScaffold, resolveCommand, getInstallCommand } from "../scaffold/index.js"
 import { recordImplementSummary } from "../memory-store/index.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
@@ -389,36 +388,20 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     }
   }
 
-  // ─── Task Pipeline: use AI's plan if provided, otherwise fallback ───
-  // Skip for read-only intents — a "what's on this repo?" question shouldn't
-  // sprout a generic "Setup project / Implement features / Polish & finalize"
-  // box at the top. The agent will just emit reads + a final summary.
-  // Skip the task-pipeline box for read-only intents. Prefer the LLM
-  // reasoner's verdict (richer signal); fall back to the cheap regex
-  // classifier so this still works when GEMINI_API_KEY isn't configured
-  // and runReasoning returned null.
-  const briefPipeline = (reasoningBrief as { pipeline?: string } | null)?.pipeline
-  const classifierHint = !briefPipeline ? classifyIntent(body.content) : null
-  const skipPipeline =
-    briefPipeline === "summary" || briefPipeline === "simple" ||
-    classifierHint === "summary" || classifierHint === "simple"
-  if (skipPipeline) markPipelineSkipped(runId)
-
-  if (normalized.kind === "needs_tool" && !skipPipeline) {
+  // ─── Task Pipeline: only render the box when the AI itself produced a plan.
+  // No more canned "Setup project / Implement features / Polish & finalize"
+  // fallback — if the AI didn't generate a taskPlan that's its signal that
+  // the task doesn't need one, and the agent's tool stream + final summary
+  // cover the visible feedback. (Closes #12.)
+  if (normalized.kind === "needs_tool" && normalized.taskPlan && normalized.taskPlan.steps.length > 0) {
     let pipelinePrompt = body.content
     const isContinue = /^\s*(continue|go on|keep going|next|proceed|finish)\s*$/i.test(body.content.trim()) || body.command === "/continue"
     if (isContinue && lastSession) {
       pipelinePrompt = lastSession.prompt || body.content
       console.log(`[task-pipeline] Using original prompt for /continue pipeline: "${pipelinePrompt.slice(0, 80)}"`)
     }
-
-    if (normalized.taskPlan && normalized.taskPlan.steps.length > 0) {
-      const pipeline = createPipelineFromAiPlan(runId, pipelinePrompt, normalized.taskPlan)
-      normalized.task = pipelineToTaskMeta(pipeline)
-    } else {
-      const pipeline = createFallbackPipeline(runId, pipelinePrompt)
-      normalized.task = pipelineToTaskMeta(pipeline)
-    }
+    const pipeline = createPipelineFromAiPlan(runId, pipelinePrompt, normalized.taskPlan)
+    normalized.task = pipelineToTaskMeta(pipeline)
   }
 
   const clientResp = mapNormalizedResponseToClient(runId, normalized)

@@ -16,7 +16,7 @@ import { validateFrontendQuality, buildFrontendRejectionPayload, accumulateFront
 import { actionPlanner } from "../services/action-planner.js"
 import { isFrontendTask } from "../knowledge/frontend-patterns.js"
 import { ingestToolResult, clearRunContext, buildWorkingContextString } from "../services/context-manager.js"
-import { updatePipelineProgress, completePipeline, clearPipeline, getPipeline, hasPipeline, pipelineToTaskMeta, createPipelineFromAiPlan, createFallbackPipeline, isPipelineSkipped } from "../services/task-pipeline.js"
+import { updatePipelineProgress, completePipeline, clearPipeline, getPipeline, hasPipeline, pipelineToTaskMeta, createPipelineFromAiPlan } from "../services/task-pipeline.js"
 import { getScaffoldChoice, storeScaffoldChoice, parseScaffoldResponse, clearScaffoldState } from "../scaffold/index.js"
 import { getPendingError, clearPendingError, setPendingError, buildFixInstructions, setPendingFileContent, hasPendingErrors, popNextPendingError } from "../services/error-autofix.js"
 import { applyToolResultBudget, estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
@@ -600,28 +600,25 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     onErrorReasoningCount.delete(body.runId)
   }
 
-  // ─── Task Pipeline: create from AI plan if not yet created, then track progress ───
-  // Honour the skip flag set on the initial turn for summary/simple intents.
-  if (normalized.kind === "needs_tool" && !isPipelineSkipped(body.runId)) {
-    // If AI sent a taskPlan and we don't have a pipeline yet, create one
+  // ─── Task Pipeline: track progress only if the AI created a plan on turn one.
+  // No fallback pipeline — see #12. If hasPipeline is false here it means the
+  // initial turn didn't produce a taskPlan, and we leave it that way.
+  if (normalized.kind === "needs_tool") {
     if (normalized.taskPlan && normalized.taskPlan.steps.length > 0 && !hasPipeline(body.runId)) {
       const pipeline = createPipelineFromAiPlan(body.runId, run.content, normalized.taskPlan)
       normalized.task = pipelineToTaskMeta(pipeline)
     }
-    // If still no pipeline, create fallback
-    if (!hasPipeline(body.runId)) {
-      createFallbackPipeline(body.runId, run.content)
-    }
-
-    const pipelineUpdate = updatePipelineProgress(
-      body.runId,
-      normalized.tool || "",
-      (normalized.args || {}) as Record<string, unknown>
-    )
-    if (pipelineUpdate) {
-      normalized.task = pipelineUpdate.task
-      if (pipelineUpdate.stepTransition) {
-        normalized.stepTransition = pipelineUpdate.stepTransition
+    if (hasPipeline(body.runId)) {
+      const pipelineUpdate = updatePipelineProgress(
+        body.runId,
+        normalized.tool || "",
+        (normalized.args || {}) as Record<string, unknown>
+      )
+      if (pipelineUpdate) {
+        normalized.task = pipelineUpdate.task
+        if (pipelineUpdate.stepTransition) {
+          normalized.stepTransition = pipelineUpdate.stepTransition
+        }
       }
     }
   } else if (normalized.kind === "completed") {
