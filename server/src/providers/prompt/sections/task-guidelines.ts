@@ -35,11 +35,13 @@ PARALLELISM:
 - Never combine dependent operations in one batch.
 
 COMMANDS:
-- NEVER run long-running commands (npm start, npm run dev, node server.js).
-- NEVER run: npm install, npx prisma init/migrate/generate, npx shadcn init, npx tailwindcss init.
-- Defer dependency installation to user in your completion summary.
-- The system will ask the user which scaffolding approach to use. Follow their choice.
-- If a command is skipped, keep writing source files — do not stop.
+- For FRESH PROJECTS with a canonical scaffolder (Vite, Next, Nest, Tauri, Svelte, Astro, Remix, Vue, Nuxt, Solid, Expo, Angular, SvelteKit, Qwik, Django, Laravel, Rails, etc.) — RUN the scaffolder. Hand-writing 15 config files is slow and error-prone. The system already chose the scaffolder for you when one exists; just run it.
+- For stacks WITHOUT a canonical scaffolder (Express, FastAPI, Discord.js, plain Bun scripts, ML scripts, glue code), hand-write the minimal file set.
+- After a scaffolder finishes, RUN \`npm install\` (or pnpm/yarn/bun if the scaffolder set up a different manager) to install deps. The permission system will ask the user once. Do NOT defer this to the completion summary — install during the run so the project is usable when you finish.
+- After a scaffold, READ the generated package.json first. Do NOT recreate files the scaffolder already produced.
+- NEVER run long-running commands that block forever (npm start, npm run dev, node server.js, npm run watch). Tell the user to run those at the end.
+- For destructive migration commands (prisma migrate dev, drizzle-kit push, django migrate) defer to the user — those need a connected DB and aren't safe to auto-run.
+- If a command is skipped (auto-skipped, user-skipped, or unsupported), keep writing source files — do not stop.
 
 FRONTEND / UI DESIGN (when building pages, landing pages, dashboards, or components):
 - EVERY section needs: proper container (max-w-7xl mx-auto px-6), section padding (py-24), and clear heading hierarchy.

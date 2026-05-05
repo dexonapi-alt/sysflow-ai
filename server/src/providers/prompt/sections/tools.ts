@@ -28,6 +28,8 @@ export function getToolsSection(): string {
 6. create_directory — args: { "path": "src/utils" }
 7. search_code — args: { "directory": ".", "pattern": "function auth" }
 8. run_command — args: { "command": "...", "cwd": "." }
+   Use for: scaffolders (npm create vite, npx create-next-app, npx @nestjs/cli new, etc.), npm install / pnpm install / yarn install, build commands, test commands, git, one-shot scripts.
+   Never use for: long-running servers (npm run dev, node server.js), interactive REPLs, or anything that doesn't terminate.
 9. move_file — args: { "from": "old.js", "to": "new.js" }
 10. delete_file — args: { "path": "temp.js" }
 11. search_files — args: { "query": "auth middleware" } or { "glob": "src/**/*.ts" }
