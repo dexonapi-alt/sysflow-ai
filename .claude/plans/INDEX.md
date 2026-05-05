@@ -4,7 +4,7 @@ Managed by `memex-md`. Each plan is a design artifact written before implementat
 
 ## Plans
 
-_None active._
+- [2026-05-02-phase-7-background-jobs.md](2026-05-02-phase-7-background-jobs.md) — Phase 7: install commands (npm install, pip install, cargo build, etc.) auto-run in the background while the agent keeps working. New JobRegistry + check_jobs tool + bottom-of-screen status indicator. Hard caps: 3 concurrent jobs per run, 5min per-job timeout.  *(in-progress)*
 
 ## Applied
 

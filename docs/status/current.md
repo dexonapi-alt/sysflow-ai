@@ -4,6 +4,21 @@
 
 ## Recent Work
 
+**Phase 7 background jobs pass** (`.claude/plans/applied/2026-05-02-phase-7-background-jobs.md`):
+
+Install commands no longer block the agent. Previously `npm install` was in `SLOW_COMMAND_PATTERNS` and got skipped entirely — the agent literally couldn't install deps without user intervention. Phase 7 fixes both halves: install commands now run, *and* they run in the background.
+
+- **`cli-client/src/agent/background-jobs.ts`** *(new)* — JobRegistry with `start/poll/list/wait/cleanupRun/forget`. Per-run cap of 3 concurrent jobs. 5-minute per-job watchdog. 30-second wait window on terminal exit before SIGTERM. Captures last 4 KiB of stdout + stderr per job.
+- **New `BACKGROUND_BY_DEFAULT_PATTERNS`** carved out of `SLOW_COMMAND_PATTERNS`: npm/yarn/pnpm/bun install, pip install -r, bundle install, cargo build, go mod download. `runCommandTool` routes these to JobRegistry when `runId` is supplied. Agent can override either direction with the new optional `background` flag.
+- **New `check_jobs` tool**: `{ jobId? }` returns either one job's state or the per-run job list (running first). Short-circuits in the executor — never goes through the server.
+- **JobStatusBar** (`cli/job-status.ts`): pinned bottom-row indicator using direct ANSI cursor positioning. Refreshes every 1s. `⟳ npm install (12s)` while running → `✓ npm install (28s)` lingers 3s on success → `✖ npm install (5s — exit 1)` stays visible on failure. SIGINT handler clears the line cleanly. TTY check falls back to `console.log` for CI/pipes.
+- **Agent loop wire-up**: `startJobStatusBar(runId)` at run start; `cleanupBackgroundJobs(runId)` on every terminal exit (waits up to 30s, then SIGTERMs); `RunSummary` extended with `backgroundJobsRun + backgroundJobsFailed` written to `usage.jsonl`.
+- **Prompt updates**: `tools.ts` documents the `background` flag + adds tool 14 (`check_jobs`) with polling-cadence guidance; `task-guidelines.ts` rewrites the post-scaffold install instruction to "DON'T WAIT — start customising immediately, check_jobs after a few file ops".
+- **Three new flags** (env-only kill switches): `cli.background_jobs_enabled`, `cli.max_concurrent_background_jobs`, `cli.background_job_timeout_ms`.
+- **22 new test cases** across `background-jobs.test.ts` (start/poll/wait/cap/cleanup/forget) and `run-command-background.test.ts` (the routing decision matrix).
+
+Targeted result: after a Phase 6 scaffold, `npm install` returns immediately with `{ jobId, status: 'running' }`; the agent customises App.tsx for the user's task while install runs in the background; bottom of the screen shows `⟳ npm install (NNs)`; agent calls `check_jobs` before completing to confirm install succeeded.
+
 **Phase 6 scaffold-first pass** (`.claude/plans/applied/2026-05-02-phase-6-scaffold-first.md`):
 
 Stop hand-writing config files for fresh projects when a canonical scaffolder exists. Resolved the system-prompt vs scaffold-options.ts contradiction.

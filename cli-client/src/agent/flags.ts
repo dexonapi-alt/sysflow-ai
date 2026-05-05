@@ -42,6 +42,11 @@ defineFlag("cli.diff_preview_lines_max", 40, parseNumber)
 defineFlag("cli.retry_max_default", 10, parseNumber)
 defineFlag("cli.audit_retention_days", 14, parseNumber)
 
+// ─── Phase 7: background-jobs ───
+defineFlag("cli.background_jobs_enabled", true, parseBool)
+defineFlag("cli.max_concurrent_background_jobs", 3, parseNumber)
+defineFlag("cli.background_job_timeout_ms", 300_000, parseNumber)
+
 export function getFlag<T = unknown>(name: string, sysbasePath?: string | null): T {
   const memoKey = `${name}::${sysbasePath ?? ""}`
   if (memo.has(memoKey)) return memo.get(memoKey) as T
