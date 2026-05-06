@@ -35,6 +35,7 @@ import { recordRunSummary } from "./usage-log.js"
 import { estimateTokens as cliEstimateTokens } from "./token-estimate.js"
 import { startJobStatusBar, stopJobStatusBar } from "../cli/job-status.js"
 import { list as listBackgroundJobs, cleanupRun as cleanupBackgroundJobs } from "./background-jobs.js"
+import { createChunkSnapshot, cleanupChunkSnapshots } from "./git.js"
 import { registerSpinner, unregisterSpinner } from "../cli/spinner-control.js"
 import { emitAgent, isInkActive } from "./events.js"
 
@@ -263,6 +264,14 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
     spinner.start(colors.muted("thinking..."))
   }
   const currentRunId = (response.runId as string) || ""
+  // Phase 11 Stage 2: snapshot the working tree before the first chunk's
+  // tools execute, so a Stage 4 backtrack can roll back to the pre-chunk-1
+  // state. Best-effort — failures degrade gracefully (rollback simply isn't
+  // available for this run). Awaited so the snapshot is in place before the
+  // executor dispatches the next tool batch.
+  if ((response as Record<string, unknown>).chunkPlanBrief && currentRunId) {
+    try { await createChunkSnapshot(process.cwd(), currentRunId, 1) } catch { /* best-effort */ }
+  }
   let lastPipelineStepId: string | null = null
   let prevTool: string | null = null  // for read-coalescing in handleNeedsTool
 
@@ -295,6 +304,10 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         }
       } catch { /* best-effort */ }
       stopJobStatusBar()
+      // Phase 11 Stage 2: drop chunk snapshot tags so they don't pile up
+      // across runs in the user's repo. Stash refs are already popped in
+      // createChunkSnapshot; only tag-strategy snapshots leave a trace.
+      try { await cleanupChunkSnapshots(process.cwd(), currentRunId) } catch { /* best-effort */ }
     }
     await recordRunSummary(getSysbasePath(), {
       runId: currentRunId || null,
@@ -1012,6 +1025,11 @@ async function handleNeedsTool(
         reflection: (chunkReflectionBrief ?? null) as never,
       })
       spinner.start(colors.muted("thinking..."))
+      // Phase 11 Stage 2: snapshot before each new chunk's tools execute.
+      // See the matching call at the initial-turn chunk site for rationale.
+      if (chunkPlanBrief && currentRunId) {
+        try { await createChunkSnapshot(process.cwd(), currentRunId, ctx.chunkIndex) } catch { /* best-effort */ }
+      }
     }
     // Stash on ctx so it threads to the result via the helper below.
     ctx.flashCallsThisTurn = flashCallsThisTurn

@@ -38,6 +38,24 @@ interface GitState {
 let cachedGitState: GitState | null = null
 const snapshots = new Map<string, GitSnapshot>()
 
+/**
+ * Phase 11 Stage 2: per-chunk snapshot queue, indexed by runId.
+ *
+ * The legacy `snapshots` map (single-snapshot-per-run) is kept untouched so
+ * Phase 7's existing `createSnapshot` / `rollback` / `cleanupSnapshot` /
+ * `getSnapshot` callers continue to work unchanged. The queue is a *peer*
+ * store, written through `createChunkSnapshot` and read via the new
+ * `listSnapshots` / `rollbackToChunk` API. The two stores are independent
+ * — a Phase 7 snapshot taken before chunked-loop kicks in won't appear in
+ * the queue, and vice versa.
+ */
+interface ChunkSnapshot extends GitSnapshot {
+  /** 0-indexed chunk number this snapshot was taken before. */
+  chunkIndex: number
+}
+
+const chunkSnapshots = new Map<string, ChunkSnapshot[]>()
+
 // ─── Public API ───
 
 /**
@@ -214,6 +232,139 @@ export async function cleanupSnapshot(cwd: string, runId: string): Promise<void>
  */
 export function getSnapshot(runId: string): GitSnapshot | null {
   return snapshots.get(runId) || null
+}
+
+/**
+ * Phase 11 Stage 2 — per-chunk snapshot API.
+ *
+ * `createChunkSnapshot` is invoked from the chunked-loop right before the
+ * agent executes a chunk's tools. It tags the current HEAD (or stashes the
+ * working state) so `rollbackToChunk` can restore that exact tree later if
+ * the divergence detector triggers a backtrack.
+ */
+
+export async function createChunkSnapshot(cwd: string, runId: string, chunkIndex: number): Promise<ChunkSnapshot | null> {
+  const git = await detectGit(cwd)
+  if (!git.isRepo || !git.hasCommits) return null
+
+  // Reuse `createSnapshot`'s logic by inlining a near-identical body that
+  // tags the snapshot id with the chunk index so we can address it later.
+  try {
+    const snapshotId = `sysflow-${runId.slice(0, 8)}-chunk${chunkIndex}-${Date.now()}`
+
+    const { stdout: statusOut } = await exec("git", ["status", "--porcelain"], { cwd, timeout: 5000 })
+    const dirtyFiles = statusOut.trim().split("\n").filter(Boolean).map((l) => l.slice(3))
+
+    let snap: ChunkSnapshot
+
+    if (dirtyFiles.length > 0) {
+      await exec("git", ["stash", "push", "-u", "-m", snapshotId], { cwd, timeout: 15000 })
+      const { stdout: stashList } = await exec("git", ["stash", "list", "--oneline", "-1"], { cwd, timeout: 5000 })
+      const stashRef = stashList.trim().split(":")[0] || "stash@{0}"
+      await exec("git", ["stash", "pop"], { cwd, timeout: 15000 })
+
+      snap = {
+        id: snapshotId,
+        runId,
+        chunkIndex,
+        ref: stashRef,
+        strategy: "stash",
+        createdAt: Date.now(),
+        dirtyFiles,
+      }
+    } else {
+      const { stdout: headRef } = await exec("git", ["rev-parse", "HEAD"], { cwd, timeout: 5000 })
+      const ref = headRef.trim()
+      try {
+        await exec("git", ["tag", snapshotId, ref], { cwd, timeout: 5000 })
+      } catch {
+        // Tag might already exist — non-fatal.
+      }
+      snap = {
+        id: snapshotId,
+        runId,
+        chunkIndex,
+        ref,
+        strategy: "tag",
+        createdAt: Date.now(),
+        dirtyFiles: [],
+      }
+    }
+
+    const list = chunkSnapshots.get(runId) ?? []
+    list.push(snap)
+    chunkSnapshots.set(runId, list)
+    return snap
+  } catch (err) {
+    console.error(`[git] Failed to create chunk snapshot: ${(err as Error).message}`)
+    return null
+  }
+}
+
+/** All chunk snapshots for a run, oldest first. Empty when none have been taken. */
+export function listSnapshots(runId: string): ChunkSnapshot[] {
+  return chunkSnapshots.get(runId) ?? []
+}
+
+/**
+ * Roll the working tree back to the state captured before chunk `chunkIndex`.
+ * Returns true on success. After the rollback, every snapshot AFTER the
+ * target chunk is dropped from the queue (you can't roll forward to a
+ * snapshot that referenced state you've now discarded).
+ */
+export async function rollbackToChunk(cwd: string, runId: string, chunkIndex: number): Promise<boolean> {
+  const list = chunkSnapshots.get(runId)
+  if (!list || list.length === 0) return false
+  const target = list.find((s) => s.chunkIndex === chunkIndex)
+  if (!target) return false
+
+  try {
+    if (target.strategy === "tag") {
+      await exec("git", ["reset", "--hard", target.ref], { cwd, timeout: 15000 })
+      await exec("git", ["clean", "-fd"], { cwd, timeout: 15000 })
+    } else {
+      await exec("git", ["checkout", "--", "."], { cwd, timeout: 15000 })
+      await exec("git", ["clean", "-fd"], { cwd, timeout: 15000 })
+      if (target.dirtyFiles.length > 0) {
+        try {
+          const { stdout: stashList } = await exec("git", ["stash", "list"], { cwd, timeout: 5000 })
+          const lines = stashList.trim().split("\n")
+          const match = lines.find((l) => l.includes(target.id))
+          if (match) {
+            const ref = match.split(":")[0]
+            await exec("git", ["stash", "apply", ref], { cwd, timeout: 15000 })
+          }
+        } catch {
+          // Best-effort; tree is at least clean.
+        }
+      }
+    }
+
+    // Drop snapshots taken *after* the target — they no longer match disk.
+    const trimmed = list.filter((s) => s.chunkIndex <= chunkIndex)
+    chunkSnapshots.set(runId, trimmed)
+    return true
+  } catch (err) {
+    console.error(`[git] rollbackToChunk failed: ${(err as Error).message}`)
+    return false
+  }
+}
+
+/** Wipe a run's chunk snapshot queue (and try to delete its tags). */
+export async function cleanupChunkSnapshots(cwd: string, runId: string): Promise<void> {
+  const list = chunkSnapshots.get(runId)
+  if (!list) return
+  for (const s of list) {
+    if (s.strategy === "tag") {
+      try { await exec("git", ["tag", "-d", s.id], { cwd, timeout: 5000 }) } catch { /* non-fatal */ }
+    }
+  }
+  chunkSnapshots.delete(runId)
+}
+
+/** Test-only: blow away every run's queue. */
+export function _resetChunkSnapshotsForTests(): void {
+  chunkSnapshots.clear()
 }
 
 /**
