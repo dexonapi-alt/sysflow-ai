@@ -25,6 +25,24 @@ export interface ToolCardState {
   error?: string
 }
 
+/** Phase 12 Stage 5: latest awareness snapshot, mirrors the server's
+ *  awarenessSnapshot payload from Phase 11. Null when awareness is
+ *  disabled or no snapshot has arrived yet this run. */
+export interface AwarenessSnapshot {
+  state: "on_track" | "off_course" | "blocked"
+  confidence: number
+  lastSignal: string | null
+}
+
+/** Phase 12 Stage 5: latest chunk-plan info. `pulseKey` increments on
+ *  every new chunk so the Header's Pulse re-fires. */
+export interface ChunkPulseState {
+  index: number
+  nextAction: string
+  fileCount: number
+  pulseKey: number
+}
+
 export interface AgentEventState {
   /** Past log lines, append-only — rendered via Ink <Static> for cheap scroll. */
   log: LogLine[]
@@ -33,9 +51,13 @@ export interface AgentEventState {
   /** Phase 12 Stage 4: tool cards in mount order. Cards persist after
    *  tool_end so they remain visible in the stream. */
   toolCards: ToolCardState[]
+  /** Phase 12 Stage 5: latest awareness snapshot, drives Header badge. */
+  awareness: AwarenessSnapshot | null
+  /** Phase 12 Stage 5: latest chunk-plan, drives Header chunk pulse. */
+  chunk: ChunkPulseState | null
 }
 
-const INITIAL: AgentEventState = { log: [], spinnerText: null, toolCards: [] }
+const INITIAL: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null }
 
 let nextLogId = 1
 
@@ -89,6 +111,30 @@ export function reduceAgentEvent(prev: AgentEventState, event: AgentEvent): Agen
         error: event.ok ? undefined : event.error,
       }
       return { ...prev, toolCards: next }
+    }
+    case "awareness_update":
+      return {
+        ...prev,
+        awareness: {
+          state: event.state,
+          confidence: event.confidence,
+          lastSignal: event.lastSignal ?? null,
+        },
+      }
+    case "chunk_plan": {
+      // pulseKey increments per chunk so the Header's <Pulse> re-fires
+      // even when the chunkIndex appears to repeat (defensive against
+      // duplicate emissions).
+      const prevKey = prev.chunk?.pulseKey ?? 0
+      return {
+        ...prev,
+        chunk: {
+          index: event.chunkIndex,
+          nextAction: event.nextAction,
+          fileCount: event.fileCount ?? 0,
+          pulseKey: prevKey + 1,
+        },
+      }
     }
     default:
       return prev

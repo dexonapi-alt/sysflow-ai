@@ -35,6 +35,20 @@ export type AgentEvent =
   // start time so the card has the right title before the tool resolves.
   | { type: "tool_start"; id: string; tool: string; label: string }
   | { type: "tool_end"; id: string; ok: boolean; error?: string }
+  // ── Phase 12 Stage 5: Header zone state events ──
+  // The agent emits these whenever the server response carries fresh
+  // awareness or chunk-plan data. The Ink Header reads them via the
+  // useAgentEvents reducer to drive the colour-lerped awareness badge
+  // and the chunk-pulse cell.
+  //
+  // `awareness_update` mirrors the server's awarenessSnapshot payload
+  // (Phase 11 Stage 5). `lastSignal` is the most recent divergence
+  // signal text or null when nothing has fired this run.
+  | { type: "awareness_update"; state: "on_track" | "off_course" | "blocked"; confidence: number; lastSignal?: string | null }
+  // `chunk_plan` fires once per chunk planner brief — the chunkIndex
+  // monotonically increases. `nextAction` is the planner's one-line
+  // intent. `fileCount` is the number of files the chunk will touch.
+  | { type: "chunk_plan"; chunkIndex: number; nextAction: string; fileCount?: number }
 
 const emitter = new EventEmitter()
 emitter.setMaxListeners(20)

@@ -1,7 +1,7 @@
 import * as React from "react"
 import { useEffect, useState } from "react"
 import { Box, Text } from "ink"
-import { StatusLine } from "./components/StatusLine.js"
+import { Header } from "./components/Header.js"
 import { ChatInput } from "./components/ChatInput.js"
 import { Spinner } from "./components/Spinner.js"
 import { AgentStream } from "./components/AgentStream.js"
@@ -84,7 +84,7 @@ export function App(): React.ReactElement {
   return (
     <Box flexDirection="column">
       <Box marginTop={1}>
-        <StatusLine
+        <Header
           model={status.model}
           user={status.user}
           chatTitle={status.chatTitle}

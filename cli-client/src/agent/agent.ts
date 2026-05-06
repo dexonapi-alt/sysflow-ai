@@ -374,15 +374,33 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
     chunkIndex = 1
     flashCallsCount += 1
     const initialAwareness = (response as Record<string, unknown>).awarenessSnapshot as { state: "on_track" | "off_course" | "blocked"; confidence: number; lastSignal?: string | null } | undefined
+    const initialPlan = (response as Record<string, unknown>).chunkPlanBrief as { nextAction?: string; files?: string[] } | undefined
     renderChunkProgress({
       chunkIndex,
-      plan: (response as Record<string, unknown>).chunkPlanBrief as never,
+      plan: initialPlan as never,
       reflection: null,
       awareness: initialAwareness ?? null,
     })
     if (initialAwareness) {
       lastAwarenessState = initialAwareness.state
       tallyAwareness(initialAwareness)
+    }
+    // Phase 12 Stage 5: surface the chunk-plan + awareness to the Ink Header.
+    if (isInkActive() && initialPlan?.nextAction) {
+      emitAgent({
+        type: "chunk_plan",
+        chunkIndex,
+        nextAction: initialPlan.nextAction,
+        fileCount: Array.isArray(initialPlan.files) ? initialPlan.files.length : 0,
+      })
+    }
+    if (isInkActive() && initialAwareness) {
+      emitAgent({
+        type: "awareness_update",
+        state: initialAwareness.state,
+        confidence: initialAwareness.confidence,
+        lastSignal: initialAwareness.lastSignal ?? null,
+      })
     }
     spinner.start(colors.muted("thinking..."))
   }
@@ -1218,6 +1236,29 @@ async function handleNeedsTool(
       if (chunkPlanBrief && currentRunId) {
         try { await createChunkSnapshot(process.cwd(), currentRunId, ctx.chunkIndex) } catch { /* best-effort */ }
       }
+      // Phase 12 Stage 5: surface chunk-plan + awareness to the Ink Header.
+      if (isInkActive() && chunkPlanBrief) {
+        const plan = chunkPlanBrief as { nextAction?: string; files?: string[] }
+        if (plan.nextAction) {
+          emitAgent({
+            type: "chunk_plan",
+            chunkIndex: ctx.chunkIndex,
+            nextAction: plan.nextAction,
+            fileCount: Array.isArray(plan.files) ? plan.files.length : 0,
+          })
+        }
+      }
+    }
+    // Phase 12 Stage 5: emit awareness_update on every turn that carries
+    // a fresh snapshot (independent of chunk-plan presence — a tool-only
+    // turn can still drop confidence).
+    if (isInkActive() && awareness) {
+      emitAgent({
+        type: "awareness_update",
+        state: awareness.state,
+        confidence: awareness.confidence,
+        lastSignal: awareness.lastSignal ?? null,
+      })
     }
     // Phase 11 Stage 5: one-line transition log when the badge flips state
     // outside of a chunk-progress render (e.g. a tool turn that didn't carry

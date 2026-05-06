@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest"
 import { reduceAgentEvent, _resetIdsForTests, type AgentEventState } from "../useAgentEvents.js"
 
-const initial: AgentEventState = { log: [], spinnerText: null, toolCards: [] }
+const initial: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null }
 
 beforeEach(() => _resetIdsForTests())
 
@@ -99,5 +99,84 @@ describe("reduceAgentEvent — tool cards (Phase 12 Stage 4)", () => {
     s = reduceAgentEvent(s, { type: "tool_end", id: "a", ok: true })
     expect(s.toolCards[0].status).toBe("success")
     expect(s.toolCards[1].status).toBe("running")
+  })
+})
+
+describe("reduceAgentEvent — awareness + chunk (Phase 12 Stage 5)", () => {
+  it("awareness_update sets the snapshot from null", () => {
+    const after = reduceAgentEvent(initial, {
+      type: "awareness_update",
+      state: "off_course",
+      confidence: 55,
+      lastSignal: "tool error 'edit_file' repeated 3 times",
+    })
+    expect(after.awareness).toMatchObject({
+      state: "off_course",
+      confidence: 55,
+      lastSignal: "tool error 'edit_file' repeated 3 times",
+    })
+  })
+
+  it("awareness_update without lastSignal stores null", () => {
+    const after = reduceAgentEvent(initial, {
+      type: "awareness_update",
+      state: "on_track",
+      confidence: 100,
+    })
+    expect(after.awareness?.lastSignal).toBeNull()
+  })
+
+  it("awareness_update overwrites prior snapshot (most recent wins)", () => {
+    let s = reduceAgentEvent(initial, { type: "awareness_update", state: "on_track", confidence: 100 })
+    s = reduceAgentEvent(s, { type: "awareness_update", state: "blocked", confidence: 25, lastSignal: "x" })
+    expect(s.awareness?.state).toBe("blocked")
+    expect(s.awareness?.confidence).toBe(25)
+  })
+
+  it("chunk_plan sets the chunk state from null", () => {
+    const after = reduceAgentEvent(initial, {
+      type: "chunk_plan",
+      chunkIndex: 1,
+      nextAction: "write models",
+      fileCount: 3,
+    })
+    expect(after.chunk).toMatchObject({
+      index: 1,
+      nextAction: "write models",
+      fileCount: 3,
+    })
+    expect(after.chunk?.pulseKey).toBe(1)
+  })
+
+  it("chunk_plan defaults fileCount to 0 when omitted", () => {
+    const after = reduceAgentEvent(initial, {
+      type: "chunk_plan",
+      chunkIndex: 1,
+      nextAction: "polish",
+    })
+    expect(after.chunk?.fileCount).toBe(0)
+  })
+
+  it("chunk_plan increments pulseKey monotonically across chunks", () => {
+    let s = reduceAgentEvent(initial, { type: "chunk_plan", chunkIndex: 1, nextAction: "a" })
+    expect(s.chunk?.pulseKey).toBe(1)
+    s = reduceAgentEvent(s, { type: "chunk_plan", chunkIndex: 2, nextAction: "b" })
+    expect(s.chunk?.pulseKey).toBe(2)
+    s = reduceAgentEvent(s, { type: "chunk_plan", chunkIndex: 3, nextAction: "c" })
+    expect(s.chunk?.pulseKey).toBe(3)
+  })
+
+  it("pulseKey increments even when chunkIndex repeats (defensive)", () => {
+    let s = reduceAgentEvent(initial, { type: "chunk_plan", chunkIndex: 5, nextAction: "a" })
+    s = reduceAgentEvent(s, { type: "chunk_plan", chunkIndex: 5, nextAction: "still a" })
+    expect(s.chunk?.pulseKey).toBe(2)
+  })
+
+  it("clear wipes both awareness and chunk state", () => {
+    let s = reduceAgentEvent(initial, { type: "awareness_update", state: "blocked", confidence: 25 })
+    s = reduceAgentEvent(s, { type: "chunk_plan", chunkIndex: 3, nextAction: "x" })
+    s = reduceAgentEvent(s, { type: "clear" })
+    expect(s.awareness).toBeNull()
+    expect(s.chunk).toBeNull()
   })
 })
