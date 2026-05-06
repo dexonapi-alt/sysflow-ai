@@ -52,6 +52,13 @@ const MAX_ON_ERROR_REASONING_PER_RUN = 2
 const frontendQualityRejections = new Map<string, number>()
 const MAX_FRONTEND_QUALITY_REJECTIONS = 2
 
+/** Phase 11 Stage 3: chunk index when the LLM divergence pipeline last fired
+ *  for a given run. Used to enforce "every 2nd chunk" cadence — combined with
+ *  the heuristic-fired trigger so the LLM half can fire ad-hoc too. */
+const lastLlmDivergenceCheckedChunk = new Map<string, number>()
+/** Hard cap on LLM divergence calls per run, even if heuristics keep firing. */
+const MAX_LLM_DIVERGENCE_PER_RUN = 8
+
 interface ToolResultBody {
   runId: string
   tool: string
@@ -473,11 +480,13 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
         ).catch(() => { /* best-effort */ })
       }
 
-      // ─── Phase 11 Stage 1+2: heuristic divergence + verification gate.
-      // Both run every chunk boundary right after the reflector. Heuristic
-      // is pure (in-memory only); the gate reads files from disk in parallel
-      // (<1s budget). Their signals merge into one tracker update. Stage 4
-      // is when this graduates to user-visible auto-pause behaviour.
+      // ─── Phase 11 Stage 1+2+3: heuristic + gate + LLM divergence check.
+      // Run every chunk boundary right after the reflector. Heuristic is
+      // pure (in-memory); the gate reads files from disk in parallel
+      // (<1s budget); the LLM half (Flash, ~300 tok) fires either when
+      // heuristics flag OR every 2nd chunk, with a per-run cap. All three
+      // signal streams merge into one tracker update. Stage 4 is when this
+      // graduates to user-visible auto-pause behaviour.
       try {
         const awarenessOn = getFlag<boolean>("awareness.enabled", run.sysbasePath as string | null | undefined)
         if (awarenessOn) {
@@ -488,12 +497,53 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
             filesModified: input.filesModified,
             createdDirs: input.createdDirs,
           })
-          const allSignals = [...heuristicSignals, ...gateSignals(gateOutcomes)]
+          const gateSigs = gateSignals(gateOutcomes)
+
+          // LLM half: fire when heuristics flagged anything (ad-hoc) OR
+          // we're at least 2 chunks past the last LLM check (cadence).
+          const llmSignals: typeof heuristicSignals = []
+          const chunkIdx = latestChunk.index
+          const lastChecked = lastLlmDivergenceCheckedChunk.get(body.runId) ?? -2
+          const heuristicFired = heuristicSignals.length + gateSigs.length > 0
+          const cadenceDue = chunkIdx - lastChecked >= 2
+          const underCap = lastChecked === -2 || (chunkIdx - lastChecked) <= MAX_LLM_DIVERGENCE_PER_RUN * 2
+          if ((heuristicFired || cadenceDue) && underCap) {
+            try {
+              const verdict = await runReasoning({
+                trigger: "divergence_check",
+                userMessage: run.content, // LITERAL prompt — anchors the comparison
+                model: run.model,
+                cwd: run.cwd as string | undefined,
+                sysbasePath: run.sysbasePath as string | null | undefined,
+                context: {
+                  originalUserPrompt: run.content,
+                  filesModified: input.filesModified.slice(0, 30),
+                  chunkCount: input.chunkHistory.length,
+                  lastReflection: chunkReflectionBrief,
+                  recentHeuristicSignals: heuristicSignals.slice(0, 4).map((s) => ({ category: s.category, detail: s.detail })),
+                },
+              })
+              lastLlmDivergenceCheckedChunk.set(body.runId, chunkIdx)
+              const dvb = verdict?.divergenceVerdictBrief
+              if (dvb && dvb.onTrack === false && dvb.mismatches.length > 0) {
+                llmSignals.push({
+                  category: "llm_off_track",
+                  detail: `LLM verdict (${verdict.confidence}): ${dvb.mismatches.slice(0, 3).join("; ")}`,
+                  severity: dvb.suggestion === "backtrack" ? "major" : "moderate",
+                })
+                console.log(`[awareness] LLM divergence verdict score=${dvb.score} suggestion=${dvb.suggestion}`)
+              }
+            } catch (err) {
+              console.warn(`[awareness] LLM divergence call failed:`, (err as Error).message)
+            }
+          }
+
+          const allSignals = [...heuristicSignals, ...gateSigs, ...llmSignals]
           if (allSignals.length > 0) {
             recordConfidenceSignals(body.runId, allSignals)
             const score = getConfidence(body.runId)
             const state = getThresholdState(body.runId, run.sysbasePath as string | null | undefined)
-            console.log(`[awareness] chunk ${latestChunk.index}: ${heuristicSignals.length} heuristic + ${gateSignals(gateOutcomes).length} gate signal(s), confidence=${score} state=${state}`)
+            console.log(`[awareness] chunk ${chunkIdx}: ${heuristicSignals.length} heuristic + ${gateSigs.length} gate + ${llmSignals.length} llm signal(s), confidence=${score} state=${state}`)
           }
         }
       } catch (err) {
@@ -839,6 +889,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     clearChunkState(body.runId)
     // Phase 11: tear down per-run confidence state on the same terminal path.
     clearConfidence(body.runId)
+    lastLlmDivergenceCheckedChunk.delete(body.runId)
   }
 
   return response

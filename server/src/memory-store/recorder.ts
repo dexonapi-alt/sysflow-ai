@@ -132,6 +132,32 @@ export async function recordBugPattern(
   return safeRecord(cwd, "bug_pattern", briefSummary, enriched, ["bug"])
 }
 
+/**
+ * Phase 11: persist the user's verbatim prompt as `original_intent`.
+ *
+ * Called once per new run from `user-message.ts`. The Phase 11 divergence
+ * detector and Stage 4's backtrack flow read this back so they can compare
+ * the implementation against the LITERAL ask — preflight brief
+ * interpretations get stale or outright wrong on free models. The anchor
+ * wins.
+ *
+ * Trimmed to ~1490 chars (the schema cap is 1500); longer prompts are
+ * truncated with a "…" marker since the goal is intent capture, not full
+ * archival. The id is sha256(kind+content), so two identical prompts in
+ * the same project dedupe naturally — re-recording on a follow-up message
+ * is a no-op.
+ */
+export async function recordOriginalIntent(
+  cwd: string,
+  verbatimPrompt: string,
+  sourceRef: SourceRefLike = { trigger: "user_message" },
+): Promise<MemoryEntry | null> {
+  if (!verbatimPrompt || !verbatimPrompt.trim()) return null
+  const trimmed = verbatimPrompt.trim()
+  const content = trimmed.length > 1490 ? trimmed.slice(0, 1490) + "…" : trimmed
+  return safeRecord(cwd, "original_intent", content, sourceRef, ["user-typed", "anchor"])
+}
+
 interface ChunkSummaryLike {
   chunkIndex: number
   nextAction?: string

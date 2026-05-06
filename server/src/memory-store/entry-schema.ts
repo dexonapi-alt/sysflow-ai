@@ -22,6 +22,11 @@ export const entryKindSchema = z.enum([
   // loop. Lets `/continue` resume mid-stream — the next run reads back what
   // was decided in each chunk without re-running the planner.
   "chunk_summary",
+  // Phase 11: verbatim user prompt persisted on every new run. The Phase 11
+  // divergence detector + future Stage 4 backtrack flow read this back so
+  // they can compare implementation against the LITERAL ask, not against
+  // the preflight brief's interpretation.
+  "original_intent",
 ])
 export type EntryKind = z.infer<typeof entryKindSchema>
 

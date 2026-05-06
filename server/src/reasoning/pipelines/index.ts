@@ -9,8 +9,9 @@ import { SUMMARY_SYSTEM_PROMPT } from "./summary-pipeline.js"
 import { DECISION_SYSTEM_PROMPT } from "./decision-pipeline.js"
 import { CHUNK_PLAN_SYSTEM_PROMPT } from "./chunk-plan-pipeline.js"
 import { CHUNK_REFLECT_SYSTEM_PROMPT } from "./chunk-reflector-pipeline.js"
+import { DIVERGENCE_SYSTEM_PROMPT } from "./divergence-pipeline.js"
 
-export type PipelineKind = "implement" | "bug" | "summary" | "decision" | "chunk_plan" | "chunk_reflect"
+export type PipelineKind = "implement" | "bug" | "summary" | "decision" | "chunk_plan" | "chunk_reflect" | "divergence"
 
 export function getPipelineSystemPrompt(kind: PipelineKind): string {
   switch (kind) {
@@ -20,5 +21,6 @@ export function getPipelineSystemPrompt(kind: PipelineKind): string {
     case "decision":      return DECISION_SYSTEM_PROMPT
     case "chunk_plan":    return CHUNK_PLAN_SYSTEM_PROMPT
     case "chunk_reflect": return CHUNK_REFLECT_SYSTEM_PROMPT
+    case "divergence":    return DIVERGENCE_SYSTEM_PROMPT
   }
 }

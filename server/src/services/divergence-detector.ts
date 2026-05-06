@@ -19,6 +19,9 @@ export type DivergenceCategory =
   | "intent_keyword_absent"
   | "scope_creep"
   | "completion_claims_unwritten_files"
+  // Phase 11 Stage 3: emitted by the LLM divergence pipeline when its
+  // verdict is onTrack=false. Detail is the joined mismatches list.
+  | "llm_off_track"
 
 export interface DivergenceSignal {
   category: DivergenceCategory

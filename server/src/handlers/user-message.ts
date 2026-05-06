@@ -19,7 +19,7 @@ import { detectScaffoldingNeed, buildScaffoldConfirmationMessage } from "../scaf
 import { estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import { runReasoning } from "../reasoning/task-reasoner.js"
 import { recommendScaffold, resolveCommand, getInstallCommand } from "../scaffold/index.js"
-import { recordImplementSummary } from "../memory-store/index.js"
+import { recordImplementSummary, recordOriginalIntent } from "../memory-store/index.js"
 import { recordChunkStart } from "../services/chunk-state.js"
 import type { ChunkPlanBrief } from "../reasoning/reasoning-schema.js"
 import { getFlag } from "../services/flags.js"
@@ -133,6 +133,16 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     chatId: body.chatId || null,
     status: "running"
   })
+
+  // ─── Phase 11 Stage 3: persist the LITERAL user prompt as `original_intent`
+  // memory. The Phase 11 divergence detector reads this back so it compares
+  // chunks against the user's actual ask, not the preflight brief's
+  // interpretation. Best-effort; never blocks the run. Dedup is by content
+  // hash so a repeat prompt is a no-op upsert.
+  if (body.cwd) {
+    recordOriginalIntent(body.cwd, body.content, { runId, trigger: "user_message" })
+      .catch(() => { /* best-effort */ })
+  }
 
   // ─── Initialize smart context manager for this run ───
   initRunContext(runId, body.content)
