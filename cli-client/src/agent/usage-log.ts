@@ -25,6 +25,12 @@ export interface RunSummary {
   backgroundJobsRun?: number
   /** Phase 7: number of background jobs that ended in 'failed' status. */
   backgroundJobsFailed?: number
+  /** Phase 10: how many chunks the planner emitted during this run. */
+  chunkCount?: number
+  /** Phase 10: count of successful Gemini Flash returns we OBSERVED on the
+   *  client (preflight + chunk_plan + chunk_reflect). Approximate — failed
+   *  Flash calls don't produce briefs and aren't counted. */
+  flashCallsCount?: number
 }
 
 const PROMPT_PREVIEW_CHARS = 200
@@ -46,6 +52,8 @@ export async function recordRunSummary(sysbasePath: string | undefined | null, s
     terminalReason: summary.terminalReason,
     backgroundJobsRun: summary.backgroundJobsRun ?? 0,
     backgroundJobsFailed: summary.backgroundJobsFailed ?? 0,
+    chunkCount: summary.chunkCount ?? 0,
+    flashCallsCount: summary.flashCallsCount ?? 0,
   }
   try {
     await fs.appendFile(file, JSON.stringify(entry) + "\n", "utf8")

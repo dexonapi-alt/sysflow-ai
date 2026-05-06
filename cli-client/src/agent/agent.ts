@@ -245,10 +245,16 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   // monotonically across turns (server doesn't send the index — it's implicit
   // in the order chunkPlanBrief arrives).
   let chunkIndex = 0
+  // Phase 10: telemetry counters. Each successful brief observed = one
+  // successful Flash call. Failed Flash calls don't produce briefs so they
+  // aren't counted (intentional — telemetry is best-effort, not auditable).
+  let flashCallsCount = 0
+  if ((response as Record<string, unknown>).reasoningBrief) flashCallsCount += 1
   // Phase 10: initial-turn chunk plan from user-message.ts
   if ((response as Record<string, unknown>).chunkPlanBrief) {
     spinner.stop()
     chunkIndex = 1
+    flashCallsCount += 1
     renderChunkProgress({
       chunkIndex,
       plan: (response as Record<string, unknown>).chunkPlanBrief as never,
@@ -303,6 +309,8 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       terminalReason,
       backgroundJobsRun: bgJobsRun,
       backgroundJobsFailed: bgJobsFailed,
+      chunkCount: chunkIndex,
+      flashCallsCount,
     })
     unregisterSpinner()
   }
@@ -450,7 +458,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         const result = await handleNeedsTool(
           response,
           spinner,
-          { hasReasoning, lastDisplayedAction, lastDisplayedReasoning, currentRunId, taskShown, taskSteps, completedSteps, lastPipelineStepId, prevTool, chunkIndex, budget },
+          { hasReasoning, lastDisplayedAction, lastDisplayedReasoning, currentRunId, taskShown, taskSteps, completedSteps, lastPipelineStepId, prevTool, chunkIndex, flashCallsThisTurn: 0, budget },
           makeServerCall,
         )
         response = result.response
@@ -462,6 +470,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         lastPipelineStepId = result.lastPipelineStepId
         prevTool = result.toolThisTurn
         chunkIndex = result.chunkIndex
+        flashCallsCount += result.flashCallsThisTurn
         noteSuccess(budget)
         break
       }
@@ -694,6 +703,9 @@ interface NeedsToolCtx {
   prevTool: string | null
   /** Phase 10: chunk number (1-indexed) for the chunk-progress badge. */
   chunkIndex: number
+  /** Phase 10: scratch — handler increments per Flash brief observed; the
+   *  caller's helper threads it back into the result. */
+  flashCallsThisTurn: number
   budget: RetryBudget
 }
 
@@ -709,6 +721,8 @@ interface NeedsToolResult {
   toolThisTurn: string | null
   /** Phase 10: chunk index after this turn (caller threads back into ctx.chunkIndex). */
   chunkIndex: number
+  /** Phase 10: Flash calls observed this turn (chunk plan + chunk reflect briefs). */
+  flashCallsThisTurn: number
 }
 
 async function handleNeedsTool(
@@ -799,12 +813,12 @@ async function handleNeedsTool(
           tool: "_recovery",
           result: { error: (batchError as Error).message, success: false }
         })
-        return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex }
+        return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn }
       }
       console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.success("done")}`)
       console.log("")
       spinner.start(colors.muted("thinking..."))
-      return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex }
+      return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn }
     }
 
     spinner.start(colors.muted(`  executing ${toolCalls!.length} tools...`))
@@ -843,7 +857,7 @@ async function handleNeedsTool(
         result: { error: (batchError as Error).message, success: false }
       })
     }
-    return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex }
+    return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn }
   }
 
   // ── SINGLE TOOL PATH ──
@@ -971,9 +985,11 @@ async function handleNeedsTool(
     }
 
     // Phase 5: server may have attached a brief (on-error / on-completion) on the response.
+    let flashCallsThisTurn = 0
     if (response.reasoningBrief) {
       spinner.stop()
       renderReasoningBrief(response.reasoningBrief)
+      flashCallsThisTurn += 1
       spinner.start(colors.muted("thinking..."))
     }
 
@@ -985,7 +1001,11 @@ async function handleNeedsTool(
     const chunkReflectionBrief = (response as Record<string, unknown>).chunkReflectionBrief
     if (chunkPlanBrief || chunkReflectionBrief) {
       spinner.stop()
-      if (chunkPlanBrief) ctx.chunkIndex += 1
+      if (chunkPlanBrief) {
+        ctx.chunkIndex += 1
+        flashCallsThisTurn += 1
+      }
+      if (chunkReflectionBrief) flashCallsThisTurn += 1
       renderChunkProgress({
         chunkIndex: ctx.chunkIndex,
         plan: (chunkPlanBrief ?? null) as never,
@@ -993,6 +1013,8 @@ async function handleNeedsTool(
       })
       spinner.start(colors.muted("thinking..."))
     }
+    // Stash on ctx so it threads to the result via the helper below.
+    ctx.flashCallsThisTurn = flashCallsThisTurn
 
     if (currentTool === "run_command") {
       spinner.stop()
@@ -1044,5 +1066,5 @@ async function handleNeedsTool(
     })
   }
 
-  return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex }
+  return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn }
 }

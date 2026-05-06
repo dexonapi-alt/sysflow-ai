@@ -12,6 +12,7 @@
  * rejected immediately. The reasoning model never calls tools.
  */
 
+import crypto from "node:crypto"
 import { GoogleGenerativeAI } from "@google/generative-ai"
 import { classifyIntent, type IntentHint } from "./intent-classifier.js"
 import { reasoningEnvelopeSchema, assertEnvelopeShape, type ReasoningBrief, type ReasoningTrigger } from "./reasoning-schema.js"
@@ -82,13 +83,16 @@ async function runReasoningInner(payload: ReasoningPayload): Promise<ReasoningBr
   }
 
   // Cache lookup.
+  // Phase 10: hash the FULL context (not slice(0, 2000)) so chunk_plan and
+  // chunk_reflect calls with long histories don't collide in the cache when
+  // their prefixes happen to match.
   const cacheKey = {
     trigger: payload.trigger,
     userMessage: payload.userMessage,
     cwd: payload.cwd ?? "",
     model: payload.model,
     projectMemoryMtime: payload.projectMemoryMtime ?? 0,
-    errorContext: payload.context ? JSON.stringify(payload.context).slice(0, 2000) : "",
+    errorContext: payload.context ? hashContext(payload.context) : "",
   }
   const cached = getReasoningCache(cacheKey)
   if (cached) {
@@ -187,4 +191,18 @@ function stripFences(s: string): string {
     return trimmed.replace(/^```(?:json)?\s*/, "").replace(/```\s*$/, "")
   }
   return trimmed
+}
+
+/**
+ * Stable sha256 hash of the FULL serialised context. Used in the reasoning
+ * cache key so two distinct chunk-plan/reflect contexts can never collide,
+ * regardless of how long the chunk history grows. Truncating to a fixed
+ * prefix (the previous strategy) caused aliasing once contexts shared the
+ * first ~2KB.
+ */
+export function hashContext(ctx: unknown): string {
+  const serialised = JSON.stringify(ctx) ?? ""
+  // Use the same algorithm as buildCacheKey for consistency. Hex digest.
+  // node:crypto's sha256 over a few KB is sub-millisecond.
+  return crypto.createHash("sha256").update(serialised).digest("hex")
 }
