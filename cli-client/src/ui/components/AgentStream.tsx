@@ -3,6 +3,7 @@ import { Box, Static, Text } from "ink"
 import { useAgentEvents } from "../hooks/useAgentEvents.js"
 import { Spinner } from "./Spinner.js"
 import { ToolCard } from "./ToolCard.js"
+import { Typewriter } from "../animation/primitives/index.js"
 import { palette } from "../theme.js"
 
 /**
@@ -19,7 +20,7 @@ import { palette } from "../theme.js"
  * actively-running card and the spinner re-render each frame.
  */
 export function AgentStream(): React.ReactElement {
-  const { log, spinnerText, toolCards } = useAgentEvents()
+  const { log, spinnerText, toolCards, assistantMessage } = useAgentEvents()
 
   // Partition cards: settled ones go to <Static> (no per-frame redraw),
   // the in-flight one (if any) stays in the live region. There's at most
@@ -49,6 +50,21 @@ export function AgentStream(): React.ReactElement {
           <ToolCard card={card} />
         </Box>
       ))}
+      {/*
+        Phase 12 Stage 6: assistant completion text reveals via <Typewriter>
+        in the live region above the spinner. Keyed on assistantMessage.key
+        so each new emission re-mounts the Typewriter and re-triggers the
+        reveal — important when the text repeats (e.g. /continue from a
+        prior chunk's identical summary).
+      */}
+      {assistantMessage && (
+        <Box marginTop={1}>
+          <Text color={palette.muted}>  </Text>
+          <Typewriter key={assistantMessage.key} wpm={250} color={palette.bright}>
+            {assistantMessage.text}
+          </Typewriter>
+        </Box>
+      )}
       {spinnerText !== null && (
         <Box marginTop={0}>
           <Spinner text={spinnerText || undefined} />

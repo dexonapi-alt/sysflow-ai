@@ -877,6 +877,14 @@ async function renderCompletion(
     }
     console.log("  " + boxBot(50))
     console.log("")
+    // Phase 12 Stage 6: surface the completion message to the Ink stream
+    // so AgentStream can render it via <Typewriter>. Use the unrendered
+    // markdown text — the typewriter reveals plain characters and the
+    // user reads it as the agent "writing", whereas a pre-rendered box
+    // would land instantly and break the writing-feel.
+    if (isInkActive() && message.trim().length > 0) {
+      emitAgent({ type: "assistant_message", text: message })
+    }
   }
 
   const doneText = `  ${colors.success(BOX.check)} done`
