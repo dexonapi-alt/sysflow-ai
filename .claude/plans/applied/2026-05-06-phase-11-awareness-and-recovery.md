@@ -1,7 +1,7 @@
 # Phase 11 — Awareness & adaptive recovery loop
 
 - **Created:** 2026-05-06
-- **Status:** in-progress
+- **Status:** implemented (2026-05-07)
 - **Scope:** Detect when the agent is executing a wrong plan (especially on free models) and either auto-correct mid-run or hand the wheel back to the user before more wrong work piles up.
 
 ## Goal
@@ -183,3 +183,27 @@ confidence-tracker.recordSignals(...) →
 chunk-planner (Phase 10, Flash, ~500 tok, with `confidenceState` injected) →
 chunk N+1 executes
 ```
+
+## Completion notes
+
+Implemented 2026-05-07 across 7 PRs (#22–#28). Final tally:
+- **Server:** 268 → 282 tests; +9 schema cases for `divergenceVerdictBrief`, +6 recorder cases for `original_intent`, +14 verification-gate cases (one per disk-side check), +20 confidence-tracker cases (decay, threshold transitions, free-model bump), +1 LLM-off-track weight case.
+- **CLI:** 80 → 99 tests; +8 git-snapshot cases (real `git init` repos), +8 confidence-badge + chunk-progress integration cases, +3 awareness-telemetry usage-log cases.
+- Two new flags (`awareness.enabled` default `true`, `awareness.threshold_off_course=60`, `awareness.threshold_blocked=30`) plus `FREE_MODEL_SENSITIVITY_BUMP=10` constant.
+- Two new memory kinds (`original_intent` + the verbatim user prompt anchor it carries).
+- One new pipeline (`divergence-pipeline`), one new envelope variant (`divergenceVerdictBrief`), one new trigger (`divergence_check`).
+- One new modal (`off-course-prompt`), one new badge helper (`renderConfidenceBadge`), one new git-snapshot queue API (`createChunkSnapshot` / `rollbackToChunk`).
+
+### Deviations from the plan
+
+- The `confidenceState` injection into `chunkPlanBrief` (line 178 of the original Implementation order — "with `confidenceState` injected") was not added. The planner's prompt is already long and the cooldown + score state would be redundant context. Stage 5's badge surfaces state to the user; the planner doesn't need to know it explicitly. If metrics show the planner would benefit from re-strategising under low confidence, Phase 12 can add it.
+- No status-line badge integration. The plan called for the badge in both the chunk-progress box AND the status line. Only the chunk-progress integration landed — the status line already carries model + user info, and adding a third element risked clutter. The transition log (`describeAwarenessTransition`) covers the gap when state flips outside a chunk render.
+- Backtrack drops chunk-state on the server rather than re-planning mid-run (see `decisions.md: ## Backtrack drops chunk-state on the server`). Trade-off accepted: simpler state in exchange for a UX downgrade after backtrack (no chunked loop for the rest of the run).
+- LLM divergence cache leverages the existing Phase 10 sha256 cache key in `task-reasoner.ts` rather than introducing a new `(runId, signals-hash)` cache module. The hashed `errorContext` already includes `recentHeuristicSignals`, so identical contexts hit the cache as designed.
+
+### Follow-ups not in scope
+
+- **Re-bootstrap the chunked loop after backtrack** so the user keeps the loop's UX through a recovery (Phase 12 candidate).
+- **Cross-run divergence learning** — memory of *"this user always means Postgres when they say DB"* (Phase 12 territory).
+- **Auto-fix detected divergences without user input** — explicitly out of scope; too easy to compound the wrong direction.
+- **Status-line badge** — add when there's a clear UX win and not just for parity with the plan.

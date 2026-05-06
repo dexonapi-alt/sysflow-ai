@@ -476,7 +476,7 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
   try {
     if (getFlag<boolean>("awareness.enabled", body.sysbasePath)) {
       ;(clientResp as unknown as Record<string, unknown>).awarenessSnapshot = {
-        state: getThresholdState(runId, body.sysbasePath),
+        state: getThresholdState(runId, body.sysbasePath, body.model),
         confidence: getConfidence(runId),
         lastSignal: null,
       }

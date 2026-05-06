@@ -608,7 +608,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
             recordConfidenceSignals(body.runId, allSignals)
           }
           const score = getConfidence(body.runId)
-          const state = getThresholdState(body.runId, run.sysbasePath as string | null | undefined)
+          const state = getThresholdState(body.runId, run.sysbasePath as string | null | undefined, run.model as string | undefined)
           if (allSignals.length > 0) {
             console.log(`[awareness] chunk ${chunkIdx}: ${heuristicSignals.length} heuristic + ${gateSigs.length} gate + ${llmSignals.length} llm signal(s), confidence=${score} state=${state}`)
           }
@@ -964,7 +964,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     const awarenessOn = getFlag<boolean>("awareness.enabled", run.sysbasePath as string | null | undefined)
     if (awarenessOn) {
       const score = getConfidence(body.runId)
-      const state = getThresholdState(body.runId, run.sysbasePath as string | null | undefined)
+      const state = getThresholdState(body.runId, run.sysbasePath as string | null | undefined, run.model as string | undefined)
       const fullState = getConfidenceState(body.runId)
       const lastSignal = (fullState?.signals.length ?? 0) > 0
         ? fullState!.signals[fullState!.signals.length - 1].detail

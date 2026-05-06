@@ -45,3 +45,30 @@ Past bugs and non-obvious constraints worth preserving so the next contributor d
 - **Symptom:** typing `continue the task` after an interrupted run produced a *Setup project / Implement features / Polish & finalize* box at the top.
 - **Root cause:** the user-message handler called `createFallbackPipeline()` whenever the AI returned `needs_tool` without its own `taskPlan`. Each whack-a-mole patch (PR #4, #7, #11) just narrowed the gating; the real fix was to never call the generic fallback at all.
 - **Fix:** `createFallbackPipeline` is no longer called from the generic path. The task box only renders when the AI itself produces a `taskPlan`. The error-fix path still uses `createFallbackPipeline` because it passes real error-derived step labels.
+
+## Free models commit to a wrong direction at chunk 1 and ride it to the end
+
+- **Source:** plan `applied/2026-05-06-phase-11-awareness-and-recovery.md` (the entire Phase 11 motivating problem)
+- **Symptom:** user asks for *"a postgres-backed user API"*, free-tier model writes Mongoose code in chunk 1, every subsequent chunk extends the wrong stack. Other shapes: scaffolds for stack X then implements stack Y; says *"implementation complete"* with empty `controllers/` and `models/` folders; retries the same broken edit despite repeated tool failures; never re-reads its own files so its mental model diverges from disk.
+- **Root cause:** chunked loop's per-chunk reflector (Phase 10) catches *micro* errors ("import didn't resolve") but not *macro* errors ("you've been building Express + MongoDB but the user said Postgres"). The agent had no mechanism to realise it was committed to the wrong direction.
+- **Fix:** Phase 11 awareness loop. Three independent signal sources (heuristic detector + verification gate + LLM divergence pipeline anchored on the LITERAL user prompt) feed one per-run confidence tracker. When confidence drops below `awareness.threshold_blocked`, an off-course modal hands the wheel back with continue/backtrack/redirect. Free-model thresholds are bumped +10 (Stage 7) so the modal trips earlier on the models that need it most.
+- **Test guards:**
+  - `server/src/services/__tests__/divergence-detector.test.ts` — heuristic table tests
+  - `server/src/services/__tests__/verification-gate.test.ts` — tmpdir fixtures per disk-side check
+  - `server/src/services/__tests__/confidence-tracker.test.ts` — decay, threshold transitions, free-model bump
+  - `cli-client/src/agent/__tests__/git-snapshots.test.ts` — real git-init repo + rollback roundtrip
+
+## Intent-keyword extractor was greedy on hyphens — `postgres-backed` slipped past
+
+- **Source:** Phase 11 Stage 1 (PR #22, caught while writing the heuristic-detector tests)
+- **Symptom:** test case `extractIntentKeywords("build a Postgres-backed user API")` returned `[]`, missing the obvious `postgres` keyword. In production this would mean the `intent_keyword_absent` heuristic never fires for prompts using the common adjective form ("postgres-backed", "react-based", "tailwind-style") even when the implementation didn't use the named tech.
+- **Root cause:** the extractor regex `[a-z][a-z0-9-]+` is greedy and matches `-`, so `postgres-backed` came out as a single token. INTENT_VOCAB has `postgres` and `react-native` (a legit two-part name) but not every hyphen combination.
+- **Fix:** try the whole token first (so `react-native` keeps winning as a single vocab entry), and only on miss split on `-` and re-check each part. `extractIntentKeywords` in `server/src/services/divergence-detector.ts`.
+- **Test guard:** the divergence-detector test suite has the failing case + the `react-native` regression case to make sure the whole-token-first path isn't regressed.
+
+## `AgentResp.awarenessChoice` masquerades as a normal `waiting_for_user`
+
+- **Source:** plan `applied/2026-05-06-phase-11-awareness-and-recovery.md` (Stage 4)
+- **Symptom:** if a future contributor adds another `waiting_for_user` shape and forgets to peek at `awarenessChoice`, the cli would render the off-course evidence as plain text via `askUser` and the user's free-text answer would be sent back as `{ answer: "c" }` with no `kind` marker — the server's off-course branch would never fire.
+- **Why this design:** Phase 11 piggybacked on the existing `waiting_for_user` status to avoid adding a new top-level status to the cli/server protocol. The `awarenessChoice: true` marker on the response (plus `awarenessEvidence` for the modal payload) is the discriminator.
+- **What to do:** when adding a new modal, add a NEW marker field (`scaffoldChoice`, `permissionChoice`, etc.) and check it BEFORE the generic `askUser` in `cli-client/src/agent/agent.ts`'s `user_responded` case. Never overload `awarenessChoice` for a different prompt — split into a new field instead.

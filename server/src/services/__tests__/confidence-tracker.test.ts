@@ -5,7 +5,9 @@ import {
   getConfidenceState,
   getThresholdState,
   clearConfidence,
+  isFreeTierModel,
   INITIAL_SCORE,
+  FREE_MODEL_SENSITIVITY_BUMP,
   _resetForTests,
 } from "../confidence-tracker.js"
 import type { DivergenceSignal } from "../divergence-detector.js"
@@ -129,5 +131,75 @@ describe("confidence-tracker", () => {
     // llm_off_track base 25 × moderate 0.75 = 18.75 → 81.25
     recordSignals("r1", [sig({ category: "llm_off_track", severity: "moderate" })])
     expect(getConfidence("r1")).toBeCloseTo(81.25)
+  })
+
+  // ─── Phase 11 Stage 7: free-model threshold sensitivity bump ───
+
+  it("Stage 7: bumps both thresholds by FREE_MODEL_SENSITIVITY_BUMP for free-tier models", () => {
+    // Defaults are off_course=60, blocked=30. With bump=10 they become 70 and 40.
+    // Score 65 is on_track for paid models (≥60), off_course for free (≥40 but <70).
+    recordSignals("r1", [sig({ category: "intent_keyword_absent", severity: "moderate" })]) // 25*0.75=-18.75 → 81.25
+    recordSignals("r1", [sig({ category: "intent_keyword_absent", severity: "moderate" })]) // -18.75 → 62.5
+    expect(getConfidence("r1")).toBeCloseTo(62.5)
+    // Paid model (no model arg, or non-matching name): 62.5 ≥ 60 → on_track
+    expect(getThresholdState("r1")).toBe("on_track")
+    expect(getThresholdState("r1", null, "claude-3-5-sonnet")).toBe("on_track")
+    // Free model: thresholds become 70 / 40 → 62.5 < 70, ≥ 40 → off_course
+    expect(getThresholdState("r1", null, "openrouter-auto")).toBe("off_course")
+    expect(FREE_MODEL_SENSITIVITY_BUMP).toBe(10)
+  })
+
+  it("Stage 7: bump pushes a borderline score into blocked on free models", () => {
+    // Knock confidence down to ~37 — blocked on free (<40), off_course on paid (<60 but ≥30).
+    for (let i = 0; i < 4; i++) {
+      recordSignals("r1", [sig({ category: "intent_keyword_absent", severity: "moderate" })])
+    }
+    // 100 → 81.25 → 62.5 → 43.75 → 25 ... wait, that's 25 after 4 calls.
+    // Let me use 3 calls: 100 → 81.25 → 62.5 → 43.75. That's blocked on free (<40 is false, 43.75 ≥ 40 → off_course).
+    // Need EXACTLY between 30 (paid blocked) and 40 (free blocked). Score 35 fits.
+    // Restart with a clean state to construct that score precisely.
+    _resetForTests()
+    recordSignals("r2", [sig({ category: "scope_creep", severity: "minor" })]) // 8*0.5=-4 → 96
+    // Knock down 61 more points. intent_keyword_absent major = 25. Three of those = -75 → 21.
+    // Use minor (12.5) and moderate (18.75) to land near 35.
+    recordSignals("r2", [sig({ category: "intent_keyword_absent", severity: "major" })])  // -25 → 71
+    recordSignals("r2", [sig({ category: "intent_keyword_absent", severity: "major" })])  // -25 → 46
+    recordSignals("r2", [sig({ category: "scope_creep", severity: "moderate" })])         // 8*0.75=-6 → 40
+    recordSignals("r2", [sig({ category: "mkdir_empty_at_chunk_boundary", severity: "minor" })]) // 5*0.5=-2.5 → 37.5
+    // Score = 37.5: paid → off_course (≥30), free → blocked (<40)
+    expect(getConfidence("r2")).toBeCloseTo(37.5)
+    expect(getThresholdState("r2", null, "claude-3-5-sonnet")).toBe("off_course")
+    expect(getThresholdState("r2", null, "meta-llama/llama-3.1-405b")).toBe("blocked")
+  })
+})
+
+describe("isFreeTierModel", () => {
+  it("matches the openrouter-auto route", () => {
+    expect(isFreeTierModel("openrouter-auto")).toBe(true)
+    expect(isFreeTierModel("OpenRouter-Auto")).toBe(true)
+  })
+
+  it("matches gemini-flash-or", () => {
+    expect(isFreeTierModel("gemini-flash-or")).toBe(true)
+  })
+
+  it("matches llama family loosely", () => {
+    expect(isFreeTierModel("meta-llama/llama-3.1-405b")).toBe(true)
+    expect(isFreeTierModel("nousresearch/llama-3-tuned")).toBe(true)
+  })
+
+  it("matches mistral family loosely", () => {
+    expect(isFreeTierModel("mistralai/mistral-large")).toBe(true)
+  })
+
+  it("does NOT match paid OpenAI / Anthropic models", () => {
+    expect(isFreeTierModel("gpt-4o")).toBe(false)
+    expect(isFreeTierModel("claude-3-5-sonnet")).toBe(false)
+    expect(isFreeTierModel("gpt-4-turbo")).toBe(false)
+  })
+
+  it("does NOT match strings that merely contain a vowel substring of llama", () => {
+    // Word boundary keeps `\bllama\b` from grabbing "alabama" or similar.
+    expect(isFreeTierModel("alabama-finetune")).toBe(false)
   })
 })
