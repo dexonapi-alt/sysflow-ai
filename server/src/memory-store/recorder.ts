@@ -131,3 +131,56 @@ export async function recordBugPattern(
   const enriched: SourceRefLike = { ...sourceRef, filePaths: filePaths ?? sourceRef.filePaths }
   return safeRecord(cwd, "bug_pattern", briefSummary, enriched, ["bug"])
 }
+
+interface ChunkSummaryLike {
+  chunkIndex: number
+  nextAction?: string
+  executedFiles?: string[]
+  reflection?: {
+    coherent?: boolean
+    nextFocus?: string
+    issues?: string[]
+    shouldStop?: boolean
+  }
+}
+
+/**
+ * Record one chunk's outcome from the chunked-reasoning loop (Phase 10).
+ *
+ * Persisted so a later `/continue` can recall *what was done in chunk N*
+ * and *what the reflector said to focus on next* without re-running the
+ * loop. Files touched become part of the sourceRef so the file-existence
+ * validator marks the entry stale if those files are later removed.
+ */
+export async function recordChunkSummary(
+  cwd: string,
+  summary: ChunkSummaryLike,
+  sourceRef: SourceRefLike,
+): Promise<MemoryEntry | null> {
+  const reflectionLines: string[] = []
+  if (summary.reflection?.coherent === false) {
+    reflectionLines.push(`Issues: ${(summary.reflection.issues ?? []).slice(0, 3).join("; ")}`)
+  }
+  if (summary.reflection?.nextFocus) {
+    reflectionLines.push(`Next focus: ${summary.reflection.nextFocus}`)
+  }
+  if (summary.reflection?.shouldStop) {
+    reflectionLines.push(`Reflector flagged: should stop after this chunk.`)
+  }
+
+  const content = [
+    `Chunk ${summary.chunkIndex}${summary.nextAction ? `: ${summary.nextAction}` : ""}`,
+    summary.executedFiles && summary.executedFiles.length > 0
+      ? `Files: ${summary.executedFiles.slice(0, 8).join(", ")}`
+      : null,
+    ...reflectionLines,
+  ].filter(Boolean).join("\n")
+
+  if (!content.trim()) return null
+
+  const enriched: SourceRefLike = {
+    ...sourceRef,
+    filePaths: [...(sourceRef.filePaths ?? []), ...(summary.executedFiles ?? [])].slice(0, 10),
+  }
+  return safeRecord(cwd, "chunk_summary", content, enriched, ["chunk"])
+}
