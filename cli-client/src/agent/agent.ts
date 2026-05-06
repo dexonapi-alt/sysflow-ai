@@ -35,7 +35,8 @@ import { recordRunSummary } from "./usage-log.js"
 import { estimateTokens as cliEstimateTokens } from "./token-estimate.js"
 import { startJobStatusBar, stopJobStatusBar } from "../cli/job-status.js"
 import { list as listBackgroundJobs, cleanupRun as cleanupBackgroundJobs } from "./background-jobs.js"
-import { createChunkSnapshot, cleanupChunkSnapshots } from "./git.js"
+import { createChunkSnapshot, cleanupChunkSnapshots, rollbackToChunk } from "./git.js"
+import { askOffCourse, type OffCourseEvidence } from "../cli/off-course-prompt.js"
 import { registerSpinner, unregisterSpinner } from "../cli/spinner-control.js"
 import { emitAgent, isInkActive } from "./events.js"
 
@@ -490,6 +491,41 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
 
       case "user_responded": {
         spinner.stop()
+
+        // ─── Phase 11 Stage 4: off-course modal hijacks the generic prompt ───
+        // The server attaches `awarenessChoice: true` + evidence when
+        // confidence drops past awareness.threshold_blocked. Render the
+        // dedicated 3-key modal instead of the generic free-text askUser.
+        const awarenessChoice = (response as Record<string, unknown>).awarenessChoice === true
+        if (awarenessChoice && currentRunId) {
+          const evidence = ((response as Record<string, unknown>).awarenessEvidence ?? {}) as OffCourseEvidence
+          const choice = await askOffCourse(evidence)
+          // Backtrack: roll the working tree back to the snapshot taken at
+          // the start of the chunk that crossed the threshold.
+          if (choice.action === "backtrack") {
+            try {
+              const ok = await rollbackToChunk(process.cwd(), currentRunId, evidence.lastGoodChunkIndex)
+              if (!ok) console.log(colors.warning(`  ⚠ rollback didn't find a snapshot for chunk ${evidence.lastGoodChunkIndex} — keeping current state`))
+            } catch (rollbackErr) {
+              console.log(colors.warning(`  ⚠ rollback failed: ${(rollbackErr as Error).message}`))
+            }
+          }
+          spinner.start(colors.muted("thinking..."))
+          response = await makeServerCall({
+            type: "tool_result",
+            runId: currentRunId,
+            tool: "_user_response",
+            result: {
+              kind: "off_course",
+              action: choice.action,
+              text: choice.text ?? null,
+              lastGoodChunkIndex: evidence.lastGoodChunkIndex,
+              success: true,
+            },
+          }, (label) => { spinner.text = colors.muted(label) })
+          break
+        }
+
         console.log("")
         const questionText = (response.message || response.content || "Waiting for your input") as string
         const renderedQ = renderMarkdown(questionText)

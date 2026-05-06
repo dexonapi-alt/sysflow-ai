@@ -74,11 +74,14 @@ defineFlag("reasoning.chunked_loop_enabled", true, parseBool)
 defineFlag("reasoning.max_chunks_per_run", 12, parseNumber)
 
 // ─── Phase 11: awareness + adaptive recovery ───
-// Default OFF — Stage 1 records data but takes no user-visible action. Flips
-// to default-true at Stage 4 once the off-course modal is wired. Thresholds
-// are read by the confidence tracker via getFlag at evaluation time, so live
-// tuning works without restarting the run.
-defineFlag("awareness.enabled", false, parseBool)
+// Default ON as of Stage 4 — heuristic detector + verification gate +
+// LLM divergence pipeline + off-course modal are all live. Set
+// SYSFLOW_FLAG_AWARENESS_ENABLED=false (or flags.json) to disable. With
+// the flag off the awareness path short-circuits at the trigger gate in
+// task-reasoner.ts and the per-chunk detector skips entirely. Thresholds
+// are read by the confidence tracker via getFlag at evaluation time, so
+// live tuning works without restarting the run.
+defineFlag("awareness.enabled", true, parseBool)
 defineFlag("awareness.threshold_off_course", 60, parseNumber)
 defineFlag("awareness.threshold_blocked", 30, parseNumber)
 
