@@ -280,6 +280,26 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   // emit a one-line transition log when the badge flips
   // (on_track → off_course or off_course → blocked).
   let lastAwarenessState: "on_track" | "off_course" | "blocked" | null = null
+  // Phase 11 Stage 6: per-run awareness telemetry. Three counters land in
+  // recordRunSummary on terminal exit so the JSONL can be diffed across
+  // versions to spot regressions in the awareness loop's noise level.
+  let divergenceDetectionsThisRun = 0
+  let confidenceSampleSum = 0
+  let confidenceSampleCount = 0
+  let autoPauseEventsThisRun = 0
+  /** Inline helper: tally a snapshot for the per-run telemetry counters.
+   *  Counts a "detection" only on the FIRST < 100 sample per chunk so we
+   *  don't double-count when a chunk emits multiple snapshots. */
+  let lastSampledChunkIndex = -1
+  function tallyAwareness(snap: { state: string; confidence: number } | undefined): void {
+    if (!snap) return
+    confidenceSampleSum += snap.confidence
+    confidenceSampleCount += 1
+    if (snap.confidence < 100 && lastSampledChunkIndex !== chunkIndex) {
+      divergenceDetectionsThisRun += 1
+      lastSampledChunkIndex = chunkIndex
+    }
+  }
   // Phase 10: initial-turn chunk plan from user-message.ts
   if ((response as Record<string, unknown>).chunkPlanBrief) {
     spinner.stop()
@@ -292,7 +312,10 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       reflection: null,
       awareness: initialAwareness ?? null,
     })
-    if (initialAwareness) lastAwarenessState = initialAwareness.state
+    if (initialAwareness) {
+      lastAwarenessState = initialAwareness.state
+      tallyAwareness(initialAwareness)
+    }
     spinner.start(colors.muted("thinking..."))
   }
   const currentRunId = (response.runId as string) || ""
@@ -356,6 +379,9 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       backgroundJobsFailed: bgJobsFailed,
       chunkCount: chunkIndex,
       flashCallsCount,
+      divergenceDetections: divergenceDetectionsThisRun,
+      divergenceConfidenceAvg: confidenceSampleCount > 0 ? confidenceSampleSum / confidenceSampleCount : undefined,
+      autoPauseEvents: autoPauseEventsThisRun,
     })
     unregisterSpinner()
   }
@@ -517,6 +543,12 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         chunkIndex = result.chunkIndex
         flashCallsCount += result.flashCallsThisTurn
         lastAwarenessState = result.lastAwarenessState
+        // Phase 11 Stage 6: tally the awareness snapshot from this turn into
+        // the per-run telemetry counters (recorded on terminal exit).
+        tallyAwareness((response as Record<string, unknown>).awarenessSnapshot as { state: string; confidence: number } | undefined)
+        if ((response as Record<string, unknown>).awarenessChoice === true) {
+          autoPauseEventsThisRun += 1
+        }
         noteSuccess(budget)
         break
       }

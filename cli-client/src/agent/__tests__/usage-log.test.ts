@@ -74,4 +74,69 @@ describe("recordRunSummary", () => {
     // No throw, no file. We can't read tmp's usage.jsonl because it shouldn't exist.
     await expect(fs.access(path.join(tmp, "usage.jsonl"))).rejects.toThrow()
   })
+
+  // ─── Phase 11 Stage 6: awareness telemetry ───
+
+  it("persists Phase 11 awareness telemetry when supplied", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-aw1",
+      prompt: "build a postgres api",
+      model: "openrouter-auto",
+      durationMs: 5_000,
+      stepCount: 8,
+      toolCount: 12,
+      errorCount: 1,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      divergenceDetections: 2,
+      divergenceConfidenceAvg: 78.456,
+      autoPauseEvents: 1,
+    })
+    const [entry] = await readEntries()
+    expect(entry.divergenceDetections).toBe(2)
+    // Rounded to one decimal so the JSONL stays diff-friendly across runs.
+    expect(entry.divergenceConfidenceAvg).toBe(78.5)
+    expect(entry.autoPauseEvents).toBe(1)
+  })
+
+  it("defaults awareness telemetry to safe values when omitted (legacy + flag-off runs)", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-aw2",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+    })
+    const [entry] = await readEntries()
+    expect(entry.divergenceDetections).toBe(0)
+    expect(entry.divergenceConfidenceAvg).toBeNull()
+    expect(entry.autoPauseEvents).toBe(0)
+  })
+
+  it("emits divergenceConfidenceAvg=null when no snapshots were observed but other counters are present", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-aw3",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      divergenceDetections: 0,
+      autoPauseEvents: 0,
+      // divergenceConfidenceAvg deliberately omitted — undefined ≠ 0,
+      // because zero would be a valid sample.
+    })
+    const [entry] = await readEntries()
+    expect(entry.divergenceConfidenceAvg).toBeNull()
+  })
 })
