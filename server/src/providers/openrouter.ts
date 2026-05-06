@@ -61,6 +61,10 @@ export class OpenRouterProvider extends BaseProvider {
       const MAX_RETRIES = 2
       let response: Response | undefined
       let lastError: Error | undefined
+      // 16k default — 32k drains free OpenRouter credits in two requests and
+      // most agent turns don't use anywhere near that. The 402-affordability
+      // retry below shrinks further if even 16k is too much.
+      let maxTokensCap = this.getAdaptiveMaxTokens(16384)
 
       for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
         try {
@@ -80,12 +84,28 @@ export class OpenRouterProvider extends BaseProvider {
               messages: history,
               response_format: { type: "json_object" },
               temperature: 0.1,
-              max_tokens: this.getAdaptiveMaxTokens(32768)
+              max_tokens: maxTokensCap
             }),
             signal: controller.signal
           })
 
           clearTimeout(timeout)
+
+          // 402 = "you can only afford N tokens" on free OpenRouter accounts.
+          // Parse the affordable number out of the error and retry once with
+          // a 90% safety margin below it. Avoids the user seeing a confusing
+          // "402 — upgrade for more credits" abort when they're working
+          // through a small agent turn that doesn't actually need 16k+.
+          if (response.status === 402 && attempt < MAX_RETRIES) {
+            const errBody = await response.clone().text()
+            const affordable = parseAffordableTokens(errBody)
+            if (affordable && affordable > 512) {
+              const next = Math.floor(affordable * 0.9)
+              console.warn(`[openrouter] 402 affordability — lowering max_tokens ${maxTokensCap} → ${next} and retrying`)
+              maxTokensCap = next
+              continue
+            }
+          }
           break
         } catch (fetchErr) {
           lastError = fetchErr as Error
@@ -114,6 +134,13 @@ export class OpenRouterProvider extends BaseProvider {
 
         if (status === 401 || status === 403) {
           return this.failedResponse(`OpenRouter auth error (${status}). Check your OPENROUTER_API_KEY.`)
+        }
+        if (status === 402) {
+          return this.failedResponse(
+            `OpenRouter is out of credits and even the lowest affordable max_tokens would be too small to be useful. ` +
+            `Top up at https://openrouter.ai/settings/credits, switch model with /model gemini-flash, ` +
+            `or set GEMINI_API_KEY in server/.env (free tier from Google AI Studio). Original error: ${errBody.slice(0, 200)}`
+          )
         }
         return this.failedResponse(`OpenRouter error ${status}: ${errBody.slice(0, 300)}`)
       }
@@ -159,4 +186,17 @@ export class OpenRouterProvider extends BaseProvider {
       return this.failedResponse(`OpenRouter error: ${errMsg}`)
     }
   }
+}
+
+/**
+ * Pull the affordability number out of an OpenRouter 402 body, e.g.:
+ *   "You requested up to 32768 tokens, but can only afford 15018."
+ * Returns null when the body doesn't carry one. Exported for tests.
+ */
+export function parseAffordableTokens(errBody: string): number | null {
+  if (!errBody) return null
+  const m = errBody.match(/can only afford\s+(\d+)/i)
+  if (!m) return null
+  const n = parseInt(m[1], 10)
+  return Number.isFinite(n) && n > 0 ? n : null
 }
