@@ -139,4 +139,129 @@ describe("reasoning-schema", () => {
     })
     expect(r.success).toBe(false)
   })
+
+  // ─── Phase 10: chunk_plan + chunk_reflect envelopes ───
+
+  const baseChunkPlanBrief = {
+    nextAction: "write user model",
+    files: ["src/models/User.js"],
+    rationale: "models come before routes that import them",
+    dependencies: ["src/db.js"],
+    expectedSizeBin: "small" as const,
+    isFinalChunk: false,
+  }
+
+  const baseChunkReflectionBrief = {
+    coherent: true,
+    issues: [],
+    nextFocus: "wire user routes into server.js",
+    shouldStop: false,
+  }
+
+  it("parses a valid chunk_plan envelope", () => {
+    const r = reasoningEnvelopeSchema.safeParse({
+      pipeline: "chunk_plan",
+      confidence: "HIGH",
+      decision: "proceed",
+      missingContext: [],
+      chunkPlanBrief: baseChunkPlanBrief,
+      reasoningTrace: "models first",
+    })
+    expect(r.success).toBe(true)
+  })
+
+  it("parses a valid chunk_reflect envelope", () => {
+    const r = reasoningEnvelopeSchema.safeParse({
+      pipeline: "chunk_reflect",
+      confidence: "HIGH",
+      decision: "proceed",
+      missingContext: [],
+      chunkReflectionBrief: baseChunkReflectionBrief,
+      reasoningTrace: "all good",
+    })
+    expect(r.success).toBe(true)
+  })
+
+  it("chunk_plan rejects more than 5 files", () => {
+    const r = reasoningEnvelopeSchema.safeParse({
+      pipeline: "chunk_plan",
+      confidence: "HIGH",
+      decision: "proceed",
+      missingContext: [],
+      chunkPlanBrief: { ...baseChunkPlanBrief, files: ["a", "b", "c", "d", "e", "f"] },
+      reasoningTrace: "x",
+    })
+    expect(r.success).toBe(false)
+  })
+
+  it("chunk_plan requires at least 1 file", () => {
+    const r = reasoningEnvelopeSchema.safeParse({
+      pipeline: "chunk_plan",
+      confidence: "HIGH",
+      decision: "proceed",
+      missingContext: [],
+      chunkPlanBrief: { ...baseChunkPlanBrief, files: [] },
+      reasoningTrace: "x",
+    })
+    expect(r.success).toBe(false)
+  })
+
+  it("chunk_plan rejects unknown expectedSizeBin", () => {
+    const r = reasoningEnvelopeSchema.safeParse({
+      pipeline: "chunk_plan",
+      confidence: "HIGH",
+      decision: "proceed",
+      missingContext: [],
+      chunkPlanBrief: { ...baseChunkPlanBrief, expectedSizeBin: "huge" },
+      reasoningTrace: "x",
+    })
+    expect(r.success).toBe(false)
+  })
+
+  it("chunk_reflect caps issues at 6", () => {
+    const r = reasoningEnvelopeSchema.safeParse({
+      pipeline: "chunk_reflect",
+      confidence: "HIGH",
+      decision: "proceed",
+      missingContext: [],
+      chunkReflectionBrief: { ...baseChunkReflectionBrief, issues: ["a", "b", "c", "d", "e", "f", "g"] },
+      reasoningTrace: "x",
+    })
+    expect(r.success).toBe(false)
+  })
+
+  it("assertEnvelopeShape rejects chunk_plan without chunkPlanBrief", () => {
+    const env = reasoningEnvelopeSchema.parse({
+      pipeline: "chunk_plan",
+      confidence: "HIGH",
+      decision: "proceed",
+      missingContext: [],
+      reasoningTrace: "x",
+      // chunkPlanBrief missing!
+    })
+    expect(() => assertEnvelopeShape(env)).toThrow(/chunk_plan.*null/)
+  })
+
+  it("assertEnvelopeShape rejects chunk_reflect without chunkReflectionBrief", () => {
+    const env = reasoningEnvelopeSchema.parse({
+      pipeline: "chunk_reflect",
+      confidence: "HIGH",
+      decision: "proceed",
+      missingContext: [],
+      reasoningTrace: "x",
+    })
+    expect(() => assertEnvelopeShape(env)).toThrow(/chunk_reflect.*null/)
+  })
+
+  it("assertEnvelopeShape passes chunk_plan with brief", () => {
+    const env = reasoningEnvelopeSchema.parse({
+      pipeline: "chunk_plan",
+      confidence: "MEDIUM",
+      decision: "proceed",
+      missingContext: [],
+      chunkPlanBrief: baseChunkPlanBrief,
+      reasoningTrace: "x",
+    })
+    expect(() => assertEnvelopeShape(env)).not.toThrow()
+  })
 })

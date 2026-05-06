@@ -15,6 +15,11 @@ export const triggerSchema = z.enum([
   "self_invoked",
   "on_error",
   "on_completion",
+  // Phase 10: chunked-reasoning loop. Fires between every main-model turn —
+  // chunk_plan picks the next chunk's files, chunk_reflect verifies the just-
+  // executed chunk's coherence. Both are Gemini Flash, ~300-500 tok each.
+  "chunk_plan",
+  "chunk_reflect",
 ])
 export type ReasoningTrigger = z.infer<typeof triggerSchema>
 
@@ -115,6 +120,45 @@ export const decisionBriefSchema = z.object({
 })
 export type DecisionBrief = z.infer<typeof decisionBriefSchema>
 
+// ─── Chunk-plan pipeline brief (Phase 10) ───
+//
+// The planner runs at every chunk boundary. Input: preflight brief + chunks
+// already done + last reflection. Output: which files the next chunk should
+// touch, in what order, and why. The MAIN model is then told to honour this
+// list — so the schema is deliberately tight.
+export const chunkPlanBriefSchema = z.object({
+  /** Short label for the chunk, shown in the CLI ("write models", "wire routes"). */
+  nextAction: z.string().min(1).max(80),
+  /** Concrete files to write/edit this chunk. ≤5 to keep main-model output small. */
+  files: z.array(z.string().min(1).max(160)).min(1).max(5),
+  /** One-line justification — the chunk loop displays this so the user sees the planner's logic. */
+  rationale: z.string().min(1).max(240),
+  /** Files this chunk depends on having been written/read in a prior chunk. */
+  dependencies: z.array(z.string().max(160)).max(8),
+  /** Coarse output-size hint for budgeting. */
+  expectedSizeBin: z.enum(["tiny", "small", "medium", "large"]),
+  /** True when the planner believes this is the final chunk. */
+  isFinalChunk: z.boolean(),
+})
+export type ChunkPlanBrief = z.infer<typeof chunkPlanBriefSchema>
+
+// ─── Chunk-reflector pipeline brief (Phase 10) ───
+//
+// The reflector runs after every chunk, on the just-executed tool results.
+// Verifies the chunk is coherent (imports resolve, files non-empty, plan was
+// honoured) and surfaces issues for the next planner call to address.
+export const chunkReflectionBriefSchema = z.object({
+  /** Did the chunk produce a coherent set of files? */
+  coherent: z.boolean(),
+  /** Surface any issues — empty list means the chunk landed clean. */
+  issues: z.array(z.string().max(200)).max(6),
+  /** Suggestion for what the next chunk should focus on (or "" if shouldStop). */
+  nextFocus: z.string().max(240),
+  /** Reflector says we're done — caller should emit completed instead of continuing. */
+  shouldStop: z.boolean(),
+})
+export type ChunkReflectionBrief = z.infer<typeof chunkReflectionBriefSchema>
+
 // ─── Envelope: discriminated union over the four briefs ───
 //
 // Zod's discriminatedUnion would be cleaner but `pipeline` doesn't sit on
@@ -122,7 +166,7 @@ export type DecisionBrief = z.infer<typeof decisionBriefSchema>
 // nullable brief fields and validate post-hoc that exactly one is filled.
 
 export const reasoningEnvelopeSchema = z.object({
-  pipeline: z.enum(["implement", "bug", "summary", "decision", "simple"]),
+  pipeline: z.enum(["implement", "bug", "summary", "decision", "simple", "chunk_plan", "chunk_reflect"]),
   confidence: confidenceSchema,
   decision: decisionSchema,
   missingContext: z.array(missingContextItemSchema).max(5).default([]),
@@ -130,6 +174,8 @@ export const reasoningEnvelopeSchema = z.object({
   bugBrief: bugBriefSchema.nullable().optional(),
   summaryBrief: summaryBriefSchema.nullable().optional(),
   decisionBrief: decisionBriefSchema.nullable().optional(),
+  chunkPlanBrief: chunkPlanBriefSchema.nullable().optional(),
+  chunkReflectionBrief: chunkReflectionBriefSchema.nullable().optional(),
   reasoningTrace: z.string().max(800),
 })
 export type ReasoningBrief = z.infer<typeof reasoningEnvelopeSchema>
@@ -143,11 +189,13 @@ export type ReasoningBrief = z.infer<typeof reasoningEnvelopeSchema>
 export function assertEnvelopeShape(env: ReasoningBrief): ReasoningBrief {
   const slot = ((): unknown => {
     switch (env.pipeline) {
-      case "implement": return env.implementBrief
-      case "bug":       return env.bugBrief
-      case "summary":   return env.summaryBrief
-      case "decision":  return env.decisionBrief
-      case "simple":    return null
+      case "implement":      return env.implementBrief
+      case "bug":            return env.bugBrief
+      case "summary":        return env.summaryBrief
+      case "decision":       return env.decisionBrief
+      case "chunk_plan":     return env.chunkPlanBrief
+      case "chunk_reflect":  return env.chunkReflectionBrief
+      case "simple":         return null
     }
   })()
   if (env.pipeline !== "simple" && (slot === null || slot === undefined)) {

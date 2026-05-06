@@ -37,7 +37,12 @@ const inFlightSelfInvoked = new Set<string>()
 
 export async function runReasoning(payload: ReasoningPayload): Promise<ReasoningBrief | null> {
   // Trigger-level kill switch.
-  const flagName = `prompt.${payload.trigger}_reasoning_enabled` as const
+  // Phase 10: both chunk triggers share one flag (reasoning.chunked_loop_enabled)
+  // because they're a unit — there's no useful state where the planner runs
+  // without the reflector or vice versa.
+  const flagName = (payload.trigger === "chunk_plan" || payload.trigger === "chunk_reflect")
+    ? "reasoning.chunked_loop_enabled"
+    : (`prompt.${payload.trigger}_reasoning_enabled` as const)
   try {
     if (!getFlag<boolean>(flagName, payload.sysbasePath)) return null
   } catch {
@@ -122,6 +127,11 @@ function pickPipeline(payload: ReasoningPayload): PipelineKind | "simple" {
   if (payload.trigger === "self_invoked") return "decision"
   if (payload.trigger === "on_error") return "bug"
   if (payload.trigger === "on_completion") return "summary"
+  // Phase 10: chunked-loop triggers route directly. No intent classifier
+  // because chunk_plan / chunk_reflect are always invoked from inside an
+  // active agent loop where the pipeline is already known.
+  if (payload.trigger === "chunk_plan") return "chunk_plan"
+  if (payload.trigger === "chunk_reflect") return "chunk_reflect"
   // preflight: defer to intent classifier.
   const hint: IntentHint = classifyIntent(payload.userMessage)
   return hint
