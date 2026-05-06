@@ -234,6 +234,63 @@ export function renderPipelineBox(
   console.log("  " + colors.bar(BOX.bl + BOX.h.repeat(width) + BOX.br))
 }
 
+// ─── Phase 10: agent-progress renderer ───
+//
+// One-line natural-language summary of what the agent is about to do next
+// and any issues from the previous step that need fixing. Deliberately
+// avoids the implementation-detail "chunk N/M" terminology — the user
+// shouldn't have to know the agent runs in a planner→execute→reflect loop.
+// They just see "what is it about to do?" and (when it matters) "what
+// went wrong with the last step?".
+//
+// Stays silent when the previous step landed clean — only the yellow ⚠ +
+// issues list surface when the reflector flagged something.
+
+interface ChunkPlanLike {
+  nextAction?: string
+  files?: string[]
+  isFinalChunk?: boolean
+}
+
+interface ChunkReflectionLike {
+  coherent?: boolean
+  issues?: string[]
+  shouldStop?: boolean
+}
+
+export function renderChunkProgress(args: {
+  /** Unused in current rendering — kept for future telemetry hooks. */
+  chunkIndex: number
+  /** Just-resolved planner brief for the upcoming step. */
+  plan?: ChunkPlanLike | null
+  /** Reflector's verdict on the just-completed step. */
+  reflection?: ChunkReflectionLike | null
+}): void {
+  const { plan, reflection } = args
+  if (!plan && !reflection) return
+
+  // Surface reflector issues FIRST — these are the only attention-grabbing
+  // things the user needs to see. Coherent-and-fine reflections stay silent.
+  if (reflection?.coherent === false && reflection.issues && reflection.issues.length > 0) {
+    const issueCount = reflection.issues.length
+    console.log("  " + colors.warning(`⚠ ${issueCount} thing${issueCount === 1 ? "" : "s"} to fix from last step:`))
+    for (const issue of reflection.issues.slice(0, 3)) {
+      console.log("    " + colors.muted("• ") + colors.warning(issue))
+    }
+    if (issueCount > 3) {
+      console.log("    " + colors.muted(`• …${issueCount - 3} more`))
+    }
+  }
+
+  // Surface the upcoming step's intent in plain language, e.g. "▸ write models".
+  if (plan?.nextAction) {
+    const fileNote = Array.isArray(plan.files) && plan.files.length > 0
+      ? colors.muted(` (${plan.files.length} file${plan.files.length === 1 ? "" : "s"})`)
+      : ""
+    console.log("  " + colors.accent(BOX.arrow) + " " + colors.bright(plan.nextAction) + fileNote)
+  }
+}
+
 export function printStepTransition(
   completedLabel: string | null | undefined,
   startedLabel: string | null | undefined,

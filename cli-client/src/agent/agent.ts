@@ -20,6 +20,7 @@ import {
   isHiddenStep,
   renderMarkdown,
   renderPipelineBox,
+  renderChunkProgress,
   printStepTransition,
 } from "../cli/render.js"
 import {
@@ -240,6 +241,21 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   const completedSteps = new Set<string>()
   let lastDisplayedAction: string | null = null
   let lastDisplayedReasoning: string | null = null
+  // Phase 10: track which chunk index we're rendering so the badge increments
+  // monotonically across turns (server doesn't send the index — it's implicit
+  // in the order chunkPlanBrief arrives).
+  let chunkIndex = 0
+  // Phase 10: initial-turn chunk plan from user-message.ts
+  if ((response as Record<string, unknown>).chunkPlanBrief) {
+    spinner.stop()
+    chunkIndex = 1
+    renderChunkProgress({
+      chunkIndex,
+      plan: (response as Record<string, unknown>).chunkPlanBrief as never,
+      reflection: null,
+    })
+    spinner.start(colors.muted("thinking..."))
+  }
   const currentRunId = (response.runId as string) || ""
   let lastPipelineStepId: string | null = null
   let prevTool: string | null = null  // for read-coalescing in handleNeedsTool
@@ -434,7 +450,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         const result = await handleNeedsTool(
           response,
           spinner,
-          { hasReasoning, lastDisplayedAction, lastDisplayedReasoning, currentRunId, taskShown, taskSteps, completedSteps, lastPipelineStepId, prevTool, budget },
+          { hasReasoning, lastDisplayedAction, lastDisplayedReasoning, currentRunId, taskShown, taskSteps, completedSteps, lastPipelineStepId, prevTool, chunkIndex, budget },
           makeServerCall,
         )
         response = result.response
@@ -445,6 +461,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         lastDisplayedReasoning = result.lastDisplayedReasoning
         lastPipelineStepId = result.lastPipelineStepId
         prevTool = result.toolThisTurn
+        chunkIndex = result.chunkIndex
         noteSuccess(budget)
         break
       }
@@ -675,6 +692,8 @@ interface NeedsToolCtx {
   lastPipelineStepId: string | null
   /** Tool name from the previous turn — lets us coalesce consecutive reads. */
   prevTool: string | null
+  /** Phase 10: chunk number (1-indexed) for the chunk-progress badge. */
+  chunkIndex: number
   budget: RetryBudget
 }
 
@@ -688,6 +707,8 @@ interface NeedsToolResult {
   lastPipelineStepId: string | null
   /** What tool ran this turn — caller threads it back into ctx.prevTool. */
   toolThisTurn: string | null
+  /** Phase 10: chunk index after this turn (caller threads back into ctx.chunkIndex). */
+  chunkIndex: number
 }
 
 async function handleNeedsTool(
@@ -778,12 +799,12 @@ async function handleNeedsTool(
           tool: "_recovery",
           result: { error: (batchError as Error).message, success: false }
         })
-        return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null }
+        return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex }
       }
       console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.success("done")}`)
       console.log("")
       spinner.start(colors.muted("thinking..."))
-      return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null }
+      return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex }
     }
 
     spinner.start(colors.muted(`  executing ${toolCalls!.length} tools...`))
@@ -822,7 +843,7 @@ async function handleNeedsTool(
         result: { error: (batchError as Error).message, success: false }
       })
     }
-    return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null }
+    return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex }
   }
 
   // ── SINGLE TOOL PATH ──
@@ -956,6 +977,23 @@ async function handleNeedsTool(
       spinner.start(colors.muted("thinking..."))
     }
 
+    // Phase 10: per-turn chunk progress. The server attaches both briefs
+    // when the chunked loop is active — reflection is the verdict on the
+    // chunk we just executed, plan is for the next chunk to come. Increment
+    // ctx.chunkIndex when a new plan arrives so the badge stays monotonic.
+    const chunkPlanBrief = (response as Record<string, unknown>).chunkPlanBrief
+    const chunkReflectionBrief = (response as Record<string, unknown>).chunkReflectionBrief
+    if (chunkPlanBrief || chunkReflectionBrief) {
+      spinner.stop()
+      if (chunkPlanBrief) ctx.chunkIndex += 1
+      renderChunkProgress({
+        chunkIndex: ctx.chunkIndex,
+        plan: (chunkPlanBrief ?? null) as never,
+        reflection: (chunkReflectionBrief ?? null) as never,
+      })
+      spinner.start(colors.muted("thinking..."))
+    }
+
     if (currentTool === "run_command") {
       spinner.stop()
       const toolResult = response.lastToolResult as Record<string, unknown> | undefined
@@ -1006,5 +1044,5 @@ async function handleNeedsTool(
     })
   }
 
-  return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null }
+  return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex }
 }
