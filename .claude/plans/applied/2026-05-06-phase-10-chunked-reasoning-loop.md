@@ -1,7 +1,7 @@
 # Phase 10 — Chunked reasoning loop
 
 - **Created:** 2026-05-06
-- **Status:** in-progress
+- **Status:** implemented (2026-05-06)
 - **Scope:** Replace the run-level `preflight reason → bulk turn` flow with a per-chunk `plan → execute → reflect → plan` loop driven by Gemini Flash, so the main model emits small focused chunks instead of one mega-response.
 
 ## Goal
@@ -154,3 +154,26 @@ This phase exercises the reasoning + memory systems harder than they've been use
 - Per-pipeline prompt files get repetitive → factor a shared helper in `pipelines/index.ts`.
 
 These count as in-scope foundation work for whichever stage surfaces the gap. Out-of-scope is anything that's *not* a downstream consequence of this phase's load (e.g. don't redo the whole memory file format here just because we're touching the recorder).
+
+## Completion notes
+
+Implemented over 7 PRs (#15, #16, #17, #18, #19, #20, plus this Stage 7 docs PR), all merged to `main`.
+
+**Deviations from the plan:**
+
+- **CLI rendering wording (Stage 5).** The plan called for `▸ chunk 2/5 · planner: write models · ✔ last chunk coherent`. User feedback during PR #19 review: "chunk N" is implementation detail the user shouldn't have to know. Final wording renders natural agent steps (`▸ write models (3 files)`) and stays silent on coherent reflections — only `coherent: false` issues surface, framed as *"⚠ N things to fix from last step"*. Decision recorded in `.claude/knowledge/decisions.md`.
+- **Cache-key fix (Stage 6) was upgraded mid-stage.** The plan listed caching as a pure observability win. Implementation surfaced a real bug: `task-reasoner.ts` truncated `errorContext` to 2000 chars before hashing, which collided when chunk histories shared a long prefix. Fixed by hashing the full serialised context. Documented in `.claude/knowledge/gotchas.md`.
+- **Handler-level integration tests deferred (Stage 3).** The plan called for `tool-result.test.ts` mocking the model + reasoner for an end-to-end chunked loop assertion. Mocking the real-world deps (db, providers, services) added more brittleness than confidence; instead, Stage 1 + Stage 2's module-level tests cover the underlying logic, and the live system gets tested via the manual smoke + the per-run telemetry from Stage 6.
+
+**In-scope foundation iteration that did happen:**
+
+- The reasoning envelope grew two new discriminated cases (`chunkPlanBrief`, `chunkReflectionBrief`) cleanly — no `unknown`-cast workarounds.
+- The cache key was strengthened (sha256 over full context) instead of side-channelling around it.
+- The memory recorder kind enum gained `chunk_summary` cleanly; no validator changes needed because the existing secret filter is content-agnostic.
+
+**Follow-ups deliberately left out of scope (Phase 11+):**
+
+- Cross-run divergence learning (Phase 12 territory).
+- Auto-recovery on `shouldStop` flagging — for v1, the loop just halts; auto-replan is a Phase 11 concern.
+- Streaming chunk delivery (SSE-within-chunks) — main-model still emits chunks as discrete responses.
+- Multi-agent / parallel chunks across the same run — sequential only.
