@@ -69,3 +69,87 @@ They have different concerns, different cadences, different failure modes. Mergi
 - Prompt injection: `server/src/providers/base-provider.ts: renderChunkPlanSection`
 - Kill switch: flag `reasoning.chunked_loop_enabled` (default `true`); cap flag `reasoning.max_chunks_per_run` (default `12`)
 - CLI render: `cli-client/src/cli/render.ts: renderChunkProgress`
+
+## Awareness loop (Phase 11)
+
+- **Source:** plan `applied/2026-05-06-phase-11-awareness-and-recovery.md`
+
+The chunked loop catches micro errors per chunk ("import didn't resolve"). The awareness loop catches macro errors *across* chunks ("you've been building Express + MongoDB but the user said Postgres"). Three signal streams feed one per-run confidence tracker; when confidence drops past `awareness.threshold_blocked` (default 30/100), the agent surfaces an off-course modal so the user can continue/backtrack/redirect.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  chunk N executes ── tool results land                               │
+│       │                                                               │
+│       ▼                                                               │
+│  chunk_reflect (Phase 10 reflector)                                   │
+│       │                                                               │
+│       │  (awareness branch — gated by `awareness.enabled`)            │
+│       │                                                               │
+│       ├──► heuristic detector (pure, in-memory)                       │
+│       │      6 signals: same_file_edit, repeated_tool_error,          │
+│       │      mkdir_empty, intent_keyword_absent, scope_creep,         │
+│       │      completion_claims_unwritten_files                        │
+│       │                                                               │
+│       ├──► verification gate (4 disk-side checks, parallel <1s)       │
+│       │      import_resolves, deps_cross_check, node_syntax,          │
+│       │      dir_emptiness                                            │
+│       │                                                               │
+│       └──► LLM divergence (Flash, ~300 tok)                           │
+│              fires when heuristics flag OR every 2nd chunk            │
+│              compares files-modified against the LITERAL prompt       │
+│              (anchored via `original_intent` memory entry)            │
+│              emits one `llm_off_track` signal when onTrack=false      │
+│                                                                       │
+│  signals merge → confidence-tracker.recordSignals()                   │
+│       │   weighted decay; threshold derived per-call                  │
+│       ▼                                                               │
+│  getThresholdState()  ── 'on_track' / 'off_course' / 'blocked'        │
+│       │                                                               │
+│       │  if blocked                                                   │
+│       ├──────► waiting_for_user with awarenessChoice + evidence       │
+│       │            cli renders off-course modal (3 keys)              │
+│       │            backtrack: rollbackToChunk(lastGoodChunkIndex)     │
+│       │                                                               │
+│       │  if on_track / off_course                                     │
+│       ▼                                                               │
+│  awarenessSnapshot stamped on response → cli renders badge inline    │
+│                                                                       │
+│  chunk_plan → chunk N+1 executes (loop)                               │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Composition with Phase 10 (additive, not merged)
+
+Heuristic + gate + LLM divergence run as **three peer signal sources**, not chained. See `decisions.md: ## Awareness signal sources are peers, not chained`. Each signal contributes a weighted decay independently; the tracker is the only place that sees their union.
+
+### Failure modes the loop handles
+
+- **No `GEMINI_API_KEY`** → LLM divergence half short-circuits at the trigger gate; heuristic + gate keep firing on their own. Detection survives without Flash.
+- **`awareness.enabled = false`** → entire awareness branch in `tool-result.ts` is skipped; chunked loop runs as Phase 10 only.
+- **Confidence cooldown after user resolution** → 2-chunk mute (`POST_RESOLUTION_COOLDOWN_CHUNKS`) prevents `continue the task` from immediately re-firing the same modal.
+- **Per-run LLM cap** → `MAX_LLM_DIVERGENCE_PER_RUN = 8` bounds Flash quota even if heuristics keep flagging.
+- **Backtrack on a non-git cwd** → `rollbackToChunk` returns `false` cleanly; cli surfaces a warning and continues with the agent's current state instead of pretending success.
+
+### Free-model heightened sensitivity (Phase 11 Stage 7)
+
+Free-tier models (`openrouter-auto` / `llama` / `mistral` / `gemini-flash-or`) are exactly where the macro-error problem hits hardest. `getThresholdState` accepts an optional `model` arg and bumps both thresholds by `FREE_MODEL_SENSITIVITY_BUMP = 10` when the model matches `isFreeTierModel(model)`. Net effect: a free-tier run hits `off_course` at confidence 70 and `blocked` at 40 (vs. 60 / 30 on a paid model). Paid models keep the gentler defaults — the awareness modal stays a rare event for them.
+
+### State + persistence
+
+- `server/src/services/confidence-tracker.ts` — per-run in-memory `Map<runId, ConfidenceState>`. Cleared on terminal exit alongside `clearChunkState`.
+- `server/src/memory-store/recorder.ts: recordOriginalIntent()` — persists the verbatim user prompt to `.sysflow-memory.md` once per new run. The LLM divergence pipeline reads this back so it compares against the LITERAL ask, not the preflight brief's interpretation.
+- `cli-client/src/agent/usage-log.ts` — per-run `RunSummary` carries `divergenceDetections`, `divergenceConfidenceAvg`, `autoPauseEvents` so the loop's behaviour is observable on disk.
+- `cli-client/src/agent/git.ts` — `Map<runId, ChunkSnapshot[]>` queue separate from Phase 7's single-snapshot store. `createChunkSnapshot` runs before each chunk's tools execute; `rollbackToChunk(lastGoodChunkIndex)` is invoked by the cli when the user picks `b` in the modal.
+
+### Key files (one source of truth per concern)
+
+- Detector (heuristic): `server/src/services/divergence-detector.ts`
+- Tracker: `server/src/services/confidence-tracker.ts`
+- Verification gate: `server/src/services/verification-gate.ts`
+- LLM pipeline: `server/src/reasoning/pipelines/divergence-pipeline.ts`
+- Loop driver: `server/src/handlers/tool-result.ts` (awareness block after `chunk_reflect`)
+- Off-course modal: `cli-client/src/cli/off-course-prompt.ts`
+- Snapshot queue: `cli-client/src/agent/git.ts` (`createChunkSnapshot` / `rollbackToChunk`)
+- Memory anchor: `recordOriginalIntent` in `server/src/memory-store/recorder.ts`
+- Kill switch: `awareness.enabled` (default `true`); thresholds `awareness.threshold_off_course` (60), `awareness.threshold_blocked` (30)
+- CLI badge: `cli-client/src/cli/render.ts: renderConfidenceBadge`

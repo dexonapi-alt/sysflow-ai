@@ -103,16 +103,47 @@ export function getConfidenceState(runId: string): ConfidenceState | null {
  *   awareness.threshold_blocked    (default 30)
  *
  * `sysbasePath` is forwarded so flags.json overrides are respected.
+ *
+ * Phase 11 Stage 7: when `model` matches the free-tier model regex
+ * (openrouter-auto / llama / mistral / gemini-flash-or), both thresholds
+ * rise by `FREE_MODEL_SENSITIVITY_BUMP` (default +10), making the awareness
+ * loop trip earlier on free models — they're the ones that commit to a
+ * wrong direction at chunk 1 and ride it to the end (the original bug
+ * Phase 11 was designed to catch).
  */
-export function getThresholdState(runId: string, sysbasePath?: string | null): ThresholdState {
+export function getThresholdState(runId: string, sysbasePath?: string | null, model?: string | null): ThresholdState {
   const score = getConfidence(runId)
   let offCourseAt = 60
   let blockedAt = 30
   try { offCourseAt = getFlag<number>("awareness.threshold_off_course", sysbasePath) } catch {}
   try { blockedAt = getFlag<number>("awareness.threshold_blocked", sysbasePath) } catch {}
+  if (model && isFreeTierModel(model)) {
+    offCourseAt += FREE_MODEL_SENSITIVITY_BUMP
+    blockedAt += FREE_MODEL_SENSITIVITY_BUMP
+  }
   if (score < blockedAt) return "blocked"
   if (score < offCourseAt) return "off_course"
   return "on_track"
+}
+
+/** How many points to bump both thresholds when the run's model is free-tier. */
+export const FREE_MODEL_SENSITIVITY_BUMP = 10
+
+/**
+ * True when the run's model identifier looks like a free-tier OpenRouter
+ * route or one of the free-tier-class providers we explicitly call out
+ * (the Phase 11 plan's free-model list).
+ */
+export function isFreeTierModel(model: string): boolean {
+  const lower = model.toLowerCase()
+  if (lower.includes("openrouter-auto")) return true
+  if (lower.includes("gemini-flash-or")) return true
+  // Loose substring matches — `meta-llama/llama-3.1-405b` and
+  // `mistralai/mistral-large` both qualify. False positives like
+  // a paid LLaMA-finetune are tolerable; the cost is just slightly
+  // earlier off-course warnings on a model that probably isn't drifting.
+  if (/\b(?:llama|mistral)\b/.test(lower)) return true
+  return false
 }
 
 /** Wipe a run's state. Called from the same teardown path as `clearChunkState`. */
