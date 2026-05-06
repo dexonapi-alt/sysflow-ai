@@ -563,6 +563,11 @@ export abstract class BaseProvider {
       toolMsg += "\n\nContinue with the next action needed to complete the task."
     }
 
+    // Phase 10: chunk plan injection. Each turn that has a fresh planner
+    // verdict gets the file list re-stamped at the bottom so the model sees
+    // it last (closest to its response window).
+    toolMsg += renderChunkPlanSection(payload.chunkPlanBrief)
+
     return toolMsg
   }
 
@@ -646,6 +651,13 @@ export abstract class BaseProvider {
       }
       msg += `\n═══ END PLAN ═══`
     }
+
+    // ─── Phase 10: chunk plan injection ───
+    // The chunk-planner (separate Gemini Flash call) decided which 1-5 files
+    // this turn should produce. Surface that decision to the main model so it
+    // honours the file list exactly. The reflector (next Flash call after
+    // tool results) will catch any deviation.
+    msg += renderChunkPlanSection(payload.chunkPlanBrief)
 
     return msg
   }
@@ -967,4 +979,41 @@ function inferToolFromArgs(args: Record<string, unknown>, originalText: string):
     args,
     content: `Inferred tool=${tool} from harmony commentary args`,
   }
+}
+
+// ─── Phase 10: chunk plan injection ───
+//
+// Render the chunk-planner's brief as a labelled section the main model can't
+// miss. Empty when no chunkPlanBrief is set (chunked loop disabled, free
+// quota exhausted, trivial-task short-circuit, etc.).
+
+interface ChunkPlanLike {
+  nextAction?: string
+  files?: string[]
+  rationale?: string
+  dependencies?: string[]
+  expectedSizeBin?: string
+  isFinalChunk?: boolean
+}
+
+export function renderChunkPlanSection(brief: unknown): string {
+  if (!brief || typeof brief !== "object") return ""
+  const b = brief as ChunkPlanLike
+  if (!Array.isArray(b.files) || b.files.length === 0) return ""
+
+  const lines: string[] = []
+  lines.push("")
+  lines.push("═══ CHUNK PLAN (HONOUR EXACTLY) ═══")
+  if (b.nextAction) lines.push(`action: ${b.nextAction}`)
+  lines.push(`files (${b.files.length}):`)
+  for (const f of b.files) lines.push(`  - ${f}`)
+  if (b.rationale) lines.push(`rationale: ${b.rationale}`)
+  if (Array.isArray(b.dependencies) && b.dependencies.length > 0) {
+    lines.push(`reads from prior chunks: ${b.dependencies.join(", ")}`)
+  }
+  if (b.expectedSizeBin) lines.push(`size budget: ${b.expectedSizeBin}`)
+  if (b.isFinalChunk) lines.push(`THIS IS THE FINAL CHUNK — emit kind: completed after the writes resolve.`)
+  lines.push("Write ONLY the files listed above. The reflector will catch deviations.")
+  lines.push("═══ END CHUNK PLAN ═══")
+  return "\n" + lines.join("\n")
 }
