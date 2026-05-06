@@ -61,10 +61,11 @@ export class OpenRouterProvider extends BaseProvider {
       const MAX_RETRIES = 2
       let response: Response | undefined
       let lastError: Error | undefined
-      // 16k default — 32k drains free OpenRouter credits in two requests and
-      // most agent turns don't use anywhere near that. The 402-affordability
-      // retry below shrinks further if even 16k is too much.
-      let maxTokensCap = this.getAdaptiveMaxTokens(16384)
+      // Default headroom stays — the right way to spend less is to make the
+      // AGENT chunk work across turns (see task-guidelines.ts CHUNKING),
+      // not to cap responses preemptively. The 402 affordability retry below
+      // is a safety net for accounts that genuinely can't afford the request.
+      let maxTokensCap = this.getAdaptiveMaxTokens(32768)
 
       for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
         try {

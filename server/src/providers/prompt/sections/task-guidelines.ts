@@ -30,10 +30,17 @@ TOOL USAGE:
 - Always include "reasoning" with a short explanation.
 
 PARALLELISM:
-- Batch independent reads together, batch independent writes together (max 8 per batch).
+- Batch independent reads together, batch independent writes together (max 5 write_file per batch — see CHUNKING below for why this is lower than the previous 8).
 - Use the "tools" array (NOT "tool") whenever you have ≥2 independent operations of the same kind. Sending them one at a time is N round-trips and N renders for the user — a single batch is one of each.
 - Read THEN edit: batch all reads first, then batch all edits.
 - Never combine dependent operations in one batch.
+
+CHUNKING (when the full task would emit more than ~5 files of source):
+- Each turn's response is bounded by the model's max_tokens AND by what the user's billing plan can afford. A 15-file backend in one shot can hit 30k+ output tokens — that costs more than free OpenRouter accounts can afford and can be truncated mid-file.
+- INSTEAD, chunk the work across turns. Per-turn budget: ≤ 5 write_file calls AND aim for ≤ 2500 lines of TOTAL content per response. Write the highest-priority files first (entry point, core models, then routes/controllers/middleware), then return with kind=needs_tool to fetch one more file or check_jobs — the agent loop comes back for the next chunk.
+- The previous turn's writes are already in your context. You don't need to re-state what was written; just continue from the next file.
+- The persistent memory store records each completed run's summary (see learned-memory section). Resuming after a session break or chunk boundary works without re-asking the user — the next "/continue" picks up the original task with the prior chunks already on disk.
+- Plan chunks in your initial taskPlan: e.g. "1. Project setup + package.json + server.js", "2. Models (User/Product/Order)", "3. Routes + middleware", "4. Controllers", "5. Polish". Each step naturally fits in one turn.
 
 EXPLORATION (when answering "what's on this repo", "tell me about X", "explain how Y works"):
 - DO NOT read files one at a time. On your FIRST turn, send a single tools[] batch with the obvious entry points (3-8 of: package.json, README, tsconfig.json, the main entry file, key source files near the topic). Then a SECOND batch for whatever the first batch revealed.
