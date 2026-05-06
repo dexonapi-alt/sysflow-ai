@@ -35,7 +35,7 @@ import {
 import type { ChunkPlanBrief, ChunkReflectionBrief } from "../reasoning/reasoning-schema.js"
 import { getFlag } from "../services/flags.js"
 import { detectDivergence, type DetectorInput } from "../services/divergence-detector.js"
-import { recordSignals as recordConfidenceSignals, clearConfidence, getConfidence, getThresholdState } from "../services/confidence-tracker.js"
+import { recordSignals as recordConfidenceSignals, clearConfidence, getConfidence, getConfidenceState, getThresholdState } from "../services/confidence-tracker.js"
 import { runVerificationGate, gateSignals } from "../services/verification-gate.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
@@ -58,6 +58,19 @@ const MAX_FRONTEND_QUALITY_REJECTIONS = 2
 const lastLlmDivergenceCheckedChunk = new Map<string, number>()
 /** Hard cap on LLM divergence calls per run, even if heuristics keep firing. */
 const MAX_LLM_DIVERGENCE_PER_RUN = 8
+
+/** Phase 11 Stage 4: chunks remaining in the post-pause cooldown. After the
+ *  user resolves an off-course modal (continue / backtrack / redirect), we
+ *  mute the awareness loop for N more chunks so a `continue the task` request
+ *  doesn't immediately re-fire the same modal. Decrements per chunk; cleared
+ *  on terminal exit. */
+const awarenessCooldownChunks = new Map<string, number>()
+const POST_RESOLUTION_COOLDOWN_CHUNKS = 2
+
+/** Phase 11 Stage 4: cache the last LLM divergence verdict per run so the
+ *  off-course modal can render its mismatches alongside the heuristic
+ *  signals. */
+const lastDivergenceVerdict = new Map<string, { mismatches: string[]; suggestion: "continue" | "pause" | "backtrack"; score: number }>()
 
 interface ToolResultBody {
   runId: string
@@ -118,6 +131,45 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
       runId: body.runId,
       error: "Session expired. The server was restarted and lost this run's state. Please start a new prompt."
     }
+  }
+
+  // ─── Phase 11 Stage 4: off-course resolution ───
+  // The cli routes the user's answer back as `_user_response` with kind=off_course.
+  // Apply the action's state mutations, then fall through so the rest of
+  // handleToolResult drives the next step normally (the injected planner
+  // context steers the next chunk).
+  if (
+    body.tool === "_user_response"
+    && (body.result as Record<string, unknown>)?.kind === "off_course"
+  ) {
+    const action = (body.result as Record<string, unknown>).action as "continue" | "backtrack" | "redirect"
+    const text = (body.result as Record<string, unknown>).text as string | null | undefined
+    const lastGoodChunkIndex = (body.result as Record<string, unknown>).lastGoodChunkIndex as number | undefined
+    console.log(`[awareness] off-course resolution: action=${action}`)
+
+    // All three actions reset the awareness state and start the cooldown
+    // so the user's choice doesn't immediately re-trigger the modal.
+    clearConfidence(body.runId)
+    awarenessCooldownChunks.set(body.runId, POST_RESOLUTION_COOLDOWN_CHUNKS)
+    lastDivergenceVerdict.delete(body.runId)
+    lastLlmDivergenceCheckedChunk.delete(body.runId)
+
+    if (action === "backtrack" || action === "redirect") {
+      // Drop chunk-state + pipeline so the next call re-plans from scratch.
+      // The disk has been rolled back (cli-side) for backtrack; for redirect
+      // the user is supplying new direction — either way the prior chunk
+      // history is no longer authoritative.
+      clearChunkState(body.runId)
+      clearPipeline(body.runId)
+      const note = action === "backtrack"
+        ? `[OFF-COURSE BACKTRACK] The user just rolled back chunk ${lastGoodChunkIndex ?? 0} after the awareness loop flagged the run as off-course. The disk has been restored to that snapshot. Re-plan from this point — read the current files first, then implement the original ask: "${run.content}".`
+        : `[OFF-COURSE REDIRECT] The user just course-corrected the run. Their new direction: "${text ?? ""}". Drop everything you were doing and pivot. Original ask was: "${run.content}".`
+      actionPlanner.injectContext(body.runId, note)
+    }
+
+    // Rewrite body.result so downstream guards (the scaffold-choice probe
+    // below + the per-tool error/lint checks) see a benign success record.
+    body.result = { success: true, action, _resumedFromOffCourse: true } as Record<string, unknown>
   }
 
   // ─── Scaffold choice injection: when user responds to scaffold question, inject the command ───
@@ -489,7 +541,15 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
       // graduates to user-visible auto-pause behaviour.
       try {
         const awarenessOn = getFlag<boolean>("awareness.enabled", run.sysbasePath as string | null | undefined)
-        if (awarenessOn) {
+        const cooldownLeft = awarenessCooldownChunks.get(body.runId) ?? 0
+        if (awarenessOn && cooldownLeft > 0) {
+          // Phase 11 Stage 4: post-resolution cooldown. After the user just
+          // resolved an off-course modal, mute the awareness loop for a few
+          // chunks so a `continue the task` re-prompt doesn't trip the same
+          // signals immediately.
+          awarenessCooldownChunks.set(body.runId, cooldownLeft - 1)
+          console.log(`[awareness] in cooldown (${cooldownLeft - 1} chunk(s) remaining), skipping`)
+        } else if (awarenessOn) {
           const input = buildDetectorInput(body.runId, run.content)
           const heuristicSignals = detectDivergence(input)
           const gateOutcomes = await runVerificationGate({
@@ -531,6 +591,11 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
                   detail: `LLM verdict (${verdict.confidence}): ${dvb.mismatches.slice(0, 3).join("; ")}`,
                   severity: dvb.suggestion === "backtrack" ? "major" : "moderate",
                 })
+                lastDivergenceVerdict.set(body.runId, {
+                  mismatches: dvb.mismatches.slice(0, 6),
+                  suggestion: dvb.suggestion,
+                  score: dvb.score,
+                })
                 console.log(`[awareness] LLM divergence verdict score=${dvb.score} suggestion=${dvb.suggestion}`)
               }
             } catch (err) {
@@ -541,9 +606,46 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
           const allSignals = [...heuristicSignals, ...gateSigs, ...llmSignals]
           if (allSignals.length > 0) {
             recordConfidenceSignals(body.runId, allSignals)
-            const score = getConfidence(body.runId)
-            const state = getThresholdState(body.runId, run.sysbasePath as string | null | undefined)
+          }
+          const score = getConfidence(body.runId)
+          const state = getThresholdState(body.runId, run.sysbasePath as string | null | undefined)
+          if (allSignals.length > 0) {
             console.log(`[awareness] chunk ${chunkIdx}: ${heuristicSignals.length} heuristic + ${gateSigs.length} gate + ${llmSignals.length} llm signal(s), confidence=${score} state=${state}`)
+          }
+
+          // ─── Phase 11 Stage 4: hand the wheel back when blocked ───
+          // Confidence dropped past awareness.threshold_blocked. Short-circuit
+          // with a `waiting_for_user` carrying the evidence — the cli renders
+          // the off-course modal and the user picks continue/backtrack/redirect.
+          if (state === "blocked") {
+            const fullState = getConfidenceState(body.runId)
+            const verdict = lastDivergenceVerdict.get(body.runId) ?? null
+            // Roll back the chunk that JUST crossed the threshold — its
+            // snapshot was taken at the start of this chunk.
+            const lastGoodChunkIndex = chunkIdx
+            const message = `Confidence dropped to ${Math.round(score)}/100 — I think the run drifted from your ask. What should I do?`
+            console.log(`[awareness] chunk ${chunkIdx}: BLOCKED (confidence=${score}). Surfacing off-course modal to user.`)
+
+            const synthesised: NormalizedResponse = {
+              kind: "waiting_for_user",
+              content: message,
+              usage: { inputTokens: 0, outputTokens: 0 },
+            }
+            const resp = mapNormalizedResponseToClient(body.runId, synthesised) as unknown as Record<string, unknown>
+            // Custom payload the cli inspects to route to the off-course modal
+            // instead of the generic askUser path.
+            resp.awarenessChoice = true
+            resp.awarenessEvidence = {
+              confidence: score,
+              signals: (fullState?.signals ?? []).slice(-6).map((s) => ({
+                category: s.category,
+                detail: s.detail,
+                severity: s.severity ?? null,
+              })),
+              lastLlmVerdict: verdict,
+              lastGoodChunkIndex,
+            }
+            return resp as unknown as ClientResponse
           }
         }
       } catch (err) {
@@ -890,6 +992,8 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     // Phase 11: tear down per-run confidence state on the same terminal path.
     clearConfidence(body.runId)
     lastLlmDivergenceCheckedChunk.delete(body.runId)
+    awarenessCooldownChunks.delete(body.runId)
+    lastDivergenceVerdict.delete(body.runId)
   }
 
   return response
