@@ -42,6 +42,8 @@ export interface ProviderPayload {
   planMode?: boolean
   /** Phase 5 reasoning brief from preflight / on-error / on-completion. Untyped here to avoid an import cycle. */
   reasoningBrief?: unknown
+  /** Phase 10 chunked-loop planner brief — when set, the prompt builder injects "files: [...]" so the model honours the chunk's file list exactly. Untyped to avoid an import cycle. */
+  chunkPlanBrief?: unknown
 }
 
 export interface ProviderContext {

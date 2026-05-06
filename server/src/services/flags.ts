@@ -65,9 +65,12 @@ defineFlag("memory.file_max_bytes", 102_400, parseNumber)
 defineFlag("memory.max_recall_entries", 12, parseNumber)
 
 // ─── Phase 10: chunked reasoning loop ───
-// Default OFF until the handler integration (Stage 3) lands and the prompt
-// flip (Stage 4) is ready. Stages 1-2 are inert with this flag off.
-defineFlag("reasoning.chunked_loop_enabled", false, parseBool)
+// Default ON as of Stage 4 — the prompt now teaches the model to honour the
+// planner's file list, so turning the loop on actually produces structured
+// chunked behaviour. Set SYSFLOW_FLAG_REASONING_CHUNKED_LOOP_ENABLED=false
+// (or flags.json) to disable. Falls back gracefully without GEMINI_API_KEY:
+// runReasoning returns null, the chunked block degrades to legacy.
+defineFlag("reasoning.chunked_loop_enabled", true, parseBool)
 defineFlag("reasoning.max_chunks_per_run", 12, parseNumber)
 
 export function getFlag<T = unknown>(name: string, sysbasePath?: string | null): T {

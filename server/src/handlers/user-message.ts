@@ -371,6 +371,7 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     cwd: body.cwd,
     planMode: body.planMode === true,
     reasoningBrief,
+    chunkPlanBrief,
     userId: body.userId || null,
     chatId: body.chatId || null
   } as never)

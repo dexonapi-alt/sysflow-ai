@@ -528,6 +528,10 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     console.warn(`[chunked-loop] reflect/plan failed:`, (err as Error).message)
   }
 
+  // Phase 10: stamp the just-planned chunk's brief onto the provider payload
+  // so the prompt builder can render the CHUNK PLAN section the model sees.
+  if (chunkPlanBrief) providerPayload.chunkPlanBrief = chunkPlanBrief
+
   let normalized = await callModelAdapter(providerPayload as never)
 
   await persistModelUsage({
