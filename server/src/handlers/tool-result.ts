@@ -23,7 +23,17 @@ import { applyToolResultBudget, estimateTokens, shouldBlockOnTokens } from "../s
 import { classifyToolError, classifyToolErrorFromResult } from "../services/tool-error-classifier.js"
 import { persistLargeToolResult } from "../store/tool-result-persistence.js"
 import { runReasoning } from "../reasoning/task-reasoner.js"
-import { recordImplementSummary, recordBugPattern } from "../memory-store/index.js"
+import { recordImplementSummary, recordBugPattern, recordChunkSummary } from "../memory-store/index.js"
+import {
+  attachReflection,
+  recordChunkStart,
+  getLatestChunk,
+  getChunkHistory,
+  chunkCount as chunkStateCount,
+  clearChunkState,
+} from "../services/chunk-state.js"
+import type { ChunkPlanBrief, ChunkReflectionBrief } from "../reasoning/reasoning-schema.js"
+import { getFlag } from "../services/flags.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 /** Track how many times completion was rejected per run (prevent infinite loops) */
@@ -401,6 +411,123 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     } as ClientResponse
   }
 
+  // ─── Phase 10: chunked-reasoning loop — per-turn reflect + plan.
+  //
+  // When the chunked loop is active AND the run has at least one chunk
+  // recorded by the initial planner call (in user-message.ts), we run two
+  // cheap Gemini Flash calls between every main-model turn:
+  //
+  //   1. chunk_reflect  — verify the just-executed chunk is coherent
+  //   2. chunk_plan     — pick the next 1-5 files
+  //
+  // Reflector's `shouldStop` short-circuits to a `completed` envelope.
+  // `max_chunks_per_run` is a hard cap to prevent runaway loops.
+  //
+  // Failures (no GEMINI_API_KEY, network blip) degrade gracefully: we just
+  // call the main model without the chunk briefs.
+  let chunkPlanBrief: ChunkPlanBrief | null = null
+  let chunkReflectionBrief: ChunkReflectionBrief | null = null
+  try {
+    const chunkedLoopOn = getFlag<boolean>("reasoning.chunked_loop_enabled", run.sysbasePath as string | null | undefined)
+    const activeChunks = chunkStateCount(body.runId)
+
+    if (chunkedLoopOn && activeChunks > 0) {
+      const latestChunk = getLatestChunk(body.runId)!
+
+      // Step 1: reflect on the just-executed chunk.
+      const toolSummaries = isBatch
+        ? body.toolResults!.map((tr) => ({ tool: tr.tool, ok: !tr.result?.error, hint: typeof tr.result?.error === "string" ? tr.result.error : null }))
+        : [{ tool: body.tool, ok: !body.result?.error, hint: typeof body.result?.error === "string" ? body.result.error : null }]
+
+      const reflectResult = await runReasoning({
+        trigger: "chunk_reflect",
+        userMessage: run.content,
+        model: run.model,
+        cwd: run.cwd as string | undefined,
+        sysbasePath: run.sysbasePath as string | null | undefined,
+        context: {
+          originalUserPrompt: run.content,
+          chunkPlan: latestChunk.plan,
+          executedFiles: latestChunk.executedFiles,
+          toolResults: toolSummaries,
+        },
+      })
+
+      if (reflectResult?.chunkReflectionBrief) {
+        chunkReflectionBrief = reflectResult.chunkReflectionBrief
+        attachReflection(body.runId, latestChunk.index, chunkReflectionBrief)
+
+        // Persist this chunk's outcome to memory so /continue can resume it.
+        recordChunkSummary(
+          run.cwd as string,
+          {
+            chunkIndex: latestChunk.index,
+            nextAction: latestChunk.plan.nextAction,
+            executedFiles: latestChunk.executedFiles,
+            reflection: chunkReflectionBrief,
+          },
+          { runId: body.runId, trigger: "chunk_reflect" },
+        ).catch(() => { /* best-effort */ })
+      }
+
+      // Reflector says we're done — short-circuit to completed.
+      if (chunkReflectionBrief?.shouldStop) {
+        console.log(`[chunked-loop] chunk ${latestChunk.index}: reflector says shouldStop, completing`)
+        clearPipeline(body.runId)
+        clearChunkState(body.runId)
+        const synthesised: NormalizedResponse = {
+          kind: "completed",
+          content: chunkReflectionBrief.nextFocus || "Chunked task complete — reflector flagged we're done.",
+          usage: { inputTokens: 0, outputTokens: 0 },
+        }
+        const resp = mapNormalizedResponseToClient(body.runId, synthesised)
+        ;(resp as unknown as Record<string, unknown>).chunkReflectionBrief = chunkReflectionBrief
+        return resp
+      }
+
+      // Hard cap: prevent runaway loops.
+      const maxChunks = getFlag<number>("reasoning.max_chunks_per_run", run.sysbasePath as string | null | undefined)
+      if (activeChunks >= maxChunks) {
+        console.warn(`[chunked-loop] hit max_chunks_per_run=${maxChunks}, stopping`)
+        clearPipeline(body.runId)
+        clearChunkState(body.runId)
+        const synthesised: NormalizedResponse = {
+          kind: "completed",
+          content: `Stopped after ${activeChunks} chunks (max_chunks_per_run cap). The work so far is on disk; ask me to /continue if you want more.`,
+          usage: { inputTokens: 0, outputTokens: 0 },
+        }
+        return mapNormalizedResponseToClient(body.runId, synthesised)
+      }
+
+      // Step 2: plan the next chunk.
+      const planResult = await runReasoning({
+        trigger: "chunk_plan",
+        userMessage: run.content,
+        model: run.model,
+        cwd: run.cwd as string | undefined,
+        sysbasePath: run.sysbasePath as string | null | undefined,
+        context: {
+          originalUserPrompt: run.content,
+          chunkHistory: getChunkHistory(body.runId).map((c) => ({
+            index: c.index,
+            plan: c.plan,
+            executedFiles: c.executedFiles,
+            reflection: c.reflection,
+          })),
+          lastReflection: chunkReflectionBrief,
+        },
+      })
+
+      if (planResult?.chunkPlanBrief) {
+        chunkPlanBrief = planResult.chunkPlanBrief
+        recordChunkStart(body.runId, chunkPlanBrief, [...chunkPlanBrief.files])
+        console.log(`[chunked-loop] chunk ${activeChunks} planned: ${chunkPlanBrief.nextAction}`)
+      }
+    }
+  } catch (err) {
+    console.warn(`[chunked-loop] reflect/plan failed:`, (err as Error).message)
+  }
+
   let normalized = await callModelAdapter(providerPayload as never)
 
   await persistModelUsage({
@@ -637,6 +764,9 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
   const response = mapNormalizedResponseToClient(body.runId, normalized)
   if (onErrorBrief) response.reasoningBrief = onErrorBrief
   if (onCompletionBrief) response.reasoningBrief = onCompletionBrief
+  // Phase 10: surface the chunk briefs so the CLI can render the boundary.
+  if (chunkPlanBrief) (response as unknown as Record<string, unknown>).chunkPlanBrief = chunkPlanBrief
+  if (chunkReflectionBrief) (response as unknown as Record<string, unknown>).chunkReflectionBrief = chunkReflectionBrief
 
   if (response.status === "completed" || response.status === "failed") {
     if (response.status === "completed") {
@@ -669,6 +799,9 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     }
 
     clearRunActions(body.runId)
+    // Phase 10: tear down chunk-state on every terminal outcome (paired with
+    // the existing clearPipeline call elsewhere).
+    clearChunkState(body.runId)
   }
 
   return response

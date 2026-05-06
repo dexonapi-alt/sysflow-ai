@@ -20,6 +20,9 @@ import { estimateTokens, shouldBlockOnTokens } from "../services/context-budget.
 import { runReasoning } from "../reasoning/task-reasoner.js"
 import { recommendScaffold, resolveCommand, getInstallCommand } from "../scaffold/index.js"
 import { recordImplementSummary } from "../memory-store/index.js"
+import { recordChunkStart } from "../services/chunk-state.js"
+import type { ChunkPlanBrief } from "../reasoning/reasoning-schema.js"
+import { getFlag } from "../services/flags.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 interface UserMessageBody {
@@ -250,6 +253,49 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     console.warn(`[reasoning] preflight failed:`, (err as Error).message)
   }
 
+  // ─── Phase 10: chunked reasoning loop — first chunk-plan call.
+  //
+  // After preflight, when the implement intent is in play AND the chunked
+  // loop is enabled, fire the FIRST chunk-plan call. The planner picks the
+  // 1-5 files for the first chunk based on the implement brief; the result
+  // gets stashed on the response (Stage 4 will inject it into the model
+  // prompt so the main model honours the planner's file list).
+  //
+  // Trivial-task short-circuit: skip when the implement brief lists ≤3
+  // build-plan steps — those tasks fit in one chunk anyway.
+  let chunkPlanBrief: ChunkPlanBrief | null = null
+  try {
+    const chunkedLoopOn = getFlag<boolean>("reasoning.chunked_loop_enabled", body.sysbasePath)
+    const briefPipeline = (reasoningBrief as { pipeline?: string } | null)?.pipeline
+    const implementBrief = (reasoningBrief as { implementBrief?: { buildPlan?: unknown[] } } | null)?.implementBrief
+    const buildPlanSteps = Array.isArray(implementBrief?.buildPlan) ? implementBrief!.buildPlan!.length : 0
+    const isTrivial = buildPlanSteps > 0 && buildPlanSteps <= 3
+
+    if (chunkedLoopOn && briefPipeline === "implement" && !isTrivial) {
+      const planResult = await runReasoning({
+        trigger: "chunk_plan",
+        userMessage: body.content,
+        model: body.model,
+        cwd: body.cwd,
+        sysbasePath: body.sysbasePath,
+        context: {
+          originalUserPrompt: body.content,
+          implementBrief: implementBrief ?? null,
+          chunkHistory: [],
+        },
+      })
+      if (planResult?.chunkPlanBrief) {
+        chunkPlanBrief = planResult.chunkPlanBrief
+        // Initialise executedFiles with the planner's intent. Stage 4 will
+        // refine this once the main model actually executes the chunk.
+        recordChunkStart(runId, chunkPlanBrief, [...chunkPlanBrief.files])
+        console.log(`[chunked-loop] chunk 0 planned: ${chunkPlanBrief.nextAction} (${chunkPlanBrief.files.length} files)`)
+      }
+    }
+  } catch (err) {
+    console.warn(`[chunked-loop] initial chunk_plan failed:`, (err as Error).message)
+  }
+
   // ─── Phase 6 scaffold-first: when reasoning is HIGH confidence on a known stack and cwd is empty,
   // skip the model call entirely and emit the scaffolder run_command directly. ───
   try {
@@ -406,5 +452,9 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
 
   const clientResp = mapNormalizedResponseToClient(runId, normalized)
   if (reasoningBrief) clientResp.reasoningBrief = reasoningBrief
+  // Phase 10: surface the chunk-plan brief on the response so the CLI (Stage 5)
+  // can render the chunk progress badge. Stage 4 will also inject it into the
+  // provider prompt so the model honours the planner's file list.
+  if (chunkPlanBrief) (clientResp as unknown as Record<string, unknown>).chunkPlanBrief = chunkPlanBrief
   return clientResp
 }
