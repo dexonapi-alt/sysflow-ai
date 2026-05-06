@@ -234,6 +234,76 @@ export function renderPipelineBox(
   console.log("  " + colors.bar(BOX.bl + BOX.h.repeat(width) + BOX.br))
 }
 
+// ─── Phase 10: chunk-progress renderer ───
+//
+// One-line summary of the chunked-reasoning loop's current boundary. Lives
+// next to the pipeline box, never replaces it. Designed to be as quiet as
+// possible when the loop is doing fine — only the yellow ⚠ + issues list
+// surface when the reflector flagged something.
+
+interface ChunkPlanLike {
+  nextAction?: string
+  files?: string[]
+  isFinalChunk?: boolean
+}
+
+interface ChunkReflectionLike {
+  coherent?: boolean
+  issues?: string[]
+  shouldStop?: boolean
+}
+
+export function renderChunkProgress(args: {
+  /** 1-indexed chunk number for display (e.g. "chunk 2/?"). */
+  chunkIndex: number
+  /** Just-resolved planner brief for the upcoming chunk. */
+  plan?: ChunkPlanLike | null
+  /** Reflector's verdict on the just-completed chunk. */
+  reflection?: ChunkReflectionLike | null
+}): void {
+  const { chunkIndex, plan, reflection } = args
+  if (!plan && !reflection) return
+
+  const parts: string[] = []
+  parts.push(colors.accent(`▸ chunk ${chunkIndex}`))
+
+  if (plan?.nextAction) {
+    parts.push(colors.muted("·"))
+    parts.push(colors.bright(plan.nextAction))
+    if (Array.isArray(plan.files) && plan.files.length > 0) {
+      parts.push(colors.muted(`(${plan.files.length} file${plan.files.length === 1 ? "" : "s"})`))
+    }
+    if (plan.isFinalChunk) {
+      parts.push(colors.success("· final"))
+    }
+  }
+
+  if (reflection) {
+    parts.push(colors.muted("·"))
+    if (reflection.coherent === false) {
+      const issueCount = reflection.issues?.length ?? 0
+      parts.push(colors.warning(`⚠ ${issueCount} issue${issueCount === 1 ? "" : "s"} from last chunk`))
+    } else if (reflection.shouldStop) {
+      parts.push(colors.success("✔ wrapping up"))
+    } else {
+      parts.push(colors.success("✔ last chunk coherent"))
+    }
+  }
+
+  console.log("  " + parts.join(" "))
+
+  // Surface concrete issues right under the line so the user sees what the
+  // reflector flagged. Cap at 3 to keep the output tight.
+  if (reflection?.coherent === false && reflection.issues && reflection.issues.length > 0) {
+    for (const issue of reflection.issues.slice(0, 3)) {
+      console.log("    " + colors.muted("• ") + colors.warning(issue))
+    }
+    if (reflection.issues.length > 3) {
+      console.log("    " + colors.muted(`• …${reflection.issues.length - 3} more`))
+    }
+  }
+}
+
 export function printStepTransition(
   completedLabel: string | null | undefined,
   startedLabel: string | null | undefined,
