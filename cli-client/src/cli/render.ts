@@ -234,12 +234,17 @@ export function renderPipelineBox(
   console.log("  " + colors.bar(BOX.bl + BOX.h.repeat(width) + BOX.br))
 }
 
-// ─── Phase 10: chunk-progress renderer ───
+// ─── Phase 10: agent-progress renderer ───
 //
-// One-line summary of the chunked-reasoning loop's current boundary. Lives
-// next to the pipeline box, never replaces it. Designed to be as quiet as
-// possible when the loop is doing fine — only the yellow ⚠ + issues list
-// surface when the reflector flagged something.
+// One-line natural-language summary of what the agent is about to do next
+// and any issues from the previous step that need fixing. Deliberately
+// avoids the implementation-detail "chunk N/M" terminology — the user
+// shouldn't have to know the agent runs in a planner→execute→reflect loop.
+// They just see "what is it about to do?" and (when it matters) "what
+// went wrong with the last step?".
+//
+// Stays silent when the previous step landed clean — only the yellow ⚠ +
+// issues list surface when the reflector flagged something.
 
 interface ChunkPlanLike {
   nextAction?: string
@@ -254,53 +259,35 @@ interface ChunkReflectionLike {
 }
 
 export function renderChunkProgress(args: {
-  /** 1-indexed chunk number for display (e.g. "chunk 2/?"). */
+  /** Unused in current rendering — kept for future telemetry hooks. */
   chunkIndex: number
-  /** Just-resolved planner brief for the upcoming chunk. */
+  /** Just-resolved planner brief for the upcoming step. */
   plan?: ChunkPlanLike | null
-  /** Reflector's verdict on the just-completed chunk. */
+  /** Reflector's verdict on the just-completed step. */
   reflection?: ChunkReflectionLike | null
 }): void {
-  const { chunkIndex, plan, reflection } = args
+  const { plan, reflection } = args
   if (!plan && !reflection) return
 
-  const parts: string[] = []
-  parts.push(colors.accent(`▸ chunk ${chunkIndex}`))
-
-  if (plan?.nextAction) {
-    parts.push(colors.muted("·"))
-    parts.push(colors.bright(plan.nextAction))
-    if (Array.isArray(plan.files) && plan.files.length > 0) {
-      parts.push(colors.muted(`(${plan.files.length} file${plan.files.length === 1 ? "" : "s"})`))
-    }
-    if (plan.isFinalChunk) {
-      parts.push(colors.success("· final"))
-    }
-  }
-
-  if (reflection) {
-    parts.push(colors.muted("·"))
-    if (reflection.coherent === false) {
-      const issueCount = reflection.issues?.length ?? 0
-      parts.push(colors.warning(`⚠ ${issueCount} issue${issueCount === 1 ? "" : "s"} from last chunk`))
-    } else if (reflection.shouldStop) {
-      parts.push(colors.success("✔ wrapping up"))
-    } else {
-      parts.push(colors.success("✔ last chunk coherent"))
-    }
-  }
-
-  console.log("  " + parts.join(" "))
-
-  // Surface concrete issues right under the line so the user sees what the
-  // reflector flagged. Cap at 3 to keep the output tight.
+  // Surface reflector issues FIRST — these are the only attention-grabbing
+  // things the user needs to see. Coherent-and-fine reflections stay silent.
   if (reflection?.coherent === false && reflection.issues && reflection.issues.length > 0) {
+    const issueCount = reflection.issues.length
+    console.log("  " + colors.warning(`⚠ ${issueCount} thing${issueCount === 1 ? "" : "s"} to fix from last step:`))
     for (const issue of reflection.issues.slice(0, 3)) {
       console.log("    " + colors.muted("• ") + colors.warning(issue))
     }
-    if (reflection.issues.length > 3) {
-      console.log("    " + colors.muted(`• …${reflection.issues.length - 3} more`))
+    if (issueCount > 3) {
+      console.log("    " + colors.muted(`• …${issueCount - 3} more`))
     }
+  }
+
+  // Surface the upcoming step's intent in plain language, e.g. "▸ write models".
+  if (plan?.nextAction) {
+    const fileNote = Array.isArray(plan.files) && plan.files.length > 0
+      ? colors.muted(` (${plan.files.length} file${plan.files.length === 1 ? "" : "s"})`)
+      : ""
+    console.log("  " + colors.accent(BOX.arrow) + " " + colors.bright(plan.nextAction) + fileNote)
   }
 }
 

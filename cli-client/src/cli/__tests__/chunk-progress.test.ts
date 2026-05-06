@@ -24,45 +24,35 @@ describe("renderChunkProgress", () => {
     expect(spy).not.toHaveBeenCalled()
   })
 
-  it("renders chunk index + planner action + file count", () => {
+  it("renders the next action in plain language (no chunk N terminology)", () => {
     renderChunkProgress({
       chunkIndex: 2,
       plan: { nextAction: "write models", files: ["a.js", "b.js", "c.js"] },
     })
     const out = lines().join("\n")
-    expect(out).toContain("chunk 2")
-    expect(out).toContain("write models")
+    expect(out).toContain("▸ write models")
     expect(out).toContain("(3 files)")
+    // The user should NOT see implementation detail like "chunk N".
+    expect(out).not.toMatch(/chunk\s*\d/i)
   })
 
-  it("flags the final chunk", () => {
-    renderChunkProgress({
-      chunkIndex: 5,
-      plan: { nextAction: "polish", files: ["README.md"], isFinalChunk: true },
-    })
-    const out = lines().join("\n")
-    expect(out).toContain("· final")
-  })
-
-  it("renders coherent reflection with check mark", () => {
+  it("stays silent on a coherent reflection (no 'last chunk coherent' noise)", () => {
     renderChunkProgress({
       chunkIndex: 3,
       reflection: { coherent: true, issues: [], shouldStop: false },
     })
-    const out = lines().join("\n")
-    expect(out).toContain("✔ last chunk coherent")
+    expect(spy).not.toHaveBeenCalled()
   })
 
-  it("renders shouldStop reflection separately", () => {
+  it("stays silent on shouldStop with no issues (the completion box is enough)", () => {
     renderChunkProgress({
       chunkIndex: 4,
       reflection: { coherent: true, issues: [], shouldStop: true },
     })
-    const out = lines().join("\n")
-    expect(out).toContain("wrapping up")
+    expect(spy).not.toHaveBeenCalled()
   })
 
-  it("flags incoherent reflection with warning + lists issues", () => {
+  it("flags issues with natural wording when the reflector says coherent=false", () => {
     renderChunkProgress({
       chunkIndex: 2,
       plan: { nextAction: "wire routes", files: ["src/server.js"] },
@@ -73,11 +63,26 @@ describe("renderChunkProgress", () => {
       },
     })
     const out = lines().join("\n")
-    expect(out).toContain("⚠ 1 issue from last chunk")
+    expect(out).toContain("⚠ 1 thing to fix from last step:")
     expect(out).toContain("server.js imports ./db")
+    expect(out).toContain("▸ wire routes")
+    expect(out).not.toMatch(/chunk\s*\d/i)
   })
 
-  it("caps issues list at 3 with a more-indicator", () => {
+  it("pluralises the issues header correctly", () => {
+    renderChunkProgress({
+      chunkIndex: 1,
+      reflection: {
+        coherent: false,
+        issues: ["a", "b"],
+        shouldStop: false,
+      },
+    })
+    const out = lines().join("\n")
+    expect(out).toContain("⚠ 2 things to fix from last step:")
+  })
+
+  it("caps the issues list at 3 with a more-indicator", () => {
     renderChunkProgress({
       chunkIndex: 1,
       reflection: {
@@ -87,7 +92,7 @@ describe("renderChunkProgress", () => {
       },
     })
     const out = lines().join("\n")
-    expect(out).toContain("⚠ 5 issues from last chunk")
+    expect(out).toContain("⚠ 5 things to fix from last step:")
     expect(out).toContain("• a")
     expect(out).toContain("• b")
     expect(out).toContain("• c")
@@ -105,15 +110,20 @@ describe("renderChunkProgress", () => {
     expect(out).not.toContain("(1 files)")
   })
 
-  it("renders both plan + reflection on the same line", () => {
+  it("renders issues first then the next action when both are present", () => {
     renderChunkProgress({
       chunkIndex: 3,
-      plan: { nextAction: "wire routes", files: ["src/routes/users.js"] },
-      reflection: { coherent: true, issues: [], shouldStop: false },
+      plan: { nextAction: "fix the broken import", files: ["src/server.js"] },
+      reflection: {
+        coherent: false,
+        issues: ["./db doesn't exist"],
+        shouldStop: false,
+      },
     })
-    const out = lines().join("\n")
-    expect(out).toContain("chunk 3")
-    expect(out).toContain("wire routes")
-    expect(out).toContain("✔ last chunk coherent")
+    const all = lines()
+    const issuesIdx = all.findIndex((l) => l.includes("to fix from last step"))
+    const actionIdx = all.findIndex((l) => l.includes("▸ fix the broken import"))
+    expect(issuesIdx).toBeGreaterThanOrEqual(0)
+    expect(actionIdx).toBeGreaterThan(issuesIdx)
   })
 })
