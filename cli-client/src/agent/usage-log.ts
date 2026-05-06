@@ -31,6 +31,19 @@ export interface RunSummary {
    *  client (preflight + chunk_plan + chunk_reflect). Approximate — failed
    *  Flash calls don't produce briefs and aren't counted. */
   flashCallsCount?: number
+  /** Phase 11 Stage 6: how many response snapshots arrived with confidence
+   *  below 100 (i.e. the awareness loop fired at least one signal that turn).
+   *  A coarse "did the detector even notice anything?" signal. */
+  divergenceDetections?: number
+  /** Phase 11 Stage 6: mean confidence across every awareness snapshot we
+   *  observed during the run. Drift indicator — runs that hit ~85 average
+   *  are within normal noise; runs averaging <60 should get manual review. */
+  divergenceConfidenceAvg?: number
+  /** Phase 11 Stage 6: how many times the off-course modal was actually
+   *  shown to the user this run (response carried `awarenessChoice: true`).
+   *  Target ≤ 0.1/run on aggregate; spikes mean the thresholds need tuning
+   *  or the model genuinely went off the rails. */
+  autoPauseEvents?: number
 }
 
 const PROMPT_PREVIEW_CHARS = 200
@@ -54,6 +67,13 @@ export async function recordRunSummary(sysbasePath: string | undefined | null, s
     backgroundJobsFailed: summary.backgroundJobsFailed ?? 0,
     chunkCount: summary.chunkCount ?? 0,
     flashCallsCount: summary.flashCallsCount ?? 0,
+    divergenceDetections: summary.divergenceDetections ?? 0,
+    // null sentinel when no awareness snapshots were observed (awareness
+    // disabled, or run terminated before any chunked-loop response landed).
+    divergenceConfidenceAvg: typeof summary.divergenceConfidenceAvg === "number"
+      ? Math.round(summary.divergenceConfidenceAvg * 10) / 10
+      : null,
+    autoPauseEvents: summary.autoPauseEvents ?? 0,
   }
   try {
     await fs.appendFile(file, JSON.stringify(entry) + "\n", "utf8")
