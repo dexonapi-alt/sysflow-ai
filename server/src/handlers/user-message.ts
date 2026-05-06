@@ -23,6 +23,7 @@ import { recordImplementSummary, recordOriginalIntent } from "../memory-store/in
 import { recordChunkStart } from "../services/chunk-state.js"
 import type { ChunkPlanBrief } from "../reasoning/reasoning-schema.js"
 import { getFlag } from "../services/flags.js"
+import { getConfidence, getThresholdState } from "../services/confidence-tracker.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 interface UserMessageBody {
@@ -467,5 +468,21 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
   // can render the chunk progress badge. Stage 4 will also inject it into the
   // provider prompt so the model honours the planner's file list.
   if (chunkPlanBrief) (clientResp as unknown as Record<string, unknown>).chunkPlanBrief = chunkPlanBrief
+
+  // Phase 11 Stage 5: emit a fresh awarenessSnapshot on the initial turn so
+  // the CLI sees the badge from chunk 1 onwards. State is always on_track
+  // here (the run just started), but consistency lets the cli use the
+  // presence/absence of the field as the awareness-on signal.
+  try {
+    if (getFlag<boolean>("awareness.enabled", body.sysbasePath)) {
+      ;(clientResp as unknown as Record<string, unknown>).awarenessSnapshot = {
+        state: getThresholdState(runId, body.sysbasePath),
+        confidence: getConfidence(runId),
+        lastSignal: null,
+      }
+    }
+  } catch {
+    /* best-effort */
+  }
   return clientResp
 }

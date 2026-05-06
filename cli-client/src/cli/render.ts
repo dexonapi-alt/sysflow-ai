@@ -265,8 +265,12 @@ export function renderChunkProgress(args: {
   plan?: ChunkPlanLike | null
   /** Reflector's verdict on the just-completed step. */
   reflection?: ChunkReflectionLike | null
+  /** Phase 11 Stage 5: per-run awareness snapshot. When state ≠ on_track,
+   *  the badge appears next to the upcoming step's label so the user always
+   *  sees confidence drift before more work piles up. */
+  awareness?: { state: AwarenessState; confidence: number; lastSignal?: string | null } | null
 }): void {
-  const { plan, reflection } = args
+  const { plan, reflection, awareness } = args
   if (!plan && !reflection) return
 
   // Surface reflector issues FIRST — these are the only attention-grabbing
@@ -287,7 +291,44 @@ export function renderChunkProgress(args: {
     const fileNote = Array.isArray(plan.files) && plan.files.length > 0
       ? colors.muted(` (${plan.files.length} file${plan.files.length === 1 ? "" : "s"})`)
       : ""
-    console.log("  " + colors.accent(BOX.arrow) + " " + colors.bright(plan.nextAction) + fileNote)
+    // Render the badge inline only when not on_track — silent ✓ keeps the
+    // happy path uncluttered. Blocked state already surfaces via the
+    // off-course modal so the badge is just a redundant marker there.
+    const badge = awareness && awareness.state !== "on_track"
+      ? "  " + renderConfidenceBadge(awareness.state, awareness.confidence)
+      : ""
+    console.log("  " + colors.accent(BOX.arrow) + " " + colors.bright(plan.nextAction) + fileNote + badge)
+    // When off_course, also surface the most recent divergence signal in a
+    // single muted line so the user understands WHY the badge is yellow.
+    if (awareness && awareness.state === "off_course" && awareness.lastSignal) {
+      console.log("    " + colors.muted("• ") + colors.muted(awareness.lastSignal))
+    }
+  }
+}
+
+/**
+ * Phase 11 Stage 5: confidence badge for the awareness loop.
+ *
+ * Pure: returns a styled string. Caller decides where to render it (status
+ * line, chunk-progress box, off-course modal header). The state ↔ glyph map
+ * is the single source of truth — confidence-tracker emits the state name
+ * verbatim so this module stays the only place that knows the visual.
+ *
+ *   on_track  → green ✓     (≥ awareness.threshold_off_course, default 60)
+ *   off_course → yellow ⚠   (in [threshold_blocked, threshold_off_course))
+ *   blocked   → red ✖       (< awareness.threshold_blocked, default 30)
+ */
+export type AwarenessState = "on_track" | "off_course" | "blocked"
+
+export function renderConfidenceBadge(state: AwarenessState, confidence?: number): string {
+  const score = typeof confidence === "number" ? `${Math.round(confidence)}` : null
+  switch (state) {
+    case "on_track":
+      return colors.success(BOX.check) + (score ? colors.muted(` ${score}`) : "")
+    case "off_course":
+      return colors.warning("⚠") + (score ? colors.warning(` ${score}`) : "")
+    case "blocked":
+      return colors.error(BOX.cross) + (score ? colors.error(` ${score}`) : "")
   }
 }
 

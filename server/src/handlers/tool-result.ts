@@ -955,6 +955,30 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
   if (chunkPlanBrief) (response as unknown as Record<string, unknown>).chunkPlanBrief = chunkPlanBrief
   if (chunkReflectionBrief) (response as unknown as Record<string, unknown>).chunkReflectionBrief = chunkReflectionBrief
 
+  // Phase 11 Stage 5: surface a per-response awareness snapshot so the CLI
+  // can render the confidence badge inline with chunk progress. Only attach
+  // when awareness is enabled — otherwise the field is omitted and the cli
+  // renders the legacy chunk box. Best-effort: if either lookup throws, we
+  // skip the badge rather than fail the response.
+  try {
+    const awarenessOn = getFlag<boolean>("awareness.enabled", run.sysbasePath as string | null | undefined)
+    if (awarenessOn) {
+      const score = getConfidence(body.runId)
+      const state = getThresholdState(body.runId, run.sysbasePath as string | null | undefined)
+      const fullState = getConfidenceState(body.runId)
+      const lastSignal = (fullState?.signals.length ?? 0) > 0
+        ? fullState!.signals[fullState!.signals.length - 1].detail
+        : null
+      ;(response as unknown as Record<string, unknown>).awarenessSnapshot = {
+        state,
+        confidence: score,
+        lastSignal,
+      }
+    }
+  } catch {
+    // Non-fatal — the response goes back without the snapshot.
+  }
+
   if (response.status === "completed" || response.status === "failed") {
     if (response.status === "completed") {
       await finalizeTask(run.taskId, response as never)
