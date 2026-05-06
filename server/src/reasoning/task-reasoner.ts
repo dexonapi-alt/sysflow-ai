@@ -41,8 +41,12 @@ export async function runReasoning(payload: ReasoningPayload): Promise<Reasoning
   // Phase 10: both chunk triggers share one flag (reasoning.chunked_loop_enabled)
   // because they're a unit — there's no useful state where the planner runs
   // without the reflector or vice versa.
+  // Phase 11: divergence_check is gated by `awareness.enabled` — same flag
+  // that gates the heuristic detector + verification gate.
   const flagName = (payload.trigger === "chunk_plan" || payload.trigger === "chunk_reflect")
     ? "reasoning.chunked_loop_enabled"
+    : payload.trigger === "divergence_check"
+    ? "awareness.enabled"
     : (`prompt.${payload.trigger}_reasoning_enabled` as const)
   try {
     if (!getFlag<boolean>(flagName, payload.sysbasePath)) return null
@@ -136,6 +140,9 @@ function pickPipeline(payload: ReasoningPayload): PipelineKind | "simple" {
   // active agent loop where the pipeline is already known.
   if (payload.trigger === "chunk_plan") return "chunk_plan"
   if (payload.trigger === "chunk_reflect") return "chunk_reflect"
+  // Phase 11: divergence_check is invoked from the awareness path with the
+  // pipeline already resolved.
+  if (payload.trigger === "divergence_check") return "divergence"
   // preflight: defer to intent classifier.
   const hint: IntentHint = classifyIntent(payload.userMessage)
   return hint

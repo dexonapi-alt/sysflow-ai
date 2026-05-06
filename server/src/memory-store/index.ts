@@ -61,4 +61,5 @@ export {
   recordUserCorrection,
   recordBugPattern,
   recordChunkSummary,
+  recordOriginalIntent,
 } from "./recorder.js"

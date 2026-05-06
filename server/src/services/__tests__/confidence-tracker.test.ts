@@ -124,4 +124,10 @@ describe("confidence-tracker", () => {
     const after = recordSignals("r1", [sig({ category: "intent_keyword_absent", severity: "major" })])
     expect(after).toBe(75)
   })
+
+  it("decays for the Phase 11 Stage 3 llm_off_track category at the same weight as keyword-absent", () => {
+    // llm_off_track base 25 × moderate 0.75 = 18.75 → 81.25
+    recordSignals("r1", [sig({ category: "llm_off_track", severity: "moderate" })])
+    expect(getConfidence("r1")).toBeCloseTo(81.25)
+  })
 })

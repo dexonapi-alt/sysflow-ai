@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest"
-import { recordDecision, recordImplementSummary, recordUserCorrection, recordBugPattern, recordChunkSummary } from "../recorder.js"
+import { recordDecision, recordImplementSummary, recordUserCorrection, recordBugPattern, recordChunkSummary, recordOriginalIntent } from "../recorder.js"
 import { loadMemoryEntries, _resetCache, _setupTempCwd } from "../store.js"
 
 describe("recorder", () => {
@@ -175,5 +175,60 @@ describe("recorder", () => {
     // actually record (we never want to silently drop the boundary marker).
     expect(r).not.toBeNull()
     expect(r?.content).toBe("Chunk 0")
+  })
+
+  // ─── Phase 11 Stage 3: original_intent ───
+
+  it("recordOriginalIntent persists the verbatim prompt", async () => {
+    const r = await recordOriginalIntent(cwd, "build a postgres-backed user API with logout endpoints")
+    expect(r).not.toBeNull()
+    expect(r?.kind).toBe("original_intent")
+    expect(r?.content).toBe("build a postgres-backed user API with logout endpoints")
+  })
+
+  it("recordOriginalIntent returns null on empty input", async () => {
+    expect(await recordOriginalIntent(cwd, "")).toBeNull()
+    expect(await recordOriginalIntent(cwd, "   ")).toBeNull()
+  })
+
+  it("recordOriginalIntent dedupes when the same prompt is re-recorded", async () => {
+    const r1 = await recordOriginalIntent(cwd, "build a logout endpoint")
+    const r2 = await recordOriginalIntent(cwd, "build a logout endpoint")
+    expect(r1).not.toBeNull()
+    expect(r2).not.toBeNull()
+    expect(r1?.id).toBe(r2?.id)
+    const entries = await loadMemoryEntries(cwd)
+    expect(entries.filter((e) => e.kind === "original_intent")).toHaveLength(1)
+  })
+
+  it("recordOriginalIntent truncates at the schema cap", async () => {
+    const long = "x".repeat(2000)
+    const r = await recordOriginalIntent(cwd, long)
+    expect(r).not.toBeNull()
+    expect(r!.content.length).toBeLessThanOrEqual(1500)
+    expect(r!.content.endsWith("…")).toBe(true)
+  })
+
+  it("recordOriginalIntent does NOT reject prompts containing words like 'password'", async () => {
+    // This is the case the Phase 11 plan calls out: a user request like
+    // "build a password-reset flow" must persist, even though the word
+    // 'password' appears. The secret-pattern guard targets actual key/token
+    // formats, not English nouns.
+    const r = await recordOriginalIntent(cwd, "build a password-reset flow with email verification")
+    expect(r).not.toBeNull()
+    expect(r?.content).toContain("password")
+  })
+
+  it("recordOriginalIntent still refuses content that contains an actual secret", async () => {
+    // Make sure the safeRecord guardrail is intact for the new kind too.
+    const fakeStripe = "sk_live_abcdefghijklmnop1234"
+    const r = await recordOriginalIntent(cwd, `set my key to ${fakeStripe} and build the app`)
+    expect(r).toBeNull()
+  })
+
+  it("entryKindSchema accepts original_intent", async () => {
+    // Direct schema check — guards against accidentally removing the enum value.
+    const { entryKindSchema } = await import("../entry-schema.js")
+    expect(entryKindSchema.safeParse("original_intent").success).toBe(true)
   })
 })

@@ -20,6 +20,10 @@ export const triggerSchema = z.enum([
   // executed chunk's coherence. Both are Gemini Flash, ~300-500 tok each.
   "chunk_plan",
   "chunk_reflect",
+  // Phase 11: LLM second-opinion divergence check. Fires on heuristic flag
+  // OR every 2nd chunk. Gated by `awareness.enabled` (default false in
+  // Stages 1-3, true from Stage 4). ~300 tok.
+  "divergence_check",
 ])
 export type ReasoningTrigger = z.infer<typeof triggerSchema>
 
@@ -159,6 +163,28 @@ export const chunkReflectionBriefSchema = z.object({
 })
 export type ChunkReflectionBrief = z.infer<typeof chunkReflectionBriefSchema>
 
+// ─── Divergence-verdict pipeline brief (Phase 11) ───
+//
+// The LLM half of the divergence detector. Reads the LITERAL original user
+// prompt + files modified so far + last reflection, then judges whether the
+// run is on track. Output is consumed by the confidence tracker:
+//   - onTrack=false ⇒ one llm_off_track signal with detail = mismatches.
+//   - score is FYI only; the tracker derives state from its own decay model
+//     so two independent scoring schemes don't fight each other.
+//   - suggestion is advisory; Stage 4's modal renders it as the default
+//     action when the user is shown the off-course prompt.
+export const divergenceVerdictBriefSchema = z.object({
+  /** Single-bit verdict. False = at least one mismatches[] entry must explain why. */
+  onTrack: z.boolean(),
+  /** Reasoner's own 0-100 confidence the run is on track. Distinct from envelope confidence. */
+  score: z.number().int().min(0).max(100),
+  /** Concrete mismatches between the original ask and the work so far. ≤6, each ≤240 chars. */
+  mismatches: z.array(z.string().max(240)).max(6),
+  /** What the modal should default to when the user is asked. */
+  suggestion: z.enum(["continue", "pause", "backtrack"]),
+})
+export type DivergenceVerdictBrief = z.infer<typeof divergenceVerdictBriefSchema>
+
 // ─── Envelope: discriminated union over the four briefs ───
 //
 // Zod's discriminatedUnion would be cleaner but `pipeline` doesn't sit on
@@ -166,7 +192,7 @@ export type ChunkReflectionBrief = z.infer<typeof chunkReflectionBriefSchema>
 // nullable brief fields and validate post-hoc that exactly one is filled.
 
 export const reasoningEnvelopeSchema = z.object({
-  pipeline: z.enum(["implement", "bug", "summary", "decision", "simple", "chunk_plan", "chunk_reflect"]),
+  pipeline: z.enum(["implement", "bug", "summary", "decision", "simple", "chunk_plan", "chunk_reflect", "divergence"]),
   confidence: confidenceSchema,
   decision: decisionSchema,
   missingContext: z.array(missingContextItemSchema).max(5).default([]),
@@ -176,6 +202,7 @@ export const reasoningEnvelopeSchema = z.object({
   decisionBrief: decisionBriefSchema.nullable().optional(),
   chunkPlanBrief: chunkPlanBriefSchema.nullable().optional(),
   chunkReflectionBrief: chunkReflectionBriefSchema.nullable().optional(),
+  divergenceVerdictBrief: divergenceVerdictBriefSchema.nullable().optional(),
   reasoningTrace: z.string().max(800),
 })
 export type ReasoningBrief = z.infer<typeof reasoningEnvelopeSchema>
@@ -195,6 +222,7 @@ export function assertEnvelopeShape(env: ReasoningBrief): ReasoningBrief {
       case "decision":       return env.decisionBrief
       case "chunk_plan":     return env.chunkPlanBrief
       case "chunk_reflect":  return env.chunkReflectionBrief
+      case "divergence":     return env.divergenceVerdictBrief
       case "simple":         return null
     }
   })()

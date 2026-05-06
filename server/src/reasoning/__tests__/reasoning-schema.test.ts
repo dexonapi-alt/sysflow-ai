@@ -264,4 +264,98 @@ describe("reasoning-schema", () => {
     })
     expect(() => assertEnvelopeShape(env)).not.toThrow()
   })
+
+  // ─── Phase 11 Stage 3: divergence-verdict envelope ───
+  const baseDivergenceBrief = {
+    onTrack: false as const,
+    score: 35,
+    mismatches: ["user asked for postgres but implementation imports mongoose"],
+    suggestion: "backtrack" as const,
+  }
+
+  it("parses a valid divergence envelope", () => {
+    const r = reasoningEnvelopeSchema.safeParse({
+      pipeline: "divergence",
+      confidence: "MEDIUM",
+      decision: "proceed",
+      missingContext: [],
+      divergenceVerdictBrief: baseDivergenceBrief,
+      reasoningTrace: "ok",
+    })
+    expect(r.success).toBe(true)
+  })
+
+  it("rejects divergence with score outside 0-100", () => {
+    const r = reasoningEnvelopeSchema.safeParse({
+      pipeline: "divergence",
+      confidence: "HIGH",
+      decision: "proceed",
+      missingContext: [],
+      divergenceVerdictBrief: { ...baseDivergenceBrief, score: 150 },
+      reasoningTrace: "x",
+    })
+    expect(r.success).toBe(false)
+  })
+
+  it("rejects divergence with non-integer score", () => {
+    const r = reasoningEnvelopeSchema.safeParse({
+      pipeline: "divergence",
+      confidence: "HIGH",
+      decision: "proceed",
+      missingContext: [],
+      divergenceVerdictBrief: { ...baseDivergenceBrief, score: 42.5 },
+      reasoningTrace: "x",
+    })
+    expect(r.success).toBe(false)
+  })
+
+  it("rejects divergence with bad suggestion enum", () => {
+    const r = reasoningEnvelopeSchema.safeParse({
+      pipeline: "divergence",
+      confidence: "HIGH",
+      decision: "proceed",
+      missingContext: [],
+      divergenceVerdictBrief: { ...baseDivergenceBrief, suggestion: "halt" },
+      reasoningTrace: "x",
+    })
+    expect(r.success).toBe(false)
+  })
+
+  it("caps divergence mismatches at 6", () => {
+    const r = reasoningEnvelopeSchema.safeParse({
+      pipeline: "divergence",
+      confidence: "HIGH",
+      decision: "proceed",
+      missingContext: [],
+      divergenceVerdictBrief: {
+        ...baseDivergenceBrief,
+        mismatches: ["a", "b", "c", "d", "e", "f", "g"],
+      },
+      reasoningTrace: "x",
+    })
+    expect(r.success).toBe(false)
+  })
+
+  it("assertEnvelopeShape rejects divergence without divergenceVerdictBrief", () => {
+    const env = reasoningEnvelopeSchema.parse({
+      pipeline: "divergence",
+      confidence: "HIGH",
+      decision: "proceed",
+      missingContext: [],
+      reasoningTrace: "x",
+    })
+    expect(() => assertEnvelopeShape(env)).toThrow(/divergence.*null/)
+  })
+
+  it("assertEnvelopeShape passes divergence with brief", () => {
+    const env = reasoningEnvelopeSchema.parse({
+      pipeline: "divergence",
+      confidence: "HIGH",
+      decision: "proceed",
+      missingContext: [],
+      divergenceVerdictBrief: baseDivergenceBrief,
+      reasoningTrace: "x",
+    })
+    expect(() => assertEnvelopeShape(env)).not.toThrow()
+  })
 })
