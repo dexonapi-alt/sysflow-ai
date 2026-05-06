@@ -73,6 +73,15 @@ defineFlag("memory.max_recall_entries", 12, parseNumber)
 defineFlag("reasoning.chunked_loop_enabled", true, parseBool)
 defineFlag("reasoning.max_chunks_per_run", 12, parseNumber)
 
+// ─── Phase 11: awareness + adaptive recovery ───
+// Default OFF — Stage 1 records data but takes no user-visible action. Flips
+// to default-true at Stage 4 once the off-course modal is wired. Thresholds
+// are read by the confidence tracker via getFlag at evaluation time, so live
+// tuning works without restarting the run.
+defineFlag("awareness.enabled", false, parseBool)
+defineFlag("awareness.threshold_off_course", 60, parseNumber)
+defineFlag("awareness.threshold_blocked", 30, parseNumber)
+
 export function getFlag<T = unknown>(name: string, sysbasePath?: string | null): T {
   const memoKey = `${name}::${sysbasePath ?? ""}`
   if (memo.has(memoKey)) return memo.get(memoKey) as T

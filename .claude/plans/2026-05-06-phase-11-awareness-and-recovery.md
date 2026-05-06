@@ -1,7 +1,7 @@
 # Phase 11 — Awareness & adaptive recovery loop
 
 - **Created:** 2026-05-06
-- **Status:** draft
+- **Status:** in-progress
 - **Scope:** Detect when the agent is executing a wrong plan (especially on free models) and either auto-correct mid-run or hand the wheel back to the user before more wrong work piles up.
 
 ## Goal
