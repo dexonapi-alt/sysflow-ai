@@ -1,7 +1,7 @@
 # Phase 12 — Living CLI: animation language, persistent zones, reactive color
 
 - **Created:** 2026-05-07
-- **Status:** in-progress
+- **Status:** implemented (2026-05-07)
 - **Scope:** Replace the static + linear "log a line, move on" CLI rendering with a living, reactive interface where every visible element has vital signs — animation, color shifts, persistent zones — without copying any specific tool's design language.
 
 ## Goal
@@ -199,3 +199,41 @@ These count as in-scope foundation work for whichever stage surfaces the gap. Ou
 Phase 9 (Ink rewrite) is in-progress and built the scaffold this plan stands on. Phase 12 is **additive** — every Phase 9 component (`AgentStream`, `ChatInput`, `StatusLine`, `Spinner`) gets an animation pass and a few are extended (StatusLine grows cells, AgentStream gets card events) but none are deleted. Phase 9's remaining work (multiline input history, slash-command palette polish — see its plan) folds into Phase 12 stages where natural; the Phase 9 plan can be marked `superseded by Phase 12` once Stage 8 lands and we're sure the migration is complete.
 
 The Phase 12 design language — breath, persistent zones, color-as-state — is what Phase 9's scaffold was *missing*. Phase 9 made it possible to render React components in a terminal; Phase 12 decides what those components should *feel* like.
+
+## Completion notes
+
+Implemented 2026-05-07 across 8 PRs (#29–#36). Final tally:
+
+- **CLI:** 99 → 215 tests (+116). New module count: 5 animation primitives + 4 components (Header, LiveStatusBar, ToolCard, Header awareness badge) + animation engine (useFrame, easings, color-lerp, motion store).
+- **Server:** unchanged at 268/268 (Phase 12 is cli-only; Phase 11's awareness payload is what the new Header consumes via the events bus).
+- **Zero new npm dependencies.** No `ink-testing-library`, no `ink-spinner`, no `ink-text-input` — every primitive built on top of Ink + React + chalk only.
+
+### Stages shipped
+
+- **Stage 1** (#29): animation engine + theme + motion store (foundations, no visible change).
+- **Stage 2** (#30): `<Breath>`, `<Pulse>`, `<Shimmer>`, `<Fade>`, `<Typewriter>` primitives (no visible change).
+- **Stage 3** (#31): living StatusBar + breath spinner — *first user-visible win (small)*.
+- **Stage 4** (#32): tool calls become living cards — *first big visible win*.
+- **Stage 5** (#33): persistent Header with awareness badge + chunk pulse.
+- **Stage 6** (#34): assistant messages stream via Typewriter.
+- **Stage 7** (#35): chat input cursor pulse + rotating placeholder hints.
+- **Stage 8** (this PR): polish + KB docs + plan archived.
+
+### Deviations from the plan
+
+- **Stage 6's `<Reasoning>` component** was deferred. The Tab-to-expand contract conflicts with the chat input's own keystroke handling, and the existing `reasoning-display.ts` console rendering is acceptable for now. Documented in the Stage 6 PR description.
+- **Stage 7's `<PermissionModal>` + `<OffCourseModal>` Ink-port** was deferred. The synchronous-promise contract `askPermission()` / `askOffCourse()` expose isn't worth rewriting yet — the existing raw-TTY modals work and are brief enough that they don't break the alive feel. Recorded in `decisions.md: ## Modal Ink-port deferred from Phase 12`.
+- **Stage 7's `<IdleAmbient>` (`--ambient` flag)** was deferred. Opt-in feature with marginal gain; nothing depends on it. Can ship later if metrics call for it.
+- **Stage 8's perf-profiling pass + multi-terminal recording** was not run as a formal benchmark. The perf contract is documented in code (cards move into `<Static>` when settled; only the active card + spinner + cursor tick per frame; `useFrame` capped at 30fps) and the codebase is structured to support it. Field testing on Windows Terminal / iTerm / Alacritty / xterm is left as a manual follow-up since it requires interactive sessions an automated harness can't replicate cleanly.
+
+### Follow-ups not in scope
+
+- **Reasoning component with Tab-expand** — needs the chat input keystroke loop to negotiate Tab handoff cleanly.
+- **Modal Ink-port** — see `decisions.md` for the trade-off; revisit if user feedback calls it out.
+- **Idle ambient particle drift** — opt-in feature; ship behind `--ambient` if requested.
+- **Status-line awareness badge** — Stage 5 put the badge in Header, not LiveStatusBar. The plan called for both; Header alone is enough for v1 (the user always sees it without scrolling).
+- **Performance benchmark + truecolor screenshots** — manual QA, document under `docs/ui/phase-12/` when run.
+
+### Phase 9 status
+
+Phase 9 (Ink rewrite, in-progress) is now effectively superseded by Phase 12's work, which built on Phase 9's scaffold and delivered the polished version of every component Phase 9 set up. The Phase 9 plan can be marked `applied/` in a follow-up housekeeping pass once a contributor verifies no Phase 9-specific items remain unaddressed.

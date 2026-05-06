@@ -72,3 +72,31 @@ Past bugs and non-obvious constraints worth preserving so the next contributor d
 - **Symptom:** if a future contributor adds another `waiting_for_user` shape and forgets to peek at `awarenessChoice`, the cli would render the off-course evidence as plain text via `askUser` and the user's free-text answer would be sent back as `{ answer: "c" }` with no `kind` marker — the server's off-course branch would never fire.
 - **Why this design:** Phase 11 piggybacked on the existing `waiting_for_user` status to avoid adding a new top-level status to the cli/server protocol. The `awarenessChoice: true` marker on the response (plus `awarenessEvidence` for the modal payload) is the discriminator.
 - **What to do:** when adding a new modal, add a NEW marker field (`scaffoldChoice`, `permissionChoice`, etc.) and check it BEFORE the generic `askUser` in `cli-client/src/agent/agent.ts`'s `user_responded` case. Never overload `awarenessChoice` for a different prompt — split into a new field instead.
+
+## Truecolor banding on legacy ConHost (and how `color-lerp` falls back)
+
+- **Source:** plan `applied/2026-05-07-phase-12-living-cli-ui.md` (Stage 1)
+- **Symptom:** on Windows ConHost (the pre-2019 console), Phase 12's smooth gradients (awareness badge confidence transition, breath colour interpolation) render as banding through the 16 ANSI colours — green and yellow approximate to the same dim cyan, the smooth lerp looks like a hard cut.
+- **Root cause:** `chalk.level` is 1 (basic 16) or 2 (256) on legacy ConHost, not 3 (truecolor). A `chalk.hex("#7CXXXX")` call on level ≤ 2 silently snaps to the nearest of 256 (or 16) — a smooth 100-step lerp lands on 4-5 distinct colour cells, which reads as banding.
+- **Fix:** `cli-client/src/ui/animation/color-lerp.ts` checks `chalk.level >= 3` to decide between truecolor (smooth) and a discrete-stops fallback (default 4 stops). The fallback intentionally snaps to a small number of evenly-spaced palette colours so the banding is intentional-looking instead of noisy.
+- **What to do:** never `chalk.hex()` directly for an animated colour; always go through `lerpHex()` / `paint()` / `confidenceGradient()` so the fallback path is taken. If you add a new gradient, define its endpoints in `theme.ts: gradient` and reuse `lerpHex` — don't roll your own RGB lerp.
+
+## `--no-motion` contract — every primitive renders settled state
+
+- **Source:** plan `applied/2026-05-07-phase-12-living-cli-ui.md` (Stage 2)
+- **Symptom:** if a future component reads `useFrame` directly and ignores `isMotionEnabled()`, it'll appear blank (frame 0) when `--no-motion` is on, because `useFrame` emits exactly one settled tick then exits in motion-disabled mode.
+- **The contract:** every animation primitive (`<Breath>`, `<Pulse>`, `<Shimmer>`, `<Fade>`, `<Typewriter>`) MUST render a meaningful settled state when motion is disabled. Specifically:
+  - `<Breath>` paints its `to` colour (the bright endpoint, not the trough).
+  - `<Pulse>` paints `settle` (skipping the flash).
+  - `<Shimmer>` paints every char in `base` (no highlight).
+  - `<Fade>` paints the destination colour and fires `onDone` synchronously via `queueMicrotask`.
+  - `<Typewriter>` renders the full text and fires `onDone` synchronously.
+- **What to do:** when adding a new primitive, write the test for `--no-motion` mode FIRST. The test should call the pure shape function with `isMotionEnabled() === false` (set via `setMotionEnabled(false)`) and assert the settled output is non-empty + matches the expected destination state.
+
+## `useFrame` motion-listener registration is lazy on purpose
+
+- **Source:** plan `applied/2026-05-07-phase-12-living-cli-ui.md` (Stage 1)
+- **Symptom:** during early development, tests that called `_resetForTests()` on the motion store + then flipped `setMotionEnabled(false)` mid-test couldn't get the `useFrame` scheduler to stop. The timer kept ticking until the next subscriber detached.
+- **Root cause:** `useFrame` registered its motion-change listener at module-load time. When a test reset the motion store (`_resetForTests` clears the listener Set), the registration was lost and the next motion-state flip had no listener to call `stop()`.
+- **Fix:** lazy-register inside `subscribeFrame` / inside the `useEffect` of `useFrame` itself, via `ensureMotionListener()` which is idempotent. `_resetForTests` on the use-frame side also clears the registration so the next subscribe gets a fresh listener (covers the case where motion was already reset between tests).
+- **What to do:** if you add another module-level cross-store listener (e.g. a future awareness-state subscription), use the same lazy pattern. Module-load-time registrations are silently broken by test resets and the failure mode isn't obvious.
