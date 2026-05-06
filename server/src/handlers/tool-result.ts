@@ -36,6 +36,7 @@ import type { ChunkPlanBrief, ChunkReflectionBrief } from "../reasoning/reasonin
 import { getFlag } from "../services/flags.js"
 import { detectDivergence, type DetectorInput } from "../services/divergence-detector.js"
 import { recordSignals as recordConfidenceSignals, clearConfidence, getConfidence, getThresholdState } from "../services/confidence-tracker.js"
+import { runVerificationGate, gateSignals } from "../services/verification-gate.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 /** Track how many times completion was rejected per run (prevent infinite loops) */
@@ -472,25 +473,32 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
         ).catch(() => { /* best-effort */ })
       }
 
-      // ─── Phase 11 Stage 1: heuristic divergence detector (no LLM, no action).
-      // Runs every chunk boundary right after the reflector. Records signals
-      // into the per-run confidence tracker; nothing else changes — Stage 4
+      // ─── Phase 11 Stage 1+2: heuristic divergence + verification gate.
+      // Both run every chunk boundary right after the reflector. Heuristic
+      // is pure (in-memory only); the gate reads files from disk in parallel
+      // (<1s budget). Their signals merge into one tracker update. Stage 4
       // is when this graduates to user-visible auto-pause behaviour.
       try {
         const awarenessOn = getFlag<boolean>("awareness.enabled", run.sysbasePath as string | null | undefined)
         if (awarenessOn) {
           const input = buildDetectorInput(body.runId, run.content)
-          const signals = detectDivergence(input)
-          if (signals.length > 0) {
-            recordConfidenceSignals(body.runId, signals)
+          const heuristicSignals = detectDivergence(input)
+          const gateOutcomes = await runVerificationGate({
+            cwd: run.cwd as string,
+            filesModified: input.filesModified,
+            createdDirs: input.createdDirs,
+          })
+          const allSignals = [...heuristicSignals, ...gateSignals(gateOutcomes)]
+          if (allSignals.length > 0) {
+            recordConfidenceSignals(body.runId, allSignals)
             const score = getConfidence(body.runId)
             const state = getThresholdState(body.runId, run.sysbasePath as string | null | undefined)
-            console.log(`[awareness] chunk ${latestChunk.index}: ${signals.length} signal(s), confidence=${score} state=${state}`)
+            console.log(`[awareness] chunk ${latestChunk.index}: ${heuristicSignals.length} heuristic + ${gateSignals(gateOutcomes).length} gate signal(s), confidence=${score} state=${state}`)
           }
         }
       } catch (err) {
-        // Heuristic-only path is best-effort; never let it break the chunk loop.
-        console.warn(`[awareness] heuristic detector failed:`, (err as Error).message)
+        // Awareness path is best-effort; never let it break the chunk loop.
+        console.warn(`[awareness] detector/gate failed:`, (err as Error).message)
       }
 
       // Reflector says we're done — short-circuit to completed.
