@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
-import { renderChunkProgress } from "../render.js"
+import { renderChunkProgress, renderConfidenceBadge } from "../render.js"
 
 // Strip ANSI escape sequences so assertions don't fight chalk's colour codes.
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "")
@@ -125,5 +125,69 @@ describe("renderChunkProgress", () => {
     const actionIdx = all.findIndex((l) => l.includes("▸ fix the broken import"))
     expect(issuesIdx).toBeGreaterThanOrEqual(0)
     expect(actionIdx).toBeGreaterThan(issuesIdx)
+  })
+
+  // ─── Phase 11 Stage 5: confidence badge integration ───
+
+  it("hides the badge when awareness state is on_track (happy path stays clean)", () => {
+    renderChunkProgress({
+      chunkIndex: 1,
+      plan: { nextAction: "write models", files: ["a.js"] },
+      awareness: { state: "on_track", confidence: 100, lastSignal: null },
+    })
+    const out = lines().join("\n")
+    expect(out).toContain("▸ write models")
+    // No ⚠ / ✖ glyph should leak when we're fine.
+    expect(out).not.toMatch(/[⚠✖]/)
+  })
+
+  it("renders the yellow badge inline when state is off_course", () => {
+    renderChunkProgress({
+      chunkIndex: 2,
+      plan: { nextAction: "wire routes", files: ["src/server.js"] },
+      awareness: { state: "off_course", confidence: 55, lastSignal: "tool error \"edit_file\" repeated 3 times" },
+    })
+    const all = lines()
+    const actionLine = all.find((l) => l.includes("▸ wire routes"))!
+    expect(actionLine).toContain("⚠")
+    expect(actionLine).toContain("55")
+    // The off_course state surfaces the most recent signal underneath.
+    expect(all.some((l) => l.includes("tool error"))).toBe(true)
+  })
+
+  it("renders the red badge inline when state is blocked", () => {
+    renderChunkProgress({
+      chunkIndex: 3,
+      plan: { nextAction: "stop", files: ["x.js"] },
+      awareness: { state: "blocked", confidence: 18, lastSignal: null },
+    })
+    const actionLine = lines().find((l) => l.includes("▸ stop"))!
+    expect(actionLine).toContain("✖")
+    expect(actionLine).toContain("18")
+  })
+})
+
+describe("renderConfidenceBadge", () => {
+  it("renders ✓ for on_track", () => {
+    expect(stripAnsi(renderConfidenceBadge("on_track", 95))).toContain("✔")
+    expect(stripAnsi(renderConfidenceBadge("on_track", 95))).toContain("95")
+  })
+
+  it("renders ⚠ for off_course", () => {
+    expect(stripAnsi(renderConfidenceBadge("off_course", 55))).toContain("⚠")
+    expect(stripAnsi(renderConfidenceBadge("off_course", 55))).toContain("55")
+  })
+
+  it("renders ✖ for blocked", () => {
+    expect(stripAnsi(renderConfidenceBadge("blocked", 20))).toContain("✖")
+    expect(stripAnsi(renderConfidenceBadge("blocked", 20))).toContain("20")
+  })
+
+  it("omits the score when not provided", () => {
+    expect(stripAnsi(renderConfidenceBadge("on_track"))).toBe("✔")
+  })
+
+  it("rounds the score to an integer", () => {
+    expect(stripAnsi(renderConfidenceBadge("off_course", 73.4))).toContain("73")
   })
 })

@@ -45,6 +45,30 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Phase 11 Stage 5: one-line copy describing a transition between awareness
+ * states. Returns null when the transition isn't worth surfacing (e.g.
+ * recovery from off_course → on_track is a positive signal but doesn't need
+ * its own line — the badge flip in the next chunk-progress render carries it).
+ */
+function describeAwarenessTransition(
+  from: "on_track" | "off_course" | "blocked",
+  to: "on_track" | "off_course" | "blocked",
+): string | null {
+  if (from === to) return null
+  if (from === "on_track" && to === "off_course") {
+    return colors.warning("⚠ ") + colors.muted("confidence dipped — watching for drift")
+  }
+  if (to === "blocked") {
+    // The off-course modal will appear immediately after this; this line
+    // tees it up so the user sees why the prompt is interrupting them.
+    return colors.error("✖ ") + colors.muted("blocked — handing off")
+  }
+  // Recoveries (e.g. blocked → on_track after a redirect) are surfaced via
+  // the cooldown skip log; no extra line needed.
+  return null
+}
+
+/**
  * Spinner shim: lets the existing `spinner.text = …` / `spinner.start()` /
  * `spinner.stop()` callsites work whether we're driving an `ora` instance
  * (legacy console mode) or emitting events to the Ink `<AgentStream>`.
@@ -252,16 +276,23 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   // aren't counted (intentional — telemetry is best-effort, not auditable).
   let flashCallsCount = 0
   if ((response as Record<string, unknown>).reasoningBrief) flashCallsCount += 1
+  // Phase 11 Stage 5: track the last awareness state we've shown so we can
+  // emit a one-line transition log when the badge flips
+  // (on_track → off_course or off_course → blocked).
+  let lastAwarenessState: "on_track" | "off_course" | "blocked" | null = null
   // Phase 10: initial-turn chunk plan from user-message.ts
   if ((response as Record<string, unknown>).chunkPlanBrief) {
     spinner.stop()
     chunkIndex = 1
     flashCallsCount += 1
+    const initialAwareness = (response as Record<string, unknown>).awarenessSnapshot as { state: "on_track" | "off_course" | "blocked"; confidence: number; lastSignal?: string | null } | undefined
     renderChunkProgress({
       chunkIndex,
       plan: (response as Record<string, unknown>).chunkPlanBrief as never,
       reflection: null,
+      awareness: initialAwareness ?? null,
     })
+    if (initialAwareness) lastAwarenessState = initialAwareness.state
     spinner.start(colors.muted("thinking..."))
   }
   const currentRunId = (response.runId as string) || ""
@@ -472,7 +503,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         const result = await handleNeedsTool(
           response,
           spinner,
-          { hasReasoning, lastDisplayedAction, lastDisplayedReasoning, currentRunId, taskShown, taskSteps, completedSteps, lastPipelineStepId, prevTool, chunkIndex, flashCallsThisTurn: 0, budget },
+          { hasReasoning, lastDisplayedAction, lastDisplayedReasoning, currentRunId, taskShown, taskSteps, completedSteps, lastPipelineStepId, prevTool, chunkIndex, flashCallsThisTurn: 0, lastAwarenessState, budget },
           makeServerCall,
         )
         response = result.response
@@ -485,6 +516,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         prevTool = result.toolThisTurn
         chunkIndex = result.chunkIndex
         flashCallsCount += result.flashCallsThisTurn
+        lastAwarenessState = result.lastAwarenessState
         noteSuccess(budget)
         break
       }
@@ -755,6 +787,9 @@ interface NeedsToolCtx {
   /** Phase 10: scratch — handler increments per Flash brief observed; the
    *  caller's helper threads it back into the result. */
   flashCallsThisTurn: number
+  /** Phase 11 Stage 5: last awareness state we surfaced. Used to dedup the
+   *  one-line transition log when the badge flips state turn-over-turn. */
+  lastAwarenessState: "on_track" | "off_course" | "blocked" | null
   budget: RetryBudget
 }
 
@@ -772,6 +807,8 @@ interface NeedsToolResult {
   chunkIndex: number
   /** Phase 10: Flash calls observed this turn (chunk plan + chunk reflect briefs). */
   flashCallsThisTurn: number
+  /** Phase 11 Stage 5: last awareness state we surfaced (for transition log dedupe). */
+  lastAwarenessState: "on_track" | "off_course" | "blocked" | null
 }
 
 async function handleNeedsTool(
@@ -862,12 +899,12 @@ async function handleNeedsTool(
           tool: "_recovery",
           result: { error: (batchError as Error).message, success: false }
         })
-        return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn }
+        return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState }
       }
       console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.success("done")}`)
       console.log("")
       spinner.start(colors.muted("thinking..."))
-      return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn }
+      return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState }
     }
 
     spinner.start(colors.muted(`  executing ${toolCalls!.length} tools...`))
@@ -906,7 +943,7 @@ async function handleNeedsTool(
         result: { error: (batchError as Error).message, success: false }
       })
     }
-    return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn }
+    return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState }
   }
 
   // ── SINGLE TOOL PATH ──
@@ -1048,6 +1085,9 @@ async function handleNeedsTool(
     // ctx.chunkIndex when a new plan arrives so the badge stays monotonic.
     const chunkPlanBrief = (response as Record<string, unknown>).chunkPlanBrief
     const chunkReflectionBrief = (response as Record<string, unknown>).chunkReflectionBrief
+    // Phase 11 Stage 5: pull the awareness snapshot off the response so the
+    // chunk-progress can render the badge + so we can detect state flips.
+    const awareness = (response as Record<string, unknown>).awarenessSnapshot as { state: "on_track" | "off_course" | "blocked"; confidence: number; lastSignal?: string | null } | undefined
     if (chunkPlanBrief || chunkReflectionBrief) {
       spinner.stop()
       if (chunkPlanBrief) {
@@ -1059,6 +1099,7 @@ async function handleNeedsTool(
         chunkIndex: ctx.chunkIndex,
         plan: (chunkPlanBrief ?? null) as never,
         reflection: (chunkReflectionBrief ?? null) as never,
+        awareness: awareness ?? null,
       })
       spinner.start(colors.muted("thinking..."))
       // Phase 11 Stage 2: snapshot before each new chunk's tools execute.
@@ -1067,6 +1108,19 @@ async function handleNeedsTool(
         try { await createChunkSnapshot(process.cwd(), currentRunId, ctx.chunkIndex) } catch { /* best-effort */ }
       }
     }
+    // Phase 11 Stage 5: one-line transition log when the badge flips state
+    // outside of a chunk-progress render (e.g. a tool turn that didn't carry
+    // a chunk plan). Stays silent on no-change and on the initial on_track
+    // baseline.
+    if (awareness && ctx.lastAwarenessState && awareness.state !== ctx.lastAwarenessState) {
+      const transition = describeAwarenessTransition(ctx.lastAwarenessState, awareness.state)
+      if (transition) {
+        spinner.stop()
+        console.log("  " + transition)
+        spinner.start(colors.muted("thinking..."))
+      }
+    }
+    if (awareness) ctx.lastAwarenessState = awareness.state
     // Stash on ctx so it threads to the result via the helper below.
     ctx.flashCallsThisTurn = flashCallsThisTurn
 
@@ -1120,5 +1174,5 @@ async function handleNeedsTool(
     })
   }
 
-  return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn }
+  return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState }
 }
