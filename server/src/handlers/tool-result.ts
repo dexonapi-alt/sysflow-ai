@@ -34,6 +34,8 @@ import {
 } from "../services/chunk-state.js"
 import type { ChunkPlanBrief, ChunkReflectionBrief } from "../reasoning/reasoning-schema.js"
 import { getFlag } from "../services/flags.js"
+import { detectDivergence, type DetectorInput } from "../services/divergence-detector.js"
+import { recordSignals as recordConfidenceSignals, clearConfidence, getConfidence, getThresholdState } from "../services/confidence-tracker.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 /** Track how many times completion was rejected per run (prevent infinite loops) */
@@ -470,6 +472,27 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
         ).catch(() => { /* best-effort */ })
       }
 
+      // ─── Phase 11 Stage 1: heuristic divergence detector (no LLM, no action).
+      // Runs every chunk boundary right after the reflector. Records signals
+      // into the per-run confidence tracker; nothing else changes — Stage 4
+      // is when this graduates to user-visible auto-pause behaviour.
+      try {
+        const awarenessOn = getFlag<boolean>("awareness.enabled", run.sysbasePath as string | null | undefined)
+        if (awarenessOn) {
+          const input = buildDetectorInput(body.runId, run.content)
+          const signals = detectDivergence(input)
+          if (signals.length > 0) {
+            recordConfidenceSignals(body.runId, signals)
+            const score = getConfidence(body.runId)
+            const state = getThresholdState(body.runId, run.sysbasePath as string | null | undefined)
+            console.log(`[awareness] chunk ${latestChunk.index}: ${signals.length} signal(s), confidence=${score} state=${state}`)
+          }
+        }
+      } catch (err) {
+        // Heuristic-only path is best-effort; never let it break the chunk loop.
+        console.warn(`[awareness] heuristic detector failed:`, (err as Error).message)
+      }
+
       // Reflector says we're done — short-circuit to completed.
       if (chunkReflectionBrief?.shouldStop) {
         console.log(`[chunked-loop] chunk ${latestChunk.index}: reflector says shouldStop, completing`)
@@ -806,6 +829,8 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     // Phase 10: tear down chunk-state on every terminal outcome (paired with
     // the existing clearPipeline call elsewhere).
     clearChunkState(body.runId)
+    // Phase 11: tear down per-run confidence state on the same terminal path.
+    clearConfidence(body.runId)
   }
 
   return response
@@ -998,6 +1023,42 @@ async function writeFixFile(run: RunRecord, content: string): Promise<void> {
     console.log(`[context] Wrote fix file: sysbase/fixes/${filename}`)
   } catch (err) {
     console.error("[context] Failed to write fix file:", (err as Error).message)
+  }
+}
+
+/**
+ * Phase 11: assemble the divergence detector's input from data already
+ * tracked by the run. Pure function over the existing in-memory stores —
+ * no I/O. `originalPrompt` is the run.content the user typed.
+ *
+ * `plannedChunkCount` is intentionally null at Stage 1; Stage 3 will source
+ * it from the preflight `implementBrief.buildPlan` once the LLM half lands.
+ */
+function buildDetectorInput(runId: string, originalPrompt: string): DetectorInput {
+  const runLog = getRunActions(runId)
+  const chunkHistory = getChunkHistory(runId)
+
+  // Tool-error counts grouped by tool name (good-enough proxy for "category"
+  // in Stage 1; the classifier-aware version lands with the LLM half).
+  const toolErrorCounts = new Map<string, number>()
+  for (const e of runLog.errors) {
+    toolErrorCounts.set(e.tool, (toolErrorCounts.get(e.tool) ?? 0) + 1)
+  }
+
+  // Directories created via the create_directory tool.
+  const createdDirs: string[] = []
+  for (const a of runLog.actions) {
+    if (a.tool === "create_directory" && typeof a.path === "string") createdDirs.push(a.path)
+  }
+
+  return {
+    originalPrompt,
+    chunkHistory,
+    filesModified: runLog.filesModified.slice(),
+    toolErrorCounts,
+    createdDirs,
+    completionMessage: null,
+    plannedChunkCount: null,
   }
 }
 
