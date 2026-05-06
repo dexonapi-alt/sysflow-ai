@@ -64,6 +64,12 @@ defineFlag("memory.stale_after_days_high_use", 180, parseNumber)
 defineFlag("memory.file_max_bytes", 102_400, parseNumber)
 defineFlag("memory.max_recall_entries", 12, parseNumber)
 
+// ─── Phase 10: chunked reasoning loop ───
+// Default OFF until the handler integration (Stage 3) lands and the prompt
+// flip (Stage 4) is ready. Stages 1-2 are inert with this flag off.
+defineFlag("reasoning.chunked_loop_enabled", false, parseBool)
+defineFlag("reasoning.max_chunks_per_run", 12, parseNumber)
+
 export function getFlag<T = unknown>(name: string, sysbasePath?: string | null): T {
   const memoKey = `${name}::${sysbasePath ?? ""}`
   if (memo.has(memoKey)) return memo.get(memoKey) as T
