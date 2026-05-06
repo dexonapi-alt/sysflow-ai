@@ -49,6 +49,13 @@ export type AgentEvent =
   // monotonically increases. `nextAction` is the planner's one-line
   // intent. `fileCount` is the number of files the chunk will touch.
   | { type: "chunk_plan"; chunkIndex: number; nextAction: string; fileCount?: number }
+  // ── Phase 12 Stage 6: assistant message stream ──
+  // The agent emits `assistant_message` when a completion / summary
+  // text arrives from the model. The Ink AgentStream renders the most
+  // recent one via <Typewriter> so the user sees the text type out
+  // instead of appearing instantly — feels like writing, not loading.
+  // Cleared by `clear` when a new prompt arrives.
+  | { type: "assistant_message"; text: string }
 
 const emitter = new EventEmitter()
 emitter.setMaxListeners(20)

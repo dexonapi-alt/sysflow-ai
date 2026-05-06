@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest"
 import { reduceAgentEvent, _resetIdsForTests, type AgentEventState } from "../useAgentEvents.js"
 
-const initial: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null }
+const initial: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null }
 
 beforeEach(() => _resetIdsForTests())
 
@@ -178,5 +178,44 @@ describe("reduceAgentEvent — awareness + chunk (Phase 12 Stage 5)", () => {
     s = reduceAgentEvent(s, { type: "clear" })
     expect(s.awareness).toBeNull()
     expect(s.chunk).toBeNull()
+  })
+})
+
+describe("reduceAgentEvent — assistant_message (Phase 12 Stage 6)", () => {
+  it("sets the assistant message with key=1 from null", () => {
+    const after = reduceAgentEvent(initial, { type: "assistant_message", text: "Done — wrote 3 files." })
+    expect(after.assistantMessage).toEqual({ text: "Done — wrote 3 files.", key: 1 })
+  })
+
+  it("increments key on a second emission so Typewriter re-mounts", () => {
+    let s = reduceAgentEvent(initial, { type: "assistant_message", text: "first" })
+    expect(s.assistantMessage?.key).toBe(1)
+    s = reduceAgentEvent(s, { type: "assistant_message", text: "second" })
+    expect(s.assistantMessage?.key).toBe(2)
+    expect(s.assistantMessage?.text).toBe("second")
+  })
+
+  it("increments key even when text repeats (defensive against duplicate emissions)", () => {
+    let s = reduceAgentEvent(initial, { type: "assistant_message", text: "same" })
+    s = reduceAgentEvent(s, { type: "assistant_message", text: "same" })
+    expect(s.assistantMessage?.key).toBe(2)
+  })
+
+  it("ignores empty-string text (no Typewriter for nothing)", () => {
+    const s = reduceAgentEvent(initial, { type: "assistant_message", text: "" })
+    expect(s.assistantMessage).toBeNull()
+  })
+
+  it("ignores non-string text (defensive type guard)", () => {
+    // @ts-expect-error — intentional bad payload to assert the runtime guard
+    const s = reduceAgentEvent(initial, { type: "assistant_message", text: 42 })
+    expect(s.assistantMessage).toBeNull()
+  })
+
+  it("clear wipes the assistant message", () => {
+    let s = reduceAgentEvent(initial, { type: "assistant_message", text: "hi" })
+    expect(s.assistantMessage).not.toBeNull()
+    s = reduceAgentEvent(s, { type: "clear" })
+    expect(s.assistantMessage).toBeNull()
   })
 })

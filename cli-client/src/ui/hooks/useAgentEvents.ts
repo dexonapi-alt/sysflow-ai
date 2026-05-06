@@ -43,6 +43,15 @@ export interface ChunkPulseState {
   pulseKey: number
 }
 
+/** Phase 12 Stage 6: latest assistant message. `key` increments on every
+ *  new emission so the AgentStream's Typewriter re-triggers the reveal
+ *  even if the text happens to repeat (defensive against duplicate
+ *  emissions and a clean re-mount path on /continue). */
+export interface AssistantMessageState {
+  text: string
+  key: number
+}
+
 export interface AgentEventState {
   /** Past log lines, append-only — rendered via Ink <Static> for cheap scroll. */
   log: LogLine[]
@@ -55,9 +64,12 @@ export interface AgentEventState {
   awareness: AwarenessSnapshot | null
   /** Phase 12 Stage 5: latest chunk-plan, drives Header chunk pulse. */
   chunk: ChunkPulseState | null
+  /** Phase 12 Stage 6: latest assistant message, rendered via Typewriter
+   *  in the live region of AgentStream. */
+  assistantMessage: AssistantMessageState | null
 }
 
-const INITIAL: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null }
+const INITIAL: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null }
 
 let nextLogId = 1
 
@@ -134,6 +146,17 @@ export function reduceAgentEvent(prev: AgentEventState, event: AgentEvent): Agen
           fileCount: event.fileCount ?? 0,
           pulseKey: prevKey + 1,
         },
+      }
+    }
+    case "assistant_message": {
+      // Defensive: ignore non-string / empty messages so a malformed
+      // emission never produces an empty Typewriter (which would briefly
+      // render nothing then "vanish" — confusing).
+      if (typeof event.text !== "string" || event.text.length === 0) return prev
+      const prevKey = prev.assistantMessage?.key ?? 0
+      return {
+        ...prev,
+        assistantMessage: { text: event.text, key: prevKey + 1 },
       }
     }
     default:
