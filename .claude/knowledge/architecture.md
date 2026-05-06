@@ -153,3 +153,79 @@ Free-tier models (`openrouter-auto` / `llama` / `mistral` / `gemini-flash-or`) a
 - Memory anchor: `recordOriginalIntent` in `server/src/memory-store/recorder.ts`
 - Kill switch: `awareness.enabled` (default `true`); thresholds `awareness.threshold_off_course` (60), `awareness.threshold_blocked` (30)
 - CLI badge: `cli-client/src/cli/render.ts: renderConfidenceBadge`
+
+## Living CLI (Phase 12)
+
+- **Source:** plan `applied/2026-05-07-phase-12-living-cli-ui.md`
+
+The Ink renderer in `cli-client/src/ui/` is composed of three persistent zones plus a stream zone in the middle. Every visible element has vital signs — colour shifts smoothly between states, the cursor breathes at idle, tool calls render as living cards instead of log lines.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  Header  (sticky)                                                    │
+│    sys · folder · model · chat · user · [aware badge] · [chunk pulse]│
+│                                                                       │
+│  AgentStream  (scrolls)                                              │
+│    log lines (Static — no per-frame redraw)                          │
+│    settled tool cards (Static)                                       │
+│    running tool cards (live region; Shimmer / Pulse ticking)         │
+│    pending assistant message (Typewriter, key'd to re-mount)         │
+│    spinner (Breath on a single glyph)                                │
+│                                                                       │
+│  ChatInput                                                           │
+│    > rotating placeholder hint   (Fade-in keyed on hintIndex)        │
+│      cursor ▏                    (Breath at idleBpm)                 │
+│                                                                       │
+│  LiveStatusBar  (sticky)                                             │
+│    ◦ working · 0:42                                                  │
+│    Breath tempo follows agent state (active 60bpm / idle 20bpm)      │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Animation engine (`cli-client/src/ui/animation/`)
+
+Single visual metaphor: **breath**. Slow enough never to strobe, organic enough never to feel mechanical, three tempos (`activeBpm = 60`, `idleBpm = 20`, `modalBpm = 40`).
+
+- **`useFrame`** — one shared 30fps scheduler across all subscribers. Auto-starts on first attach, auto-stops on last detach. Motion-disabled mode emits exactly one settled tick then never again. Lazy-registers the motion-store listener so test resets survive.
+- **Easings** — `breath` (cos-loop), `cubicOut` (settle), `elasticOut` (modal land), `linear` (explicit identity).
+- **`color-lerp`** — HSL interpolation between hex colours. Walks the SHORT arc of the hue wheel so green→red goes via yellow, not muddy brown. Truecolor when `chalk.level >= 3`; nearest-256 fallback (4 discrete stops) otherwise.
+- **Primitives** — `<Breath>`, `<Pulse>`, `<Shimmer>`, `<Fade>`, `<Typewriter>`. Each ships a pure shape function (`computeBreathColor`, `computePulseColor`, etc.) so the visual contract is testable without rendering Ink.
+
+### Event flow (agent ↔ Ink)
+
+The Ink reducer (`cli-client/src/ui/hooks/useAgentEvents.ts`) consumes a typed event union from `cli-client/src/agent/events.ts`. The agent emits structured events (behind `isInkActive()`) at the points the renderer needs them:
+
+```
+agent.ts                                  →  events.ts        →  reducer            →  component
+────────────────────────────────────────────────────────────────────────────────────────────────
+spinner.start("...")                      →  spinner          →  spinnerText        →  Spinner / LiveStatusBar
+spinner.stop()                            →  spinner_stop     →  spinnerText=null   →
+surfaceToolCall(...) wrap                 →  tool_start       →  toolCards push     →  ToolCard (running)
+                                          →  tool_end (ok=t)  →  status=success     →  ToolCard (success)
+                                          →  tool_end (ok=f)  →  status=error       →  ToolCard (error)
+chunkPlanBrief arrives                    →  chunk_plan       →  chunk pulseKey++   →  Header chunk pulse
+awarenessSnapshot arrives                 →  awareness_update →  awareness state    →  Header badge
+renderCompletion message                  →  assistant_message →  pending key++     →  AgentStream Typewriter
+```
+
+The bus is uni-directional (`emitAgent` only). The cli's input loop (`useInput` in ChatInput) is the only path the user pushes data back through.
+
+### Failure modes the loop handles
+
+- **`SYS_INK` unset** → `isInkActive()` returns false; structured events are not emitted; legacy `console.log` rendering carries on; nothing in `cli-client/src/ui/` is mounted.
+- **`--no-motion` / `SYS_NO_MOTION=1`** → `isMotionEnabled()` is false; every primitive renders its child raw at the destination colour; `useFrame` emits one tick then exits; the cli is fully readable but stops moving.
+- **Truecolor unavailable** → `chalk.level <= 2`; `color-lerp` snaps to discrete stops (default 4 between any two endpoints) so banded colour replaces smooth gradient. Visual feel degrades but the design is intact.
+- **Slow terminals / SSH** → 30fps cap on `useFrame`; settled tool cards move into Ink's `<Static>` so they don't re-render; only the active card + spinner + cursor tick per frame.
+
+### Key files (one source of truth per concern)
+
+- Animation primitives: `cli-client/src/ui/animation/primitives/`
+- Animation engine: `cli-client/src/ui/animation/use-frame.ts`
+- Easings + colour lerp: `cli-client/src/ui/animation/{easings,color-lerp}.ts`
+- Theme tokens: `cli-client/src/ui/theme.ts` (palette, tempo, easing, gradient, spacing, awarenessColor)
+- Motion store: `cli-client/src/ui/state/motion.ts`
+- Event bus + types: `cli-client/src/agent/events.ts`
+- Reducer: `cli-client/src/ui/hooks/useAgentEvents.ts`
+- Components: `cli-client/src/ui/components/{Header,LiveStatusBar,AgentStream,ToolCard,Spinner,ChatInput}.tsx`
+- Composition root: `cli-client/src/ui/App.tsx`
+- Kill switches: env `SYS_INK=1` to mount Ink; `--no-motion` flag or `SYS_NO_MOTION=1` to freeze animations

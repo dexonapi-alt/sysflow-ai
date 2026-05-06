@@ -80,3 +80,42 @@ The current design accepts a small UX downgrade after backtrack (no chunked loop
 - **Source:** plan `applied/2026-05-06-phase-11-awareness-and-recovery.md` (Stage 4)
 
 Same logic as `reasoning.chunked_loop_enabled = true`: the awareness loop degrades gracefully when `GEMINI_API_KEY` is unset (the LLM half short-circuits at the trigger gate; heuristic + gate keep firing on their own). Self-hosters get useful detection without any setup. The off-course modal won't fire spuriously because the threshold-blocked floor (30/100) requires multiple major signals — single-source false positives can't cross it alone.
+
+## Breath is the single visual metaphor for the living CLI
+
+- **Source:** plan `applied/2026-05-07-phase-12-living-cli-ui.md`
+
+Phase 12's design language uses **one** animation metaphor — a slow, organic, sin-based breath curve — across every visible region: spinner glyph, bottom-row status, chat-input cursor, awareness badge gradient, modal evidence. Three explicit tempos (`activeBpm = 60`, `idleBpm = 20`, `modalBpm = 40`) cover the entire speed range. Alternatives rejected:
+
+1. **Per-component idioms** (rotating dots for spinner, bouncing bar for progress, blinking caret for cursor). Reads as a junk drawer of motion — the eye can't tell what's load vs. decoration. A single curve unifies the language.
+2. **Faster pulses (>90bpm)**. Strobing is the failure mode of "alive" UIs. Anything faster than a calm resting heart rate trips the same neural circuits as flashing-light warnings, exactly the wrong feel for a tool the user runs for hours.
+3. **Multiple concurrent breaths in the same line of sight**. Tested early — two breaths at different tempos in the same row reads as chaos, not life. The composition rule (one breath per visible region, called out in `Breath.tsx`) keeps the design coherent.
+
+Tempo is locked in `cli-client/src/ui/theme.ts`. A future re-skin should start there; do **not** dial up the bpm to make the UI feel "snappier" — that's exactly the design failure this entry exists to prevent.
+
+## Pure shape functions instead of `ink-testing-library`
+
+- **Source:** plan `applied/2026-05-07-phase-12-living-cli-ui.md` (Stage 2)
+
+Every Phase 12 animation primitive (`<Breath>`, `<Pulse>`, `<Shimmer>`, `<Fade>`, `<Typewriter>`) ships a pure shape function alongside the React component. The component is a thin React wrapper that subscribes to `useFrame` and calls the compute fn each tick. **Tests target the pure helpers directly**, asserting visual contracts without rendering through Ink.
+
+`ink-testing-library` was deliberately not added. Reasons:
+
+1. **Dependency surface.** The plan called out *"resist the urge to pull in ink-spinner / ink-text-input"* — same applies to ink-testing-library. Rendering Ink in tests adds a slow, brittle layer that yields little signal beyond what the pure shape function would.
+2. **Decoupling.** A pure compute fn is reusable from a non-React renderer (e.g. a future status-line variant in legacy console mode). Tying the contract to Ink's API would lock it in.
+3. **Speed.** Pure-fn tests run in microseconds; Ink-rendered tests would dominate the cli suite's runtime.
+
+When a future component needs to assert React-specific behaviour (effects, reconciliation, key-driven remounts), reach for the lightest possible test — `vi.spyOn` + manual reducer calls — before reaching for ink-testing-library.
+
+## Modal Ink-port deferred from Phase 12
+
+- **Source:** plan `applied/2026-05-07-phase-12-living-cli-ui.md` (Stage 7)
+
+The Stage 7 plan called for porting `<PermissionModal>` and `<OffCourseModal>` from raw-TTY (`cli-client/src/cli/{permission-prompt,off-course-prompt}.ts`) to Ink components with slide-in + focus-pulse + breath-on-evidence. **Both were deliberately deferred.**
+
+Why:
+- The existing helpers expose a synchronous-promise contract (`askPermission()` / `askOffCourse()` return a `Promise<Result>` the agent loop awaits). Porting to Ink requires either (a) rewriting the contract to be event-driven, (b) building a stdin-handover bridge that suspends Ink's own input loop while the modal is open, or (c) duplicating the modal in both modes. None are small.
+- The raw-TTY modals work today and don't break the alive feel — they're brief interruptions and the user spends most of their time outside them.
+- The visible alive-feel is delivered by the always-on zones (Header / LiveStatusBar / ChatInput cursor / tool cards / Typewriter), not by modals that fire a few times per session at most.
+
+When to revisit: if user feedback specifically calls out modal feel as breaking the design, OR if the modal fire rate climbs (e.g. permission system gets noisier). Until then, the cost is too high for the win.
