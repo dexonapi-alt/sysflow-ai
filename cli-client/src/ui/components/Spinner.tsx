@@ -1,7 +1,8 @@
 import * as React from "react"
 import { useEffect, useState } from "react"
 import { Box, Text } from "ink"
-import { palette, glyphs } from "../theme.js"
+import { palette, tempo } from "../theme.js"
+import { Breath } from "../animation/primitives/index.js"
 
 const VERBS = [
   "thinking",
@@ -13,7 +14,6 @@ const VERBS = [
   "drafting",
 ] as const
 
-const FRAME_MS = 80
 const VERB_MS = 3000
 
 interface Props {
@@ -22,18 +22,22 @@ interface Props {
 }
 
 /**
- * Animated spinner with verb cycling. Replaces the generic `ora` "thinking..."
- * by rotating through implementation-flavoured verbs every ~3s, so a long
- * agent run reads like progress instead of a frozen status.
+ * Phase 12 Stage 3: replaces the legacy ora-style braille rotation with
+ * a single glyph wrapped in a `<Breath>` pulse. The verb cycling stays
+ * — that part of the design (rotating implementation-flavoured verbs
+ * every ~3s) reads as progress and is independent of the animation
+ * primitive underneath.
+ *
+ * Visual: `  ●  thinking…`
+ *   - The dot breathes between accentDim and accent at activeBpm (60),
+ *     which feels like a working pulse without the staccato of dots.
+ *   - The verb fades through every 3s.
+ *
+ * Motion-disabled: Breath collapses to its `to` color (the bright
+ * accent), so the dot is steady and the verb still cycles.
  */
 export function Spinner({ text }: Props): React.ReactElement {
-  const [frame, setFrame] = useState(0)
   const [verbIndex, setVerbIndex] = useState(0)
-
-  useEffect(() => {
-    const t = setInterval(() => setFrame((f) => (f + 1) % glyphs.spinner.length), FRAME_MS)
-    return () => clearInterval(t)
-  }, [])
 
   useEffect(() => {
     if (text) return
@@ -45,8 +49,9 @@ export function Spinner({ text }: Props): React.ReactElement {
 
   return (
     <Box>
-      <Text color={palette.accent}>  {glyphs.spinner[frame]} </Text>
-      <Text color={palette.muted}>{label}</Text>
+      <Text>  </Text>
+      <Breath from={palette.accentDim} to={palette.accent} bpm={tempo.activeBpm}>●</Breath>
+      <Text color={palette.muted}> {label}</Text>
     </Box>
   )
 }

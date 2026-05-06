@@ -5,6 +5,7 @@ import { StatusLine } from "./components/StatusLine.js"
 import { ChatInput } from "./components/ChatInput.js"
 import { Spinner } from "./components/Spinner.js"
 import { AgentStream } from "./components/AgentStream.js"
+import { LiveStatusBar } from "./components/LiveStatusBar.js"
 import { palette } from "./theme.js"
 import { ensureSysbase, getSelectedModel, getAuthUser, getActiveChatInfo, getPlanMode, getSysbasePath } from "../lib/sysbase.js"
 import { runAgent } from "../agent/agent.js"
@@ -109,6 +110,15 @@ export function App(): React.ReactElement {
           <Text color={palette.error}>  ✖ {error}</Text>
         </Box>
       )}
+      {/*
+        Phase 12 Stage 3: bottom-row heartbeat. Always mounted so the
+        breath glyph + elapsed clock are present whether the agent is
+        working or idle. Tempo shifts active vs idle automatically by
+        reading the spinner state from the events bus.
+      */}
+      <Box marginTop={1}>
+        <LiveStatusBar />
+      </Box>
     </Box>
   )
 }
