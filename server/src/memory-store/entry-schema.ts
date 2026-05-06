@@ -18,6 +18,10 @@ export const entryKindSchema = z.enum([
   "bug_pattern",
   "user_correction",
   "preference",
+  // Phase 10: per-chunk reflection summary written by the chunked-reasoning
+  // loop. Lets `/continue` resume mid-stream — the next run reads back what
+  // was decided in each chunk without re-running the planner.
+  "chunk_summary",
 ])
 export type EntryKind = z.infer<typeof entryKindSchema>
 

@@ -60,4 +60,5 @@ export {
   recordImplementSummary,
   recordUserCorrection,
   recordBugPattern,
+  recordChunkSummary,
 } from "./recorder.js"

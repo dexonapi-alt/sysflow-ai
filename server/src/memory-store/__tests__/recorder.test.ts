@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest"
-import { recordDecision, recordImplementSummary, recordUserCorrection, recordBugPattern } from "../recorder.js"
+import { recordDecision, recordImplementSummary, recordUserCorrection, recordBugPattern, recordChunkSummary } from "../recorder.js"
 import { loadMemoryEntries, _resetCache, _setupTempCwd } from "../store.js"
 
 describe("recorder", () => {
@@ -102,5 +102,78 @@ describe("recorder", () => {
   it("empty content is rejected", async () => {
     const r = await recordUserCorrection(cwd, "   ")
     expect(r).toBeNull()
+  })
+
+  // ─── Phase 10: chunk_summary ───
+
+  it("recordChunkSummary persists chunk index + nextAction + executed files", async () => {
+    const r = await recordChunkSummary(
+      cwd,
+      {
+        chunkIndex: 2,
+        nextAction: "wire user routes",
+        executedFiles: ["src/routes/users.js", "src/routes/auth.js"],
+        reflection: { coherent: true, nextFocus: "add middleware next", issues: [], shouldStop: false },
+      },
+      { runId: "r1", trigger: "chunk_reflect" },
+    )
+    expect(r).not.toBeNull()
+    expect(r?.kind).toBe("chunk_summary")
+    expect(r?.content).toContain("Chunk 2")
+    expect(r?.content).toContain("wire user routes")
+    expect(r?.content).toContain("src/routes/users.js")
+    expect(r?.content).toContain("add middleware next")
+    expect(r?.sourceRef.filePaths).toContain("src/routes/users.js")
+    expect(r?.tags).toContain("chunk")
+  })
+
+  it("recordChunkSummary surfaces issues when reflection.coherent is false", async () => {
+    const r = await recordChunkSummary(
+      cwd,
+      {
+        chunkIndex: 1,
+        nextAction: "write models",
+        executedFiles: ["src/models/User.js"],
+        reflection: {
+          coherent: false,
+          issues: ["server.js imports ./db but no db file was created"],
+          nextFocus: "create src/db.js",
+          shouldStop: false,
+        },
+      },
+      { runId: "r1", trigger: "chunk_reflect" },
+    )
+    expect(r).not.toBeNull()
+    expect(r?.content).toContain("Issues:")
+    expect(r?.content).toContain("server.js imports ./db")
+  })
+
+  it("recordChunkSummary notes when reflector says shouldStop", async () => {
+    const r = await recordChunkSummary(
+      cwd,
+      {
+        chunkIndex: 4,
+        nextAction: "polish",
+        executedFiles: ["README.md"],
+        reflection: { coherent: true, issues: [], nextFocus: "", shouldStop: true },
+      },
+      { runId: "r1", trigger: "chunk_reflect" },
+    )
+    expect(r).not.toBeNull()
+    expect(r?.content).toContain("should stop")
+  })
+
+  it("recordChunkSummary returns null when content is empty", async () => {
+    const r = await recordChunkSummary(
+      cwd,
+      // No nextAction, no files, no reflection — nothing to record.
+      // chunkIndex alone is meaningless without context.
+      { chunkIndex: 0 },
+      { runId: "r1" },
+    )
+    // The header "Chunk 0" alone is still non-empty content, so this should
+    // actually record (we never want to silently drop the boundary marker).
+    expect(r).not.toBeNull()
+    expect(r?.content).toBe("Chunk 0")
   })
 })
