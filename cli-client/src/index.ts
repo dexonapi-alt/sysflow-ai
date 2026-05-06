@@ -7,6 +7,7 @@ import { showModelPicker } from "./commands/model.js"
 import { handleLogin, handleRegister, handleLogout, handleWhoami } from "./commands/auth.js"
 import { showChats, deleteActiveChat } from "./commands/chats.js"
 import { showPlanPicker, showUsage } from "./commands/billing.js"
+import { applyEnv as applyMotionEnv } from "./ui/state/motion.js"
 
 function readStdin(): Promise<string> {
   return new Promise((resolve) => {
@@ -19,6 +20,11 @@ function readStdin(): Promise<string> {
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2)
+
+  // Phase 12 Stage 1: read --no-motion / SYS_NO_MOTION before anything else
+  // initialises so the animation engine sees the correct setting from the
+  // first hook call. Idempotent + best-effort — never throws.
+  applyMotionEnv(args)
 
   // Support: sys -f prompt.txt
   const fileIdx = args.indexOf("-f")

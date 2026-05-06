@@ -4,6 +4,7 @@ Managed by `memex-md`. Each plan is a design artifact written before implementat
 
 ## Plans
 
+- [2026-05-07-phase-12-living-cli-ui.md](2026-05-07-phase-12-living-cli-ui.md) — Phase 12: replace the static + linear "log a line, move on" CLI rendering with a living, reactive interface. Animation language built on a single visual metaphor (breath); persistent header/stream/status zones; color-as-state via HSL lerp; tool calls as living cards; idle ambient; reduced-motion mode. Builds on Phase 9's Ink scaffold. *(in-progress)*
 - [2026-05-05-phase-9-ink-ui-rewrite.md](2026-05-05-phase-9-ink-ui-rewrite.md) — Phase 9: replace cli-client's `console.log` + `readline` rendering with an Ink (React-for-terminal) component tree. Live in-place task list, multiline chat input with history, permission prompt as a modal with embedded structured diff, animated spinner with cycling verbs. Logic untouched — purely the rendering layer. *(in-progress)*
 - [2026-05-02-phase-8-persistent-reasoning-memory.md](2026-05-02-phase-8-persistent-reasoning-memory.md) — Phase 8: persistent reasoning memory with active anti-staleness. New `.sysflow-memory.md` (sibling of user-written `.sysflow.md`) auto-records decisions/summaries/corrections; read-time validators (file-existence, dep-existence, age) gate every entry; auto-confirmation/contradiction; `/memory` and `/remember` slash commands; compaction at 100 KB.  *(in-progress)*
 
