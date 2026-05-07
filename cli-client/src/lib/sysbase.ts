@@ -20,7 +20,9 @@ export interface ModelDef {
 
 export const MODELS: ModelDef[] = [
   { id: "openrouter-auto", label: "Auto (OpenRouter)", desc: "Best available model via OpenRouter", visible: true },
-  { id: "gemini-flash",    label: "Gemini 2.5 Flash",  desc: "Fast & free — Google AI direct", visible: true }
+  { id: "gemini-flash",    label: "Gemini 2.5 Flash",  desc: "Fast & free — Google AI direct", visible: true },
+  { id: "claude-sonnet",   label: "Claude Sonnet 4.5", desc: "Anthropic — paid; needs ANTHROPIC_API_KEY", visible: true },
+  { id: "claude-opus",     label: "Claude Opus 4.5",   desc: "Anthropic — paid premium; needs ANTHROPIC_API_KEY", visible: true },
 ]
 
 export const VISIBLE_MODELS = MODELS.filter((m) => m.visible !== false)
