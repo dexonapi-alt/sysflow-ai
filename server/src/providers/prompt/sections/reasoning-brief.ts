@@ -10,6 +10,10 @@ import type { ReasoningBrief } from "../../../reasoning/reasoning-schema.js"
 
 export interface ReasoningBriefCtx {
   reasoningBrief?: ReasoningBrief
+  /** Phase 16 Stage 3: chained `implement_elaborate` brief. Rendered as
+   *  a DEEPER REASONING sub-block under the implement brief when
+   *  present. */
+  reasoningElaborationBrief?: ReasoningBrief
 }
 
 export function getReasoningBriefSection(ctx: ReasoningBriefCtx): string | null {
@@ -90,6 +94,31 @@ export function getReasoningBriefSection(ctx: ReasoningBriefCtx): string | null 
       }
       lines.push(`PROCEED: ${b.proceedHint}`)
       break
+    }
+  }
+
+  // Phase 16 Stage 3: render the chained-elaboration brief as a sub-block
+  // under the implement brief when present. The elaboration's confidence
+  // can DOWNGRADE the preflight's — if it's LOW, the model should treat
+  // the surface brief as tentative and verify before committing.
+  const elab = ctx.reasoningElaborationBrief
+  if (
+    brief.pipeline === "implement"
+    && elab
+    && elab.pipeline === "implement_elaborate"
+    && elab.implementElaborationBrief
+  ) {
+    const eb = elab.implementElaborationBrief
+    lines.push("")
+    lines.push(`DEEPER REASONING (re-scored confidence: ${eb.confidence}):`)
+    lines.push(`  WHY THIS APPROACH: ${eb.whyThisApproach}`)
+    if (eb.whyNotAlternative.length > 0) {
+      lines.push("  ALTERNATIVES REJECTED:")
+      eb.whyNotAlternative.forEach((a) => lines.push(`    - ${a}`))
+    }
+    if (eb.preconditions.length > 0) {
+      lines.push("  PRECONDITIONS (verify before committing):")
+      eb.preconditions.forEach((p) => lines.push(`    - ${p}`))
     }
   }
 

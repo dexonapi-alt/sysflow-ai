@@ -42,6 +42,12 @@ export interface ProviderPayload {
   planMode?: boolean
   /** Phase 5 reasoning brief from preflight / on-error / on-completion. Untyped here to avoid an import cycle. */
   reasoningBrief?: unknown
+  /** Phase 16 Stage 3 chained-preflight elaboration brief. Set only when the
+   *  free-tier elaboration gate matches (free-tier model + complexity ≥
+   *  medium + preflight confidence < HIGH); otherwise omitted. The prompt
+   *  builder renders it as a "DEEPER REASONING" sub-block under the
+   *  implement brief. Untyped to avoid an import cycle. */
+  reasoningElaborationBrief?: unknown
   /** Phase 10 chunked-loop planner brief — when set, the prompt builder injects "files: [...]" so the model honours the chunk's file list exactly. Untyped to avoid an import cycle. */
   chunkPlanBrief?: unknown
 }

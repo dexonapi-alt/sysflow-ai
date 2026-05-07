@@ -43,10 +43,15 @@ export async function runReasoning(payload: ReasoningPayload): Promise<Reasoning
   // without the reflector or vice versa.
   // Phase 11: divergence_check is gated by `awareness.enabled` — same flag
   // that gates the heuristic detector + verification gate.
+  // Phase 16 Stage 3: implement_elaborate has its own flag so the
+  // chained call can be disabled without affecting the preflight that
+  // precedes it.
   const flagName = (payload.trigger === "chunk_plan" || payload.trigger === "chunk_reflect")
     ? "reasoning.chunked_loop_enabled"
     : payload.trigger === "divergence_check"
     ? "awareness.enabled"
+    : payload.trigger === "implement_elaborate"
+    ? "reasoning.chained.preflight_elaboration_enabled"
     : (`prompt.${payload.trigger}_reasoning_enabled` as const)
   try {
     if (!getFlag<boolean>(flagName, payload.sysbasePath)) return null
@@ -143,6 +148,11 @@ function pickPipeline(payload: ReasoningPayload): PipelineKind | "simple" {
   // Phase 11: divergence_check is invoked from the awareness path with the
   // pipeline already resolved.
   if (payload.trigger === "divergence_check") return "divergence"
+  // Phase 16 Stage 3: chained second-stage Flash on top of preflight's
+  // implement brief. Trigger always maps to the elaboration pipeline —
+  // the gate that decides whether to fire it lives upstream in
+  // free-tier-policy.ts: shouldRunPreflightElaboration.
+  if (payload.trigger === "implement_elaborate") return "implement_elaborate"
   // preflight: defer to intent classifier.
   const hint: IntentHint = classifyIntent(payload.userMessage)
   return hint

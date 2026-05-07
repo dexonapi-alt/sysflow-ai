@@ -7,6 +7,7 @@ import {
   FREE_TIER_DIVERGENCE_CHAIN_UPPER,
   FREE_TIER_CHUNK_CAP_TIGHTEN,
   FREE_TIER_CHUNK_FILES_TIGHTEN,
+  shouldRunPreflightElaboration,
 } from "../free-tier-policy.js"
 
 describe("isFreeTierModel", () => {
@@ -82,5 +83,70 @@ describe("back-compat: confidence-tracker re-exports the moved symbols", () => {
     // Function identity isn't guaranteed across re-export, but behaviour is.
     expect(reexports.isFreeTierModel("openrouter-auto")).toBe(true)
     expect(reexports.isFreeTierModel("gpt-4o")).toBe(false)
+  })
+})
+
+// ─── Phase 16 Stage 3: shouldRunPreflightElaboration gate matrix ───
+
+describe("shouldRunPreflightElaboration", () => {
+  // Default: free-tier + medium complexity + MEDIUM confidence + flag on → fire.
+  const baseHit = {
+    model: "openrouter-auto",
+    complexity: "medium" as const,
+    preflightConfidence: "MEDIUM" as const,
+    flagEnabled: true,
+  }
+
+  it("fires on the canonical free-tier + medium + MEDIUM + flag-on case", () => {
+    expect(shouldRunPreflightElaboration(baseHit)).toBe(true)
+  })
+
+  it("fires on free-tier + complex + LOW (the bigger-cost case the elaboration is most needed for)", () => {
+    expect(shouldRunPreflightElaboration({ ...baseHit, complexity: "complex", preflightConfidence: "LOW" })).toBe(true)
+  })
+
+  it("does NOT fire when the flag is off (off-switch wins)", () => {
+    expect(shouldRunPreflightElaboration({ ...baseHit, flagEnabled: false })).toBe(false)
+  })
+
+  it("does NOT fire on a paid model (preflight Flash already strong enough)", () => {
+    expect(shouldRunPreflightElaboration({ ...baseHit, model: "gpt-4o" })).toBe(false)
+    expect(shouldRunPreflightElaboration({ ...baseHit, model: "claude-3-5-sonnet" })).toBe(false)
+  })
+
+  it("does NOT fire on simple complexity (over-thinking guard)", () => {
+    expect(shouldRunPreflightElaboration({ ...baseHit, complexity: "simple" })).toBe(false)
+  })
+
+  it("does NOT fire on HIGH preflight confidence (preflight already certain enough)", () => {
+    expect(shouldRunPreflightElaboration({ ...baseHit, preflightConfidence: "HIGH" })).toBe(false)
+  })
+
+  it("does NOT fire on null / undefined inputs (defensive)", () => {
+    expect(shouldRunPreflightElaboration({ ...baseHit, model: null })).toBe(false)
+    expect(shouldRunPreflightElaboration({ ...baseHit, model: undefined })).toBe(false)
+    expect(shouldRunPreflightElaboration({ ...baseHit, complexity: null })).toBe(false)
+    expect(shouldRunPreflightElaboration({ ...baseHit, complexity: undefined })).toBe(false)
+    expect(shouldRunPreflightElaboration({ ...baseHit, preflightConfidence: null })).toBe(false)
+    expect(shouldRunPreflightElaboration({ ...baseHit, preflightConfidence: undefined })).toBe(false)
+  })
+
+  it("full matrix: (paid|free) × (simple|medium|complex) × (HIGH|MEDIUM|LOW) → fires only on free + ≥medium + <HIGH", () => {
+    const models = ["gpt-4o" /* paid */, "openrouter-auto" /* free */] as const
+    const complexities = ["simple", "medium", "complex"] as const
+    const confidences = ["HIGH", "MEDIUM", "LOW"] as const
+
+    for (const model of models) {
+      for (const complexity of complexities) {
+        for (const preflightConfidence of confidences) {
+          const got = shouldRunPreflightElaboration({ model, complexity, preflightConfidence, flagEnabled: true })
+          const expected =
+            model === "openrouter-auto"
+            && (complexity === "medium" || complexity === "complex")
+            && (preflightConfidence === "MEDIUM" || preflightConfidence === "LOW")
+          expect(got).toBe(expected)
+        }
+      }
+    }
   })
 })

@@ -72,6 +72,17 @@ defineFlag("memory.max_recall_entries", 12, parseNumber)
 // Off-switch in case free-tier hallucinations make the signal noisy.
 defineFlag("memory.active_confirmation_enabled", true, parseBool)
 
+// ─── Phase 16 Stage 3: chained preflight elaboration on free-tier ───
+// When true (and gate matches: free-tier model + complexity ≥ medium
+// + preflight confidence < HIGH), a second-stage `implement_elaborate`
+// Flash runs on top of the preflight implement brief. Re-examines the
+// chosen approach (whyThisApproach / whyNotAlternative / preconditions
+// / re-scored confidence). Output feeds the main model's prompt
+// alongside the original implement brief. Off-switch in case free-tier
+// rate limits make the extra Flash expensive — degrades to today's
+// behaviour (single-stage preflight, no chain).
+defineFlag("reasoning.chained.preflight_elaboration_enabled", true, parseBool)
+
 // ─── Phase 10: chunked reasoning loop ───
 // Default ON as of Stage 4 — the prompt now teaches the model to honour the
 // planner's file list, so turning the loop on actually produces structured
