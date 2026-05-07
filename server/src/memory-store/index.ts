@@ -44,6 +44,14 @@ export {
 } from "./confirmation-tracker.js"
 
 export {
+  applyMemoryFeedback,
+  validateConfirmation,
+  validateContradiction,
+  type MemoryFeedback,
+  type ApplyMemoryFeedbackResult,
+} from "./feedback.js"
+
+export {
   compactIfNeeded,
   type CompactOptions,
   type CompactResult,
