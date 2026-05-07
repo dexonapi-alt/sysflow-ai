@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { pickPrimaryGlyph, formatTokens, SPINNER_GLYPHS, SPINNER_COLORS } from "../RichSpinner.js"
+import { pickPrimaryGlyph, formatTokens, SPINNER_GLYPHS, SPINNER_COLORS, VERBS } from "../RichSpinner.js"
 
 describe("pickPrimaryGlyph", () => {
   // 60 bpm = 1000ms period, 4 glyphs → 250ms per slot.
@@ -45,6 +45,40 @@ describe("pickPrimaryGlyph", () => {
   it("SPINNER_GLYPHS has exactly 4 distinct characters", () => {
     expect(SPINNER_GLYPHS.length).toBe(4)
     expect(new Set(SPINNER_GLYPHS).size).toBe(4)
+  })
+})
+
+describe("VERBS — workflow-flavoured verb cycle", () => {
+  it("has at least 20 entries so the loop is long enough to feel non-repetitive", () => {
+    // At VERB_MS=3000 the full loop is verbCount * 3 seconds. 20+ keeps it
+    // beyond the duration of most agent waits — the user almost never
+    // sees the same verb twice in one pause.
+    expect(VERBS.length).toBeGreaterThanOrEqual(20)
+  })
+
+  it("entries are all unique (no duplicates dragging down the perceived variety)", () => {
+    expect(new Set(VERBS).size).toBe(VERBS.length)
+  })
+
+  it("every entry is a non-empty lowercase phrase (no trailing ellipsis — the renderer adds it)", () => {
+    for (const v of VERBS) {
+      expect(typeof v).toBe("string")
+      expect(v.length).toBeGreaterThan(0)
+      expect(v).toBe(v.toLowerCase())
+      expect(v.endsWith("…")).toBe(false)
+      expect(v.endsWith("...")).toBe(false)
+    }
+  })
+
+  it("includes the user-requested workflow flavours (debugging / searching / deciding / hmm)", () => {
+    expect(VERBS).toContain("debugging")
+    expect(VERBS).toContain("searching")
+    expect(VERBS).toContain("deciding")
+    expect(VERBS).toContain("hmm")
+  })
+
+  it("keeps `thinking` as the head of the list (the friendly default for the very first cycle slot)", () => {
+    expect(VERBS[0]).toBe("thinking")
   })
 })
 
