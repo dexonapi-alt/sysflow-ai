@@ -83,6 +83,23 @@ export function isInkActive(): boolean {
 }
 
 /**
+ * Phase 14 Stage 1: predicate every legacy-only renderer should gate on.
+ * Returns the inverse of `isInkActive()` — single canonical name so future
+ * contributors don't re-derive the check at each callsite.
+ *
+ * Use it to wrap any `console.log` that prints heavy ASCII chrome
+ * (boxTop / boxMid / boxBot SUMMARY boxes, renderPipelineBox, MEMORY
+ * blocks), any raw cursor-move writes (`process.stdout.write("\x1b[nA")`),
+ * or any other inline rendering whose Ink-mode equivalent is already
+ * emitted as a structured event. In Ink mode the redirected console.log
+ * would route those bytes through the bus too, producing double-rendered
+ * content (and in the case of cursor moves, a corrupted Ink layout).
+ */
+export function shouldRenderInlineForLegacy(): boolean {
+  return !isInkActive()
+}
+
+/**
  * Redirect raw `console.log` / `console.warn` / `console.error` calls
  * through the agent event bus so they render inside `<AgentStream>` as
  * `log` entries instead of writing directly to stdout (where they would

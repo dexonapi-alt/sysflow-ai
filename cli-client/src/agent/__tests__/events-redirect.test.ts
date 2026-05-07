@@ -5,6 +5,7 @@ import {
   onAgent,
   redirectConsoleToInk,
   restoreConsole,
+  shouldRenderInlineForLegacy,
   type AgentEvent,
 } from "../events.js"
 
@@ -45,6 +46,46 @@ describe("isInkActive", () => {
   it("backwards-compat: SYS_INK=1 still produces true (was the old opt-in)", () => {
     process.env.SYS_INK = "1"
     expect(isInkActive()).toBe(true)
+  })
+})
+
+describe("shouldRenderInlineForLegacy (Phase 14 Stage 1)", () => {
+  const originalInk = process.env.SYS_INK
+  const originalLegacy = process.env.SYS_LEGACY
+
+  beforeEach(() => {
+    delete process.env.SYS_INK
+    delete process.env.SYS_LEGACY
+  })
+
+  afterEach(() => {
+    if (originalInk === undefined) delete process.env.SYS_INK
+    else process.env.SYS_INK = originalInk
+    if (originalLegacy === undefined) delete process.env.SYS_LEGACY
+    else process.env.SYS_LEGACY = originalLegacy
+  })
+
+  it("returns false in default Ink mode (the legacy console box would double-render)", () => {
+    expect(shouldRenderInlineForLegacy()).toBe(false)
+  })
+
+  it("returns true when SYS_INK=0", () => {
+    process.env.SYS_INK = "0"
+    expect(shouldRenderInlineForLegacy()).toBe(true)
+  })
+
+  it("returns true when SYS_LEGACY=1", () => {
+    process.env.SYS_LEGACY = "1"
+    expect(shouldRenderInlineForLegacy()).toBe(true)
+  })
+
+  it("is the strict inverse of isInkActive() — never the same value", () => {
+    expect(shouldRenderInlineForLegacy()).toBe(!isInkActive())
+    process.env.SYS_INK = "0"
+    expect(shouldRenderInlineForLegacy()).toBe(!isInkActive())
+    delete process.env.SYS_INK
+    process.env.SYS_LEGACY = "1"
+    expect(shouldRenderInlineForLegacy()).toBe(!isInkActive())
   })
 })
 
