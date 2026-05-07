@@ -1,18 +1,18 @@
 /**
  * <RichSpinner> — Phase 14 Stage 3: replaces the single-glyph breath
- * spinner with a multi-glyph "swirl" + a live status overlay.
+ * spinner with a frame-cycled swirl + a live status overlay.
  *
  * Three regions on one row:
  *
- *   ✢ ✺ ✣ ✤   thinking…   (0:42 · ↑ 12.3k)
- *   ─────     ───────       ──────────────
- *   glyphs    verb          overlay
+ *   ✢   thinking…   (0:42 · ↑ 12.3k)
+ *   ─   ───────       ──────────────
+ *   glyph  verb       overlay
  *
- *   - **Glyphs**: 4 fixed characters rendered side-by-side. The "primary"
- *     index rotates around the cycle driven by `breathAt(now, bpm)`; the
- *     primary glyph is bright accent, the others render dimmed. Net effect
- *     is a soft swirl — same visual metaphor (breath, slow tempo) as the
- *     rest of the design language, just denser than a single character.
+ *   - **Glyph**: ONE character at a time, swapped on a breath cadence
+ *     so the eye reads a rotation: `✢ → ✺ → ✣ → ✤ → ✢ …`. Each glyph
+ *     gets its own colour (`SPINNER_COLORS`) so the swap is visible
+ *     even at small sizes — the row reads as a single colour-shifting
+ *     star, not as "an icon".
  *   - **Verb**: cycles through `VERBS` every 3s. Same behaviour as the
  *     prior `<Spinner>`. An optional `text` prop overrides the cycle (used
  *     by callers like `<App>` to surface a one-off "loading…" label).
@@ -22,8 +22,8 @@
  *     accumulates the running estimate from `cliEstimateTokens` and
  *     hands it down. Hidden when neither value is available.
  *
- * Motion-disabled: glyphs render with the primary at index 0 always
- * (deterministic settled frame), verb still cycles every 3s.
+ * Motion-disabled: glyph stays on index 0 (the brand-accent star),
+ * verb still cycles every 3s.
  */
 
 import * as React from "react"
@@ -47,8 +47,20 @@ const VERBS = [
 const VERB_MS = 3000
 
 /** Glyph set — chosen for visual similarity (all 4-pointed star shapes)
- *  so the swirl reads as one motif rotating, not four glyphs flickering. */
+ *  so the swap reads as one motif rotating, not four glyphs flickering. */
 export const SPINNER_GLYPHS = ["✢", "✺", "✣", "✤"] as const
+
+/** Colour per glyph index — all in the cool family (purple → teal → blue
+ *  → green) so the rotation reads as a calm hue-shift rather than a
+ *  warning or alert. Each entry stays distinct enough that the eye reads
+ *  each frame change even on terminals that crush mid-luminance hues.
+ *  MUST stay length-aligned with `SPINNER_GLYPHS`. */
+export const SPINNER_COLORS = [
+  palette.accent,   // ✢ purple
+  palette.tool,     // ✺ teal
+  palette.info,     // ✣ blue
+  palette.success,  // ✤ green
+] as const
 
 interface Props {
   /** Optional override — when set, replaces the cycling verbs. */
@@ -111,9 +123,7 @@ export function RichSpinner({ text, tokens }: Props): React.ReactElement {
   return (
     <Box>
       <Text>  </Text>
-      {SPINNER_GLYPHS.map((glyph, i) => (
-        <Text key={i} color={i === primaryIdx ? palette.accent : palette.accentDim}>{glyph}</Text>
-      ))}
+      <Text color={SPINNER_COLORS[primaryIdx]}>{SPINNER_GLYPHS[primaryIdx]}</Text>
       <Text color={palette.muted}>  {label}</Text>
       {showOverlay && (
         <>

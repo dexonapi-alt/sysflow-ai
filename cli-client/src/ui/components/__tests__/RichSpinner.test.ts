@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { pickPrimaryGlyph, formatTokens, SPINNER_GLYPHS } from "../RichSpinner.js"
+import { pickPrimaryGlyph, formatTokens, SPINNER_GLYPHS, SPINNER_COLORS } from "../RichSpinner.js"
 
 describe("pickPrimaryGlyph", () => {
   // 60 bpm = 1000ms period, 4 glyphs → 250ms per slot.
@@ -45,6 +45,23 @@ describe("pickPrimaryGlyph", () => {
   it("SPINNER_GLYPHS has exactly 4 distinct characters", () => {
     expect(SPINNER_GLYPHS.length).toBe(4)
     expect(new Set(SPINNER_GLYPHS).size).toBe(4)
+  })
+})
+
+describe("SPINNER_COLORS — single-glyph colour rotation", () => {
+  it("has the same length as SPINNER_GLYPHS so every glyph is paired with a colour", () => {
+    expect(SPINNER_COLORS.length).toBe(SPINNER_GLYPHS.length)
+  })
+
+  it("uses 4 distinct hex strings (the rotation is visible because each frame is a different colour)", () => {
+    expect(new Set(SPINNER_COLORS).size).toBe(SPINNER_COLORS.length)
+  })
+
+  it("every entry is a hex colour string the way Ink expects", () => {
+    for (const c of SPINNER_COLORS) {
+      expect(typeof c).toBe("string")
+      expect(c).toMatch(/^#[0-9A-Fa-f]{6}$/)
+    }
   })
 })
 
