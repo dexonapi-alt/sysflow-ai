@@ -119,3 +119,66 @@ Why:
 - The visible alive-feel is delivered by the always-on zones (Header / LiveStatusBar / ChatInput cursor / tool cards / Typewriter), not by modals that fire a few times per session at most.
 
 When to revisit: if user feedback specifically calls out modal feel as breaking the design, OR if the modal fire rate climbs (e.g. permission system gets noisier). Until then, the cost is too high for the win.
+
+## ●-bullet ActionCards instead of bordered boxes
+
+- **Source:** plan `applied/2026-05-07-phase-14-premium-cli-experience.md` (Stage 2)
+
+Phase 14 replaced Phase 12's `<ToolCard>` (a `╭── ──╮` ASCII-box header + body) with `<ActionCard>` — a single-line `● Verb(target)` header followed by an optional `⎿ Added X lines, removed Y lines` summary, no surrounding chrome. The pipeline-plan box (`renderPipelineBox`) and per-tool diff-preview boxes were dropped from the Ink path at the same time.
+
+**Why bullets won:**
+
+1. **Visual density.** A bordered card consumes 4 lines (top + body + bot + gap) for what is conceptually a one-liner. A multi-tool turn could fill a screen with chrome before any actual content. The Claude reference proves the indented-list format reads as MORE premium when done well — colour, indentation, and subtle separators (`⎿`, `●`, `○`) carry the visual rhythm without ASCII walls.
+2. **The breath metaphor reads better on a bullet.** `<Pulse>` on a `●` is more legible than `<Pulse>` on a corner glyph. The bullet IS the state indicator (running pulse, success muted, error red); the box was decoration.
+3. **Settled cards move to `<Static>`** so they don't re-render per frame. With boxes, the container border was redundantly part of the static render every time anything inside was settled.
+
+The legacy console renderer keeps the boxes (`renderPipelineBox` is gated behind `!isInkActive()`) — this is purely about the Ink path. Box-drawing characters are still legitimate for things that ARE containers (the off-course modal, the permission prompt). They were the wrong shape for a stream of tool calls.
+
+## RichSpinner: single colour-shifting glyph, NOT a 4-glyph swirl
+
+- **Source:** plan `applied/2026-05-07-phase-14-premium-cli-experience.md` (Stage 3) + follow-up PR #44
+- **Final design:** one glyph at a time from `SPINNER_GLYPHS = ["✢", "✺", "✣", "✤"]`, swapped every 250ms (4 frames per breath at 60bpm). Each glyph paired with its own hex via `SPINNER_COLORS = [accent, tool, info, success]` (purple → teal → blue → green) so the swap is unmistakable.
+
+The original Stage 3 plan called for a 4-glyph row rendered side-by-side with one bright + three dimmed (a "swirl"). User feedback after merge: too subtle on most terminals — the eye read it as a static row, not motion. Shipped a follow-up that flipped to single-glyph, where the colour shift carries the rotation.
+
+**What we kept:**
+
+- The glyph SET stayed `✢ ✺ ✣ ✤` — chosen for visual similarity (all 4-pointed star variants) so the swap reads as one motif rotating, not four glyphs flickering.
+- The 250ms cadence (one full revolution per `tempo.activeBpm` breath period) — same rhythm as everything else in the design language.
+- `--no-motion` pins to index 0 (the brand-accent purple `✢`).
+
+**What we rejected at the same time:**
+
+- *4-glyph row with brightness highlight.* Too subtle. Burned the lesson into a comment in `RichSpinner.tsx`'s header docstring so a future contributor doesn't reach for it again.
+- *Spinning braille (`⠋ ⠙ ⠹ …`).* It works for ora but reads as "AI thinking" terminology — exactly the generic feel Phase 14 was fighting.
+
+The colour palette is intentionally cool-only (purple / teal / blue / green) — warm hues (yellow/red) read as warning or alert, not "alive working".
+
+## Workflow-flavoured verb cycle (22 entries) instead of generic "thinking"
+
+- **Source:** PR #45 (post-Stage 3 follow-up)
+- **Decision:** the spinner verb cycle is curated to feel like a human thinking through a problem, not a placeholder. The list mixes interjections (`hmm…`) with action verbs (`debugging…`, `searching…`, `deciding…`, `weighing options…`).
+
+**Why 22 verbs (not 7, not random):**
+
+1. **Cycle length matters.** At `VERB_MS = 3000` and 7 verbs, the loop is 21s — short enough that a 30s wait cycles back to the same word. 22 verbs gives ~66s, well past the duration of most agent pauses.
+2. **Curated alternation > random shuffle.** The order interleaves action verbs and interjections (`thinking → hmm → considering → weighing options …`) so consecutive ticks read as varied rhythm. Randomising would make tests flaky and the cadence harder to reason about for the same perceived variety.
+3. **`thinking` stays first** — it's the friendliest opener and the one users associate with the spinner. Position 0 is also where motion-disabled mode pins.
+
+**The other half of this fix:** in `agent.ts: createSpinner` the initial Ink emit changed from `{type:"spinner", text:"thinking..."}` to `{type:"spinner", text:""}`. With a non-empty initial text, the cycle was effectively dead code — every mount started with `text="thinking..."` overriding it for the entire wait. Empty initial → cycle takes over, server phase events still override when they fire.
+
+A future tool-aware override (e.g. surface `searching…` while `grep` is running) would derive the verb from the running tool's name and pass it as the `text` prop. The `VERBS` array is exported for that path.
+
+## Console-redirect gating via `shouldRenderInlineForLegacy()`
+
+- **Source:** plan `applied/2026-05-07-phase-14-premium-cli-experience.md` (Stage 1)
+
+Phase 12 introduced `redirectConsoleToInk()` so existing `console.log` calls in `agent.ts` would route through the events bus when Ink is mounted. But several agent callsites print THEIR OWN heavy chrome (`renderPipelineBox` for the chunk plan, the `boxTop("SUMMARY") + boxMid + boxBot` block in `renderCompletion`, raw `process.stdout.write("\\x1b[${n}A")` cursor-ups around the in-flight tool list) — those needed to be skipped wholesale in Ink mode, not just redirected.
+
+The canonical predicate is `cli-client/src/agent/events.ts: shouldRenderInlineForLegacy()`, which returns `!isInkActive()`. Phase 14 Stage 1 gated four `agent.ts` callsites behind it; Stage 4 added three more for the legacy `renderReasoningBrief` / `renderDecisionBrief` calls.
+
+**Why a named predicate, not raw `!isInkActive()`:**
+
+1. **Discoverability.** A new contributor adding a console renderer can grep for `shouldRenderInlineForLegacy` and see exactly which callsites are dual-mode. `!isInkActive()` is less greppable and reads as "is X false" instead of "should I render this for the legacy console".
+2. **One place to change the meaning.** If a future flag (`SYS_LEGACY_INLINE=1`) wants to force inline rendering even with Ink active, the predicate is the single point to extend.
+3. **Symmetry with `isInkActive()`.** Two predicates side by side describe the dual-mode contract clearly: one for "should I emit Ink events", one for "should I render for the legacy console".

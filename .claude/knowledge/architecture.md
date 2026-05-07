@@ -229,3 +229,65 @@ The bus is uni-directional (`emitAgent` only). The cli's input loop (`useInput` 
 - Components: `cli-client/src/ui/components/{Header,LiveStatusBar,AgentStream,ToolCard,Spinner,ChatInput}.tsx`
 - Composition root: `cli-client/src/ui/App.tsx`
 - Kill switches: env `SYS_INK=1` to mount Ink; `--no-motion` flag or `SYS_NO_MOTION=1` to freeze animations
+
+## Premium CLI components (Phase 14)
+
+- **Source:** plan `applied/2026-05-07-phase-14-premium-cli-experience.md`
+
+Phase 14 polished the renderers within Phase 12's zone layout — no architectural change, just a tighter rendering vocabulary so the live screen reads as polished as Claude Code's session view. New components live alongside the Phase 12 ones in `cli-client/src/ui/components/` and consume the same event bus + reducer.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  Header  (sticky — Phase 12; second slash-command row REMOVED)       │
+│    sys · folder · model · chat · user · [aware badge] · [chunk]      │
+│                                                                       │
+│  AgentStream  (scrolls)                                              │
+│    log lines (Static)                                                │
+│    settled <ActionCard>s (Static)        ← Phase 14: ●-bullets       │
+│    running <ActionCard>s (live; bullet pulses while running)         │
+│    pending <Typewriter> assistant message                            │
+│    <ReasoningPeek> (Phase 14 — `✦ Reasoning(implement)` + summary)   │
+│    <RichSpinner> (Phase 14 — single glyph + colour rotation)         │
+│                                                                       │
+│  ChatInput                                                           │
+│    > rotating placeholder hint   (Fade-in keyed on hintIndex)        │
+│      cursor ▏                    (Breath at idleBpm)                 │
+│      [inline ↑ history hint REMOVED — moved to InteractiveHints]     │
+│                                                                       │
+│  <InteractiveHints>  (Phase 14 — between ChatInput + LiveStatusBar)  │
+│    ↑ history · / commands · tab complete · ctrl+c exit   (idle)     │
+│    ctrl+c cancel                                          (working)  │
+│                                                                       │
+│  LiveStatusBar  (sticky — Phase 12)                                  │
+│    ◦ working · 0:42                                                  │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Component additions
+
+- **`<ActionCard>`** (`components/ActionCard.tsx`) — replaces the bordered `<ToolCard>`. Renders `● Verb(target)` headers (Bash for `run_command`, Update for `edit_file`, Write for `write_file`, Read for `read_file`, Search for `grep` / `glob`) plus an optional `⎿ Added X lines, removed Y lines` summary. NO surrounding box. Settled cards move to `<Static>` so only the running one re-renders per frame.
+- **`<RichSpinner>`** (`components/RichSpinner.tsx`) — three regions on one row: a single colour-shifting star glyph (`✢` purple → `✺` teal → `✣` blue → `✤` green, swapped every 250ms at 60bpm), the cycling verb, and a `(elapsed · ↑ tokens)` overlay shown after ≥1s. Re-exported as `<Spinner>` for back-compat; the old single-glyph component is preserved as `<MiniSpinner>` for low-density slots.
+- **`<ReasoningPeek>`** (`components/ReasoningPeek.tsx`) — surfaces the latest Flash reasoning brief above the spinner so the user sees what the agent reasoned about while it's still working. Pure `formatBriefSummary(kind, briefData)` extracts 1-3 lines per pipeline (`implement` / `bug` / `decision` / `summary` / `divergence` / `chunk_plan` / `chunk_reflect` / `simple+unknown`); a `Pulse` on the `✦` marker re-fires per emission via the brief's `key`.
+- **`<InteractiveHints>`** (`components/InteractiveHints.tsx`) — always-visible bottom row that swaps `idle` ↔ `working` based on `spinnerText !== null`. Pure `pickHints(state)` + `formatHints(hints)` live in `state/hints.ts` so the table is testable and a future state (Phase 11 `awaiting_modal`, future `ctrl+o expand`) is a one-line addition.
+
+### New event types
+
+The Phase 12 event union grew with two slots and one extension:
+
+| Event                        | Reducer slot          | Purpose                                                                                |
+|------------------------------|-----------------------|-----------------------------------------------------------------------------------------|
+| `tool_start { args? }`       | `toolCards[].args`    | Phase 14: pass tool args along so `<ActionCard>` can derive `Verb(target)` cli-side    |
+| `reasoning_brief { kind, briefData }` | `reasoningBrief { kind, briefData, key }` | Drives `<ReasoningPeek>`. `key` increments per emission so the marker Pulse re-fires |
+
+### Gating helpers (Phase 14 Stage 1)
+
+`cli-client/src/agent/events.ts: shouldRenderInlineForLegacy()` — the canonical predicate `!isInkActive()`. Every `agent.ts` callsite that used to print a heavy box / write raw `\x1b[nA` cursor-up escapes / re-render the SUMMARY twice now goes through this gate so the legacy console path keeps working but Ink mode is the single source of truth in the live region.
+
+### Key files (one source of truth per concern)
+
+- ActionCard: `cli-client/src/ui/components/ActionCard.tsx` (+ pure `verbFor`, `formatActionHeader`, `truncateTarget`)
+- RichSpinner: `cli-client/src/ui/components/RichSpinner.tsx` (+ pure `pickPrimaryGlyph`, `formatTokens`, `VERBS`, `SPINNER_GLYPHS`, `SPINNER_COLORS`)
+- ReasoningPeek: `cli-client/src/ui/components/ReasoningPeek.tsx` (+ pure `formatBriefSummary`)
+- InteractiveHints: `cli-client/src/ui/components/InteractiveHints.tsx` (+ pure `deriveHintState`)
+- Hints table: `cli-client/src/ui/state/hints.ts` (`pickHints`, `formatHints`, `HINT_TABLE`)
+- Legacy gating predicate: `cli-client/src/agent/events.ts: shouldRenderInlineForLegacy()`
