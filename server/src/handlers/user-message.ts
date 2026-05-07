@@ -19,7 +19,7 @@ import { detectScaffoldingNeed, buildScaffoldConfirmationMessage } from "../scaf
 import { estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import { runReasoning } from "../reasoning/task-reasoner.js"
 import { recommendScaffold, resolveCommand, getInstallCommand } from "../scaffold/index.js"
-import { recordImplementSummary, recordOriginalIntent } from "../memory-store/index.js"
+import { recordImplementSummary, recordOriginalIntent, recordDecision, recordBugPattern } from "../memory-store/index.js"
 import { recordChunkStart } from "../services/chunk-state.js"
 import type { ChunkPlanBrief } from "../reasoning/reasoning-schema.js"
 import { getFlag } from "../services/flags.js"
@@ -228,13 +228,46 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
       sysbasePath: body.sysbasePath,
     })
     reasoningBrief = briefResult
-    // Phase 8: persist the implement brief if it's HIGH/MEDIUM confidence and decision === proceed.
-    if (briefResult && briefResult.pipeline === "implement" && briefResult.decision === "proceed" && briefResult.confidence !== "LOW") {
-      recordImplementSummary(
-        body.cwd,
-        { implementBrief: briefResult.implementBrief ?? undefined },
-        { runId, trigger: "preflight" },
-      ).catch(() => { /* best-effort */ })
+    // Phase 8 + 15 Stage 1: persist preflight brief by pipeline kind.
+    // Each branch self-gates on confidence + decision so a LOW-confidence
+    // run doesn't ossify a guess. The recorder also has its own internal
+    // LOW guard for `recordDecision`, so this is belt-and-suspenders.
+    if (briefResult && briefResult.decision === "proceed" && briefResult.confidence !== "LOW") {
+      if (briefResult.pipeline === "implement" && briefResult.implementBrief) {
+        recordImplementSummary(
+          body.cwd,
+          { implementBrief: briefResult.implementBrief },
+          { runId, trigger: "preflight" },
+        ).catch(() => { /* best-effort */ })
+      } else if (briefResult.pipeline === "bug" && briefResult.bugBrief) {
+        // Bug brief at preflight is rare (most bug reasoning fires on_error)
+        // but happens when the user's prompt itself describes a bug. Record
+        // the diagnosis so the next time the same symptom is reported it
+        // surfaces from memory.
+        const bb = briefResult.bugBrief
+        const summary = [
+          `Symptom: ${bb.symptom}`,
+          `Boundary: ${bb.suspectedBoundary}`,
+          bb.rootCauseGuess ? `Root cause: ${bb.rootCauseGuess}` : null,
+          bb.proposedFix?.description ? `Fix: ${bb.proposedFix.description} (scope: ${bb.proposedFix.scope ?? "?"})` : null,
+        ].filter(Boolean).join("\n")
+        recordBugPattern(
+          body.cwd,
+          summary,
+          bb.proposedFix?.filesAffected,
+          { runId, trigger: "preflight" },
+        ).catch(() => { /* best-effort */ })
+      } else if (briefResult.pipeline === "decision" && briefResult.decisionBrief) {
+        // Preflight rarely classifies as `decision` (the routing prefers
+        // implement/bug/summary), but when it does — typically when the
+        // user prompt is a stack/architecture question — record it so the
+        // next similar question doesn't re-deliberate from scratch.
+        recordDecision(
+          body.cwd,
+          { decisionBrief: briefResult.decisionBrief, confidence: briefResult.confidence },
+          { runId, trigger: "preflight" },
+        ).catch(() => { /* best-effort */ })
+      }
     }
     // If the reasoner says ask_user, short-circuit immediately with the consolidated questions.
     if (briefResult && briefResult.pipeline !== "simple" && briefResult.decision === "ask_user" && briefResult.missingContext.length > 0) {
