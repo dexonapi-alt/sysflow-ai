@@ -1,6 +1,7 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { spawn } from "node:child_process"
+import { emitAgent, isInkActive } from "./events.js"
 
 // ─── Web Search ───
 
@@ -773,11 +774,24 @@ export async function runCommandTool(
         /localhost:\d{4}/,
       ]
 
-      // Forward child output to terminal AND capture for monitoring
+      // Forward child output to terminal AND capture for monitoring.
+      // Phase 16-fixup (Bug 4): when Ink is active, route the stream through
+      // the events bus so the AgentStream renders it in the live region
+      // instead of writing raw to stdout — raw writes collide with Ink's
+      // reserved region and cause the scroll glitch the user reported.
       child.stdout?.on("data", (d: Buffer) => {
         const text = d.toString()
         stdout += text
-        process.stdout.write(d)
+        if (isInkActive()) {
+          // Strip the trailing newline children love to add so we don't
+          // produce empty log entries; split on newlines so each line is a
+          // separate log event the reducer can render cleanly.
+          for (const line of text.replace(/\r\n?/g, "\n").split("\n")) {
+            if (line.length > 0) emitAgent({ type: "log", level: "muted", text: line })
+          }
+        } else {
+          process.stdout.write(d)
+        }
 
         if (DEV_SERVER_PATTERNS.some(p => p.test(text))) {
           // Dev server detected — give it a moment to finish output, then kill
@@ -790,7 +804,14 @@ export async function runCommandTool(
         }
       })
       child.stderr?.on("data", (d: Buffer) => {
-        process.stderr.write(d)
+        const text = d.toString()
+        if (isInkActive()) {
+          for (const line of text.replace(/\r\n?/g, "\n").split("\n")) {
+            if (line.length > 0) emitAgent({ type: "log", level: "warning", text: line })
+          }
+        } else {
+          process.stderr.write(d)
+        }
       })
 
       const timeoutChecker = setInterval(() => {

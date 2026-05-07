@@ -141,6 +141,25 @@ function describeAwarenessTransition(
 }
 
 /**
+ * Phase 16-fixup (Bug 2): filter generic SSE phase labels.
+ *
+ * The server emits `phase` events with labels like `"calling AI model..."`,
+ * `"loading project context..."`, `"processing tool result..."`. These add
+ * no information the user can't already see from the spinner being on, and
+ * they SUPPRESS the RichSpinner's own verb cycle (`thinking… hmm…
+ * debugging… searching…`) which is what makes the spinner feel alive.
+ *
+ * The fix: when the phase label is one of these generic ones, return ""
+ * so the spinner falls back to its built-in cycle. Specific labels that
+ * carry actual progress information (tool prep, file paths) pass through.
+ */
+const GENERIC_PHASE_LABEL_RE = /^(?:calling AI model|loading project context|processing tool result|response ready)\.{0,3}$/i
+
+function suppressGenericPhaseLabel(label: string): string {
+  return GENERIC_PHASE_LABEL_RE.test(label.trim()) ? "" : label
+}
+
+/**
  * Spinner shim: lets the existing `spinner.text = …` / `spinner.start()` /
  * `spinner.stop()` callsites work whether we're driving an `ora` instance
  * (legacy console mode) or emitting events to the Ink `<AgentStream>`.
@@ -303,7 +322,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   while (true) {
     try {
       response = await makeServerCall(serverPayload, (label) => {
-        spinner.text = colors.muted(label)
+        spinner.text = colors.muted(suppressGenericPhaseLabel(label))
       })
       break
     } catch (err) {
@@ -348,6 +367,13 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       emitAgent({ type: "reasoning_brief", kind, briefData: brief })
     }
     spinner.start(colors.muted("thinking..."))
+  }
+  // Phase 16 Stage 3 / Phase 16-fixup (Bug 3): when the chained elaboration
+  // brief comes back on the response, surface it via ReasoningPeek too so
+  // the user can see WHY the agent picked the chosen approach.
+  const reasoningElaborationBrief = (response as Record<string, unknown>).reasoningElaborationBrief
+  if (reasoningElaborationBrief && isInkActive()) {
+    emitAgent({ type: "reasoning_brief", kind: "implement_elaborate", briefData: reasoningElaborationBrief as Record<string, unknown> })
   }
 
   let stepCount = 0
@@ -447,7 +473,11 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   const cleanupDiffListener = startDiffKeyListener(spinner)
 
   // Phase 7: pinned bottom-row indicator for background jobs (e.g. npm install).
-  if (currentRunId) startJobStatusBar(currentRunId)
+  // Phase 16-fixup: the job-status bar uses raw cursor-save/restore + bottom-row
+  // writes which collide with Ink's reserved region — that's part of Bug 4 (the
+  // scroll bug). LiveStatusBar already shows working/elapsed in Ink mode, so
+  // gate this behind legacy mode.
+  if (currentRunId && shouldRenderInlineForLegacy()) startJobStatusBar(currentRunId)
 
   const recordTelemetry = async (terminalReason: string): Promise<void> => {
     // Phase 7: wait up to 30s for outstanding background jobs, then SIGTERM the rest.
@@ -465,7 +495,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
           console.log(colors.warning(`  ⚠ ${cleanupResult.aborted} background job(s) aborted on exit (exceeded 30s wait window)`))
         }
       } catch { /* best-effort */ }
-      stopJobStatusBar()
+      if (shouldRenderInlineForLegacy()) stopJobStatusBar()
       // Phase 11 Stage 2: drop chunk snapshot tags so they don't pile up
       // across runs in the user's repo. Stash refs are already popped in
       // createChunkSnapshot; only tag-strategy snapshots leave a trace.
@@ -561,7 +591,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
               originalTask: prompt,
               hint: "Respond with needs_tool to continue. Do NOT respond with completed again until ALL files are created."
             }
-          }, (label) => { spinner.text = colors.muted(label) })
+          }, (label) => { spinner.text = colors.muted(suppressGenericPhaseLabel(label)) })
         } catch {
           response = await callServer({
             type: "tool_result",
@@ -693,7 +723,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
               lastGoodChunkIndex: evidence.lastGoodChunkIndex,
               success: true,
             },
-          }, (label) => { spinner.text = colors.muted(label) })
+          }, (label) => { spinner.text = colors.muted(suppressGenericPhaseLabel(label)) })
           break
         }
 
@@ -721,7 +751,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
             runId: response.runId,
             tool: "_user_response",
             result: { answer: userAnswer, success: true }
-          }, (label) => { spinner.text = colors.muted(label) })
+          }, (label) => { spinner.text = colors.muted(suppressGenericPhaseLabel(label)) })
         } catch (userErr) {
           if ((userErr as ServerError).code === "USAGE_LIMIT") {
             budget.usage_limit.used++
@@ -810,7 +840,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
             runId: response.runId,
             tool: "_recovery",
             result: { error: errorMsg, success: false, hint: recoveryHint }
-          }, (label) => { spinner.text = colors.muted(label) })
+          }, (label) => { spinner.text = colors.muted(suppressGenericPhaseLabel(label)) })
         } catch (retryErr) {
           if ((retryErr as ServerError).code === "USAGE_LIMIT") {
             response = { ...response, status: "failed", error: errorMsg, errorCode: "usage_limit" }
@@ -929,12 +959,18 @@ async function renderCompletion(
     }
   }
 
-  const doneText = `  ${colors.success(BOX.check)} done`
-  const stepText = colors.muted(` ${BOX.dash} ${stepCount} steps`)
-  process.stdout.write(doneText)
-  await sleep(60)
-  console.log(stepText)
-  console.log("")
+  // Phase 16-fixup: the done-line emit is a legacy console renderer flourish.
+  // In Ink mode, the assistant_message Typewriter (above) IS the completion
+  // signal — re-emitting "✓ done" via raw stdout.write breaks Ink's reserved
+  // region and causes the scroll glitch the user reports as Bug 4.
+  if (shouldRenderInlineForLegacy()) {
+    const doneText = `  ${colors.success(BOX.check)} done`
+    const stepText = colors.muted(` ${BOX.dash} ${stepCount} steps`)
+    process.stdout.write(doneText)
+    await sleep(60)
+    console.log(stepText)
+    console.log("")
+  }
 }
 
 // ─── Handle a needs_tool transition (single or batch) ───
@@ -1246,7 +1282,7 @@ async function handleNeedsTool(
     // Phase 14 Stage 2: pass args so ActionCard can derive Verb(target).
     response = await surfaceToolCall(toolEventId, currentTool, cardLabel, args ?? {}, () =>
       executeTool(response as never, (label) => {
-        spinner.text = colors.muted(label)
+        spinner.text = colors.muted(suppressGenericPhaseLabel(label))
       }),
     )
 
@@ -1330,6 +1366,16 @@ async function handleNeedsTool(
             fileCount: Array.isArray(plan.files) ? plan.files.length : 0,
           })
         }
+      }
+      // Phase 16-fixup (Bug 3): surface chunk_plan + chunk_reflect briefs
+      // through ReasoningPeek so the user actually sees what the chained
+      // Flash decided each step. Header's chunk_plan event drives the
+      // pulse; this drives the peek's content.
+      if (isInkActive() && chunkPlanBrief) {
+        emitAgent({ type: "reasoning_brief", kind: "chunk_plan", briefData: { chunkPlanBrief } as Record<string, unknown> })
+      }
+      if (isInkActive() && chunkReflectionBrief) {
+        emitAgent({ type: "reasoning_brief", kind: "chunk_reflect", briefData: { chunkReflectionBrief } as Record<string, unknown> })
       }
     }
     // Phase 12 Stage 5: emit awareness_update on every turn that carries

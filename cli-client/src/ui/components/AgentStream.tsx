@@ -62,7 +62,7 @@ export function AgentStream(): React.ReactElement {
       {assistantMessage && (
         <Box marginTop={1}>
           <Text color={palette.muted}>  </Text>
-          <Typewriter key={assistantMessage.key} wpm={250} color={palette.bright}>
+          <Typewriter key={assistantMessage.key} wpm={1500} color={palette.bright}>
             {assistantMessage.text}
           </Typewriter>
         </Box>
