@@ -40,6 +40,20 @@ export function getLearnedMemorySection(ctx: LearnedMemoryCtx): string | null {
       : raw
     out.push(`- ${trimmed}`)
   }
+  out.push("")
+  // Phase 15 Stage 4: active-confirmation contract.
+  // The handler runs every response through applyMemoryFeedback with
+  // cross-validation guards: a `confirmed` claim is rejected unless ≥30%
+  // of the entry's tokens appear in the response; a `contradicted` claim
+  // is rejected unless the response references the entry's [id] in
+  // brackets. Hallucinated feedback is silently dropped.
+  out.push("Memory feedback contract — when you respond, include a top-level `memoryFeedback` field:")
+  out.push("  \"memoryFeedback\": {")
+  out.push("    \"confirmed\":   [\"<id>\", \"<id>\"],   // entry ids you used or built on this turn")
+  out.push("    \"contradicted\": [\"<id>\"]            // entry ids the conversation disagreed with")
+  out.push("  }")
+  out.push("To contradict an entry you MUST reference its [id] in the response text — show the user what you disagreed with.")
+  out.push("Omit the field (or use empty arrays) when no entries were used or contradicted this turn.")
   return out.join("\n")
 }
 

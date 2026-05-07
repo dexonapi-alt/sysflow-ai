@@ -88,6 +88,11 @@ export interface NormalizedResponse {
   pendingAction?: unknown
   /** AI-generated task plan from first response */
   taskPlan?: { title: string; steps: string[] } | null
+  /** Phase 15 Stage 4: model-driven memory feedback. Lists entry ids the
+   *  model confirms it used and ids it contradicts. The handler processes
+   *  this via `applyMemoryFeedback`, which cross-validates each id
+   *  against the response text before mutating the store. */
+  memoryFeedback?: { confirmed?: string[]; contradicted?: string[] } | null
 }
 
 // ─── Task ───

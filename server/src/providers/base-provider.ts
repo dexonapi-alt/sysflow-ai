@@ -7,6 +7,33 @@ import { getPipeline } from "../services/task-pipeline.js"
 import { buildSystemPrompt, type PromptCtx } from "./prompt/build.js"
 export { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from "./prompt/build.js"
 
+/**
+ * Phase 15 Stage 4: pure helper that extracts a clean `memoryFeedback`
+ * shape from a model JSON response. Defensive against any malformed
+ * payload (missing object, non-arrays, non-string entries, empty
+ * strings). Returns null when the field is absent or normalises to
+ * empty — so the caller can `if (mf) normalized.memoryFeedback = mf`
+ * without re-validating.
+ *
+ * Exported for unit tests.
+ */
+export function extractMemoryFeedback(
+  json: Record<string, unknown> | null | undefined,
+): { confirmed: string[]; contradicted: string[] } | null {
+  if (!json || typeof json !== "object") return null
+  const raw = (json as Record<string, unknown>).memoryFeedback
+  if (!raw || typeof raw !== "object") return null
+  const mf = raw as Record<string, unknown>
+  const confirmed = Array.isArray(mf.confirmed)
+    ? (mf.confirmed as unknown[]).filter((s): s is string => typeof s === "string" && s.length > 0)
+    : []
+  const contradicted = Array.isArray(mf.contradicted)
+    ? (mf.contradicted as unknown[]).filter((s): s is string => typeof s === "string" && s.length > 0)
+    : []
+  if (confirmed.length === 0 && contradicted.length === 0) return null
+  return { confirmed, contradicted }
+}
+
 // ─── Tool Name Sanitizer: map hallucinated tool names to real ones ───
 
 const VALID_TOOLS = new Set([
@@ -879,6 +906,14 @@ export abstract class BaseProvider {
         console.log(`[ai-plan] AI generated task plan: "${title}" (${steps.length} steps)`)
       }
     }
+
+    // Phase 15 Stage 4: extract `memoryFeedback` from the response. The
+    // handler will run this through `applyMemoryFeedback` (with the
+    // per-id cross-validation guards) before the response returns to
+    // the cli. The pure extractor below normalises malformed payloads
+    // (numbers, nulls, non-arrays) into a clean shape or null.
+    const mf = extractMemoryFeedback(json)
+    if (mf) normalized.memoryFeedback = mf
 
     if (json.kind === "failed") {
       normalized.error = (json.content as string) || "Model reported failure"
