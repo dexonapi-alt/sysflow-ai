@@ -1,7 +1,7 @@
 # Phase 16 — Deep reasoning on free models: chained Flash + complexity-aware orchestration
 
 - **Created:** 2026-05-07
-- **Status:** draft
+- **Status:** implemented (2026-05-07)
 - **Scope:** The system already runs 7 reasoning triggers per run (preflight / chunk_plan / chunk_reflect / divergence / on_error / on_completion / self_invoked). All 7 are **one-shot Flash calls** — none chains its output into a follow-up reasoning step. The system also has *zero* free-tier-model adaptation outside Phase 11's confidence threshold bump. Phase 16 adds chained reasoning + free-tier-aware orchestration so the cheap models we depend on think as deeply as a paid model would.
 
 ## Goal
@@ -143,3 +143,40 @@ End-to-end:
 - Cross-run reasoning caches that persist between sessions.
 - Tuning the elaboration prompt for specific free models. Generic `openrouter-auto` is the target; per-model tuning is a future phase if metrics show it pays off.
 - Replacing the existing single-shot triggers. They stay; chain only layers on top when configured to.
+
+## Completion notes
+
+Shipped across 6 PRs (#54-59). Headline win lands in Stages 3-4: free-tier runs now get a forced second-look on confidence-MEDIUM-or-LOW preflights and on borderline divergence verdicts, plumbing both deeper analyses into the prompt the main model sees.
+
+### Stages as designed → as shipped
+
+- **Stage 1** (#54) — `free-tier-policy.ts` central + complexity pre-flight. `isFreeTierModel` + `FREE_MODEL_SENSITIVITY_BUMP` moved out of `confidence-tracker.ts`; Phase 16 stages 3-5 constants declared up front so each stage adds one call site, not its own knob. `analyzeTaskComplexity` now fires pre-flight in `user-message.ts` (was post-hoc only); existing post-hoc completion-validation site reuses the pre-computed value.
+- **Stage 2** (#55) — `runReasoningChain` helper + `implementElaborationBriefSchema`. Pure orchestrator with dependency-injected runner so tests stub without monkey-patching. Schema additions (`"implement_elaborate"` pipeline + brief shape) wired through the envelope.
+- **Stage 3** (#56) — Chained preflight on free-tier. The headline win. Gate `shouldRunPreflightElaboration` fires only on free-tier × (medium|complex) × (MEDIUM|LOW) × flag-on. Output renders as a "DEEPER REASONING" sub-block under the implement brief in the main model's prompt.
+- **Stage 4** (#57) — Chained divergence second-look. Gate `shouldRunDivergenceSecondLook` fires only when first verdict score lands in [40, 60] on free-tier. Second verdict carries the first as `priorVerdict` in context; replaces the first when it returns.
+- **Stage 5** (#58) — Tighten chunk caps for free-tier. Three new pure helpers (`resolveMaxFilesPerChunk`, `resolveMaxChunksPerRun`, combined `resolveChunkCaps`). Wired at the cap-check + both `chunk_plan` slice sites. Schema cap stays 5 (paid is a no-op slice); free-tier runtime ceiling is 4 files / 8 chunks.
+- **Stage 6** — this PR: KB docs (architecture.md adds the Phase 16 section with a 3-zone diagram + key-files index; decisions.md gains 3 entries on chain-within-a-concern, centralised free-tier policy, asymmetric chunk caps) + plan archived to `.claude/plans/applied/`.
+
+### Telemetry from the run
+
+- Server tests: 332 → 395 (+63 across the 6 PRs).
+- CLI side untouched — Phase 16 is server-only.
+- Verified end-to-end manually: a free-tier run with confidence-MEDIUM preflight on a complex prompt fires the chained elaboration; a borderline divergence verdict (score=50) fires the second-look; chunk_plan briefs return ≤4 files when model matches `isFreeTierModel`.
+- The plan's free-tier overhead target (≤ 1.7× current `flashCallsCount`) is observable via `usage-log.ts`. Real-world ratio depends on how often free-tier preflights land below HIGH; will measure once production telemetry from Stages 3-4 accumulates.
+
+### Deferred (cleanly, with hooks in place)
+
+- **Per-model elaboration prompt tuning.** Generic `openrouter-auto` is the target today. If telemetry shows specific routes (LLaMA, Mistral) need different elaboration prompting, add a model-specific dispatch in `pipelines/index.ts: getPipelineSystemPrompt`.
+- **Free-tier-aware completion-guard tuning.** `analyzeTaskComplexity` is now pre-flight (Stage 1); a future phase could tune the complexity → cap mapping per free-tier.
+- **Chained on_error reasoning.** Today on_error is a single Flash call producing a bug brief. A second-look on the bug pipeline (especially when the first hypothesis disagrees with the chunk_reflect issues) could improve recovery on free-tier. Reuse `runReasoningChain`.
+- **Cross-stage cost dashboards in the cli.** `flashCallsCount` is logged per run but not surfaced in the cli. Phase 14's `<RichSpinner>` overlay already shows tokens; adding flash-call count is a one-line addition once telemetry is being read at render time.
+
+### Phase 16 + memory composition
+
+Phase 15 wired memory's active-confirmation loop. Phase 16's chained reasoning consumes memory naturally:
+
+- The Stage 3 elaboration call doesn't currently read memory directly, but its output (re-scored confidence + preconditions) influences which entries the model uses, which Phase 15's `applyMemoryFeedback` then confirms / contradicts on the response side.
+- The Stage 4 divergence second-look uses `pickDivergenceAnchor` (Phase 15 Stage 5), so the second look anchors on the canonical recorded prompt the same way the first does.
+- The Stage 5 chunk caps don't touch memory.
+
+A future stage could explicitly thread `recallForReasoning({kind: "implement"})` into the elaboration's context so the second look benefits from prior implement-summary entries — currently the elaboration sees only the preflight brief + user prompt. Out of scope for Phase 16 since the wins were already substantial without it.

@@ -225,3 +225,57 @@ Why "longest" rather than "most-recent" or "most-confirmed":
 - Longest is a cheap proxy for "most descriptive" — a 200-char architectural prompt beats a 40-char one-liner for divergence anchoring purposes.
 
 When this needs to evolve: if the recall score (recency × useCount × overlap) becomes load-bearing for memory in general, route through `recallForReasoning` directly and trust its scoring. For now the simpler "longest after threshold" rule is well-tested and predictable.
+
+## Chain WITHIN a concern, peer ACROSS concerns
+
+- **Source:** plan `applied/2026-05-07-phase-16-deep-reasoning-on-free-models.md`
+
+Phase 16 introduces chained Flash calls for the first time (`runReasoningChain`). The composition rule: chain the second stage with the first only when they're answering the SAME question more deeply. Different concerns stay peers via `confidence-tracker.recordSignals()` (Phase 11's design — see *Awareness signal sources are peers, not chained*).
+
+Concrete examples from the live code:
+
+- **Implement preflight → implement_elaborate** (Phase 16 Stage 3): same concern (what's the right approach?). Chain.
+- **First divergence verdict → second-look divergence** (Phase 16 Stage 4): same concern (is the run on-track?). Chain.
+- **Heuristic detector + verification gate + LLM divergence** (Phase 11): three concerns (intra-run loops / disk-side correctness / cross-chunk macro drift). Peers.
+- **chunk_plan → chunk_reflect** (Phase 10): two concerns (what next? / did the last chunk land?). Peers — see existing decision *Planner ↔ reflector are additive, not merged*.
+
+The rule keeps the chain helper from over-engineering. Two-Flash chains within a concern are a 1.5× cost for a substantively deeper answer; chaining across concerns would dilute both stages' prompts and double the cost without the second view actually scrutinising the first.
+
+A future fourth chain (Phase 18's `task_confirmation` for example) reuses `runReasoningChain` without re-implementing the orchestration.
+
+## Free-tier policy is a centralised module, not scattered checks
+
+- **Source:** plan `applied/2026-05-07-phase-16-deep-reasoning-on-free-models.md` (Stage 1)
+
+Phase 11 introduced `isFreeTierModel` + `FREE_MODEL_SENSITIVITY_BUMP` inside `confidence-tracker.ts`. By Stage 5 of Phase 16, four separate code paths needed free-tier-aware behaviour: confidence thresholds (Phase 11), preflight elaboration gate (Stage 3), divergence second-look gate (Stage 4), chunk caps (Stage 5). Two structural options were considered:
+
+1. **Each call site does its own `isFreeTierModel` check.** Easy to write each one; over time produces 4+ scattered policy decisions that drift apart when one stage's tuning changes. The "treat free-tier differently" intent is implicit and fragmented.
+2. **One module owns the policy.** `server/src/services/free-tier-policy.ts` declares every constant + every gate helper. Each call site imports the helper it needs. New free-tier behaviour adds a helper here, not a check there.
+
+We chose (2). `confidence-tracker.ts` re-exports `isFreeTierModel` and `FREE_MODEL_SENSITIVITY_BUMP` for back-compat so Phase 11 importers keep working. New consumers import from the policy module directly.
+
+The discipline: when a future stage wants to adapt for free-tier, it adds either a constant or a pure helper to `free-tier-policy.ts` and the call site reads from there. No raw `isFreeTierModel(...)` checks in handlers — they should always be inside a policy helper.
+
+## Asymmetric chunk caps for free-tier (runtime tighten, not schema relax)
+
+- **Source:** plan `applied/2026-05-07-phase-16-deep-reasoning-on-free-models.md` (Stage 5)
+
+Free-tier runs use tighter chunk caps: `max_chunks_per_run` × 0.7 (12 → 8 chunks) and `chunkPlanBriefSchema.files.max(5)` runtime-sliced to 4. The asymmetry is the design point — we don't relax the schema cap for paid models, we only tighten the runtime slice for free-tier.
+
+**Why tighten only at runtime, not at the schema:**
+
+- The schema cap is a HARD invariant for the chunk-plan pipeline's prompt — "files MUST be 1-5 entries" is part of how the planner is instructed. Lowering it to 4 globally would constrain paid models for no benefit.
+- The runtime slice is opportunistic — if the planner returns 5 files, free-tier slices to 4. If it returns 3, no slice happens. The slice is a ceiling, not a floor.
+- Schema validation runs on the model output regardless of model tier; loosening it after the fact (allowing 6 for paid, 4 for free) would create two parsing modes. Single hard cap, asymmetric runtime ceiling.
+
+**Why 4 not 3:**
+
+- A paid-model chunk averages 3-4 files in practice (rationale-driven, not maxed). 4 is the plan's natural ceiling, just enforced.
+- Dropping to 3 would force the planner to emit more chunks for the same work, increasing total Flash + main-model cost.
+
+**Why 0.7 for chunk count:**
+
+- 12 × 0.7 = 8.4 → floor 8. 0.6 (12 → 7) felt too aggressive; 0.8 (12 → 9) didn't differ enough from the default to matter.
+- The cap is a runaway-loop guard, not a quality dial. 8 chunks of 4 files each = 32 files in flight, which matches what a free-tier run typically completes within the affordability ceiling (~15k tokens — see existing *Free-tier OpenRouter affordability ceiling is ~15k tokens* in `gotchas.md`).
+
+When this needs to evolve: if telemetry shows free-tier runs frequently hitting the 8-chunk cap with incomplete output, the right move is splitting via more aggressive chunk_plan boundaries, not raising the cap.

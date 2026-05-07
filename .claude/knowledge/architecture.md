@@ -263,6 +263,115 @@ Both guards are pure functions, exported, and tested in isolation. The handler-s
 - Kill switch: flag `memory.active_confirmation_enabled` (default `true`)
 - Schema: `NormalizedResponse.memoryFeedback?: { confirmed?: string[]; contradicted?: string[] } | null` in `server/src/types.ts`
 
+## Free-tier policy + chained reasoning (Phase 16)
+
+- **Source:** plan `applied/2026-05-07-phase-16-deep-reasoning-on-free-models.md`
+
+Phase 5 added 7 reasoning triggers, all single-shot Flash. Phase 11 introduced `isFreeTierModel` + `FREE_MODEL_SENSITIVITY_BUMP` for confidence thresholds. Phase 16 promotes free-tier adaptation into a **central policy module** + adds **chained Flash within a concern** so cheap models compensate for the depth gap they have vs paid models. Three new chains land alongside one new policy file.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  free-tier-policy.ts  ── single source of truth for free-tier knobs  │
+│                                                                       │
+│  Constants:                                                           │
+│    FREE_MODEL_SENSITIVITY_BUMP = 10  (Phase 11; +bump on thresholds) │
+│    FREE_TIER_DIVERGENCE_CHAIN_LOWER/UPPER = 40 / 60                  │
+│    FREE_TIER_CHUNK_CAP_TIGHTEN = 0.7   (12 chunks → 8)               │
+│    FREE_TIER_CHUNK_FILES_TIGHTEN = 4    (5 files → 4)                │
+│                                                                       │
+│  Pure helpers:                                                        │
+│    isFreeTierModel(model)                                             │
+│    shouldRunPreflightElaboration({model, complexity, conf, flag})     │
+│    shouldRunDivergenceSecondLook({model, score, flag})                │
+│    resolveMaxChunksPerRun(model, baseMax)                             │
+│    resolveMaxFilesPerChunk(model)                                     │
+│    resolveChunkCaps(model, baseMax)                                   │
+└──────────────────────────────────────────────────────────────────────┘
+            │                                       │
+            │ used by                               │ used by
+            ▼                                       ▼
+┌──────────────────────────────────┐    ┌──────────────────────────────┐
+│  Chained preflight (Stage 3)     │    │  Chained divergence (Stage 4)│
+│                                  │    │                              │
+│  user-message.ts                 │    │  tool-result.ts (awareness)  │
+│  preflight Flash → implement     │    │  detectDivergence + Flash    │
+│       │                          │    │       │                      │
+│       │ gate: free + complex≥med │    │       │ gate: free + score   │
+│       │       + conf<HIGH        │    │       │       in [40, 60]    │
+│       ▼                          │    │       ▼                      │
+│  implement_elaborate Flash       │    │  divergence_check Flash      │
+│    whyThisApproach +             │    │    (with priorVerdict in     │
+│    whyNotAlternative +           │    │     context)                 │
+│    preconditions +               │    │       │                      │
+│    re-scored confidence          │    │       │ second verdict       │
+│       │                          │    │       │ replaces first       │
+│       ▼                          │    │       ▼                      │
+│  Plumbed into prompt:            │    │  Confidence tracker sees     │
+│    "DEEPER REASONING"            │    │  the deeper verdict's        │
+│    sub-block under the           │    │  mismatches/score/suggestion │
+│    implement brief               │    │                              │
+└──────────────────────────────────┘    └──────────────────────────────┘
+            │                                       │
+            ▼                                       ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  Tightened chunk caps (Stage 5) — applied at every chunk_plan slice  │
+│                                                                       │
+│  user-message.ts initial chunk:                                       │
+│    files = files.slice(0, resolveMaxFilesPerChunk(model))             │
+│  tool-result.ts subsequent chunks:                                    │
+│    files = files.slice(0, resolveMaxFilesPerChunk(model))             │
+│  tool-result.ts cap check:                                            │
+│    if activeChunks >= resolveMaxChunksPerRun(model, baseMax) → stop   │
+│                                                                       │
+│  Net effect on a free-tier run:  12 chunks → 8 ; 5 files → 4         │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Chain helper (Phase 16 Stage 2)
+
+`server/src/reasoning/chain.ts: runReasoningChain(original, stages, runner?)` — pure orchestrator. Each stage's `buildPayload(prior, original)` receives the prior non-null brief + the original payload; returning null skips that stage cleanly. Defensive against throws — `buildPayload` and `runReasoning` failures are logged and recorded as null briefs in the audit; the chain continues with the prior brief intact. Per-call telemetry stays per-call (chain doesn't add a counter; each successful runReasoning hits usage-log on its own).
+
+### Schema additions
+
+- `triggerSchema` adds `"implement_elaborate"` (Stage 3 trigger).
+- `pipeline` enum adds `"implement_elaborate"` with matching `implementElaborationBriefSchema`.
+- `assertEnvelopeShape` covers the new pipeline.
+- `NormalizedResponse.memoryFeedback` (Phase 15) and `NormalizedResponse.reasoningElaborationBrief` (Phase 16 Stage 3) are both untyped on the payload to avoid import cycles; providers cast at the seam.
+
+### Failure modes the loop handles
+
+- **No `GEMINI_API_KEY`** → both chains short-circuit at the runReasoning trigger gate; first-pass calls fall back to legacy single-stage behaviour.
+- **Free-tier rate limit (429)** → existing retry budget in `task-reasoner.ts` absorbs occasional hits; the chain's second stage inherits it. Sustained 429s prompt the user to flip `reasoning.chained.preflight_elaboration_enabled` off via the flag system.
+- **Borderline divergence band edge** → 39 = decisive off-course (no second look needed); 61 = decisive on-track (no second look needed); only the [40, 60] band routes through the chain.
+- **Tiny `max_chunks_per_run` base** (e.g. operator sets it to 1) → `resolveMaxChunksPerRun` floors to 1 so free-tier runs still work, just not multi-chunk.
+- **Schema cap stays 5** → if a free-tier `chunk_plan` brief ever returns 5 files, the slice in the handler trims to 4. The schema is permissive; the policy is strict.
+
+### Free-tier overhead budget
+
+Phase 16 plan target: free-tier `flashCallsCount` ≤ 1.7× current. Gate-driven additions:
+
+| Stage | When it fires (free-tier only) | Extra Flash calls |
+|---|---|---|
+| 3: chained preflight | preflight confidence < HIGH AND complexity ≥ medium | +1 per turn |
+| 4: divergence second-look | first verdict score in [40, 60] | +1 per chunk where first fires |
+| 5: chunk caps | (no extra Flash — just slices outputs) | 0 |
+
+HIGH-confidence preflights and simple tasks add zero overhead. Decisive divergence verdicts (≤39, ≥61) add zero. Real ratio depends on how often free-tier preflights land below HIGH; measure via `flashCallsCount` once telemetry from Stages 3-4 is in.
+
+### Key files (one source of truth per concern)
+
+- Policy module: `server/src/services/free-tier-policy.ts` (constants + 5 pure helpers)
+- Chain helper: `server/src/reasoning/chain.ts: runReasoningChain`
+- Elaborate pipeline: `server/src/reasoning/pipelines/implement-elaborate-pipeline.ts`
+- Pipeline routing: `server/src/reasoning/task-reasoner.ts: pickPipeline` + `server/src/reasoning/pipelines/index.ts`
+- Schema: `server/src/reasoning/reasoning-schema.ts` (`implementElaborationBriefSchema` + `"implement_elaborate"` trigger/pipeline)
+- Stage 3 wiring: `server/src/handlers/user-message.ts` (after preflight, before chunk_plan)
+- Stage 4 wiring: `server/src/handlers/tool-result.ts` (awareness block, after first divergence verdict)
+- Stage 5 wiring: same handlers (initial + subsequent `chunk_plan` slice + cap check)
+- Prompt plumbing: `server/src/types.ts` (`reasoningElaborationBrief` field) + `server/src/providers/gemini.ts` + `server/src/providers/prompt/sections/reasoning-brief.ts` (`DEEPER REASONING` sub-block)
+- Kill switches: `reasoning.chained.preflight_elaboration_enabled` (default true) + `reasoning.chained.divergence_second_look_enabled` (default true)
+- Back-compat: `server/src/services/confidence-tracker.ts` re-exports `isFreeTierModel` + `FREE_MODEL_SENSITIVITY_BUMP` so Phase 11 importers don't move
+
 ## Living CLI (Phase 12)
 
 - **Source:** plan `applied/2026-05-07-phase-12-living-cli-ui.md`
