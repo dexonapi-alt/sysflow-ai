@@ -1,7 +1,7 @@
 # Phase 15 — Memory handling: never-stale knowledge + cover-what-it-did
 
 - **Created:** 2026-05-07
-- **Status:** draft
+- **Status:** implemented (2026-05-07)
 - **Scope:** The Phase 8 memory subsystem (storage / validators / recall / compaction) is built and tested, but the *active* anti-staleness loop and several record-what-actually-happened call sites were never wired. Phase 15 closes those gaps so memory entries stay fresh on their own and so every Phase 7 / 10 / 11 outcome ends up in `.sysflow-memory.md`.
 
 ## Goal
@@ -127,3 +127,32 @@ End-to-end:
 - Cross-session preference learning (that's Phase 17).
 - Memory-aware completion summary in the cli — the current cli renders memory bullets via the prompt-injection path; no UI work in Phase 15.
 - New entry kinds beyond what Phase 8 already declared. The existing schema (`decision` / `summary` / `correction` / `chunk_summary` / `original_intent` / `preference` / `bug_pattern` / `implement_summary`) is enough.
+
+## Completion notes
+
+Shipped across 6 PRs (#48 → #53). All five planned subsystems landed; the planning investigation's one wrong claim ("`recordBugPattern` has zero call sites") was caught at implementation time and didn't add work.
+
+### Stages as designed → as shipped
+
+- **Stage 1** (#48) — recorder call sites. `recordDecision` wired at preflight + `routes/reason.ts` self-invoked path. `recordBugPattern` was already wired at the on-error path (Investigator 1 missed it; verified during implementation). `recordUserCorrection` wired on off-course backtrack/redirect with stable string shapes.
+- **Stage 2** (#49) — recorder LOW-skip parity. Pushed the LOW-confidence guard from call sites into `recordImplementSummary` (via brief.confidence) and `recordBugPattern` (via a back-compat options bag). Future callers can't accidentally regress the rule. Dedup verification tests pinned the existing SHA256 entry-id mechanism's behaviour for the new write patterns.
+- **Stage 3** (#50) — `applyMemoryFeedback` helper in isolation. Pure helpers `validateConfirmation` (≥30% token overlap, dash-split, stopword-stripped) and `validateContradiction` (response must contain `[<id>]`). Per-id audit log returns honoured + rejected lists for telemetry.
+- **Stage 4** (#51) — wire `memoryFeedback` through the response path. Schema: `NormalizedResponse.memoryFeedback`. Extraction: pure `extractMemoryFeedback(json)` in base-provider after taskPlan. Apply call sites in both handlers gated on the new flag `memory.active_confirmation_enabled` (default true). Prompt section gained the contract block when entries are recalled.
+- **Stage 5** (#52) — original-intent reader for divergence. Pure `pickDivergenceAnchor` chooses between current `run.content` and recalled longest `original_intent` based on a 30-char substantive threshold. Wired into both the heuristic detector and the Flash divergence pipeline. `/continue` and fix-request follow-ups now anchor awareness on the canonical recorded prompt.
+- **Stage 6** — this PR: KB docs (architecture.md adds the active memory loop section + diagram; decisions.md gains 3 entries on model-driven feedback / asymmetric guards / longest-original-intent picker) + plan archive.
+
+### Telemetry from the run
+
+- Server tests: 271 → 332 (+61 across the 6 PRs).
+- CLI side untouched — Phase 15 was server-only by design.
+- Verified end-to-end manually: an agent run that uses recalled memory now bumps useCount; a run that contradicts (with `[id]` reference) advances contradictionCount; hallucinated feedback gets rejected at the cross-validation gate.
+
+### Deferred (cleanly, with hooks in place)
+
+- **Substring-overlap tuning for `validateConfirmation`** — 30% threshold is conservative; we can revisit if telemetry shows real-world overlaps clustering above or below it. The constant `CONFIRM_OVERLAP_THRESHOLD` is exported via `_CONFIG` for runtime tuning.
+- **LLM-judged feedback** — instead of trusting the model's `memoryFeedback` self-report, a Flash call could second-guess. Out of scope: the cross-validation guards already do most of the work cheaper.
+- **Per-chat-id `original_intent` scoping** — today `recordOriginalIntent` is per-cwd; for multi-task chats, scoping by chatId would prevent /continue from picking up the wrong project's intent. Not needed yet because chats are mostly single-task; revisit if multi-task chats become common.
+
+### Phase 15 + Phase 11 composition
+
+Phase 11's `original_intent` was always meant to be read by divergence; Stage 5 finally wires it. The flow is now: user prompt → `recordOriginalIntent` (Phase 11 Stage 3, always-on) → `recallForReasoning({kind:"original_intent"})` (Phase 15 Stage 5) → `pickDivergenceAnchor` → `detectDivergence` + Flash divergence pipeline. Memory is load-bearing for awareness, not decoration.
