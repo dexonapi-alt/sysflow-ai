@@ -458,11 +458,17 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
               bb.rootCauseGuess ? `Root cause: ${bb.rootCauseGuess}` : null,
               `Fix: ${bb.proposedFix?.description ?? "(none)"} (scope: ${bb.proposedFix?.scope ?? "?"})`,
             ].filter(Boolean).join("\n")
+            // Phase 15 Stage 2: pass confidence so the recorder's internal
+            // LOW-skip can drop a low-confidence diagnosis. The on-error
+            // path used to record unconditionally; LOW-confidence bug
+            // patterns ossify a guess about a problem we don't really
+            // understand, which is exactly what staleness would amplify.
             recordBugPattern(
               run.cwd as string,
               summary,
               bb.proposedFix?.filesAffected,
               { runId: body.runId, trigger: "on_error" },
+              { confidence: briefResult.confidence },
             ).catch(() => { /* best-effort */ })
           }
         }
@@ -888,9 +894,12 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
         onCompletionBrief = briefResult
         if (briefResult && briefResult.pipeline === "summary" && briefResult.summaryBrief) {
           // Phase 8: persist the summary brief as memory so future runs see it.
+          // Phase 15 Stage 2: thread `confidence` through so the recorder's
+          // internal LOW-skip can drop a low-confidence summary without the
+          // call site having to remember the rule.
           recordImplementSummary(
             run.cwd as string,
-            { implementBrief: { intent: run.content, recommendedStack: undefined, consistencyNotes: briefResult.summaryBrief.constraints } },
+            { implementBrief: { intent: run.content, recommendedStack: undefined, consistencyNotes: briefResult.summaryBrief.constraints }, confidence: briefResult.confidence },
             { runId: body.runId, trigger: "on_completion" },
           ).catch(() => { /* best-effort */ })
           // Replace the draft message with a rendered summary.

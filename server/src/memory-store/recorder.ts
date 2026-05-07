@@ -85,9 +85,13 @@ export async function recordDecision(
 
 export async function recordImplementSummary(
   cwd: string,
-  brief: { implementBrief?: ImplementLike },
+  brief: { implementBrief?: ImplementLike; confidence?: string },
   sourceRef: SourceRefLike,
 ): Promise<MemoryEntry | null> {
+  // Phase 15 Stage 2: LOW-confidence skip parity with recordDecision.
+  // Pushing the guard into the recorder protects future callers from
+  // silently regressing the rule by dropping the call-site check.
+  if (brief.confidence === "LOW") return null
   const ib = brief.implementBrief
   if (!ib || !ib.recommendedStack) return null
   const stack = ib.recommendedStack
@@ -127,7 +131,14 @@ export async function recordBugPattern(
   briefSummary: string,
   filePaths: string[] | undefined,
   sourceRef: SourceRefLike,
+  options?: { confidence?: string },
 ): Promise<MemoryEntry | null> {
+  // Phase 15 Stage 2: LOW-confidence skip parity with recordDecision.
+  // The `confidence` lives on the bug brief itself, not the summary string,
+  // so it comes through an options bag to keep the existing positional
+  // signature backward-compatible. Future callers can drop the guard at
+  // the call site and trust the recorder.
+  if (options?.confidence === "LOW") return null
   const enriched: SourceRefLike = { ...sourceRef, filePaths: filePaths ?? sourceRef.filePaths }
   return safeRecord(cwd, "bug_pattern", briefSummary, enriched, ["bug"])
 }
