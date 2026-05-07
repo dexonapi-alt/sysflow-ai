@@ -26,6 +26,14 @@ async function main(): Promise<void> {
   // first hook call. Idempotent + best-effort — never throws.
   applyMotionEnv(args)
 
+  // Phase 13: Ink mode is the default. Honour the explicit opt-out flags
+  // (--legacy CLI flag, SYS_LEGACY=1, or SYS_INK=0 for symmetry with the
+  // older opt-in path) by setting SYS_INK=0 so the rest of the codebase
+  // sees the same answer through `isInkActive()`.
+  if (args.includes("--legacy") || process.env.SYS_LEGACY === "1") {
+    process.env.SYS_INK = "0"
+  }
+
   // Support: sys -f prompt.txt
   const fileIdx = args.indexOf("-f")
   if (fileIdx !== -1 && args[fileIdx + 1]) {
@@ -40,10 +48,10 @@ async function main(): Promise<void> {
     }
   }
 
-  // Phase 9 Stage 1: SYS_INK=1 mounts the new Ink UI; without the flag the
-  // legacy console renderer keeps running so we can iterate without breaking
-  // trunk. The flag goes away in Stage 9.
-  const inkEnabled = process.env.SYS_INK === "1"
+  // Phase 13: Ink mode is the default. Opt out with `--legacy`, `SYS_LEGACY=1`,
+  // or `SYS_INK=0`. The interactive REPL mounts Ink; one-shot `sys "prompt"`
+  // calls still take the runAgent direct path (no UI mounted).
+  const inkEnabled = process.env.SYS_INK !== "0"
 
   // Support: echo "prompt" | sys  OR  cat prompt.txt | sys
   // Skipped when SYS_INK is on — Windows + the bin/sys.js spawn shim

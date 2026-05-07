@@ -2,15 +2,16 @@
  * Agent → UI event bus.
  *
  * Lets the agent loop in `agent.ts` emit lifecycle events that the Ink UI
- * (or any other renderer) subscribes to. In legacy console mode the agent
- * still uses `console.log`; in `SYS_INK=1` mode it emits events instead and
- * `<AgentStream>` renders them in place.
+ * (or any other renderer) subscribes to.
  *
- * Event types are deliberately coarse: `log` covers most one-shot output
- * (tool call labels, status messages, errors) and `spinner` / `spinner_stop`
- * mirror the ora spinner API the agent already uses. Stage 3 intentionally
- * keeps the surface small; later stages add structured task / diff / brief
- * events as we port more of agent.ts off console.log.
+ * Phase 13: Ink mode is the default — the agent's existing `console.log` /
+ * `console.warn` / `console.error` calls are monkey-patched at Ink mount
+ * time (`redirectConsoleToInk()` below) so they fan out as `log` events
+ * automatically. Code added since Phase 12 emits structured events
+ * directly (`tool_start`, `chunk_plan`, `assistant_message`, etc.); the
+ * console redirect is the bridge that keeps the older callsites usable
+ * without rewriting them. Opt out of Ink with `--legacy`, `SYS_LEGACY=1`,
+ * or `SYS_INK=0`.
  */
 
 import { EventEmitter } from "node:events"
@@ -71,7 +72,72 @@ export function onAgent(handler: (event: AgentEvent) => void): () => void {
   return () => emitter.off(CHANNEL, handler)
 }
 
-/** True when the runtime should emit events instead of writing to the console. */
+/** True when the runtime should emit events instead of writing to the console.
+ *  Phase 13: Ink mode is the default. Opt out with SYS_LEGACY=1, SYS_INK=0,
+ *  or `--legacy` (the index.ts entrypoint sets SYS_INK=0 when it sees that
+ *  flag, so we only need to read the env here). */
 export function isInkActive(): boolean {
-  return process.env.SYS_INK === "1"
+  if (process.env.SYS_INK === "0") return false
+  if (process.env.SYS_LEGACY === "1") return false
+  return true
+}
+
+/**
+ * Redirect raw `console.log` / `console.warn` / `console.error` calls
+ * through the agent event bus so they render inside `<AgentStream>` as
+ * `log` entries instead of writing directly to stdout (where they would
+ * stomp over Ink's render zone).
+ *
+ * Phase 12 built the alive UI components but the agent's existing 100+
+ * `console.log` callsites in agent.ts / executor.ts / cli/render.ts
+ * still wrote directly to stdout. In Ink mode that produced visual
+ * chaos — Ink-rendered cards + Header + StatusLine fighting with raw
+ * print lines. This bridge fixes it without touching every callsite:
+ * we monkey-patch the three console methods on Ink mount and route
+ * each call into the bus as a `log` event with the matching level.
+ *
+ * Restored on Ink unmount via `restoreConsole()` so anything that runs
+ * after the UI exits (e.g. error handler, telemetry flush) prints
+ * normally.
+ */
+let originalConsole: { log: typeof console.log; warn: typeof console.warn; error: typeof console.error } | null = null
+
+export function redirectConsoleToInk(): void {
+  if (originalConsole) return // idempotent
+  originalConsole = {
+    log: console.log.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+  }
+  console.log = (...args: unknown[]) => emitAgent({ type: "log", level: "info", text: formatConsoleArgs(args) })
+  console.warn = (...args: unknown[]) => emitAgent({ type: "log", level: "warning", text: formatConsoleArgs(args) })
+  console.error = (...args: unknown[]) => emitAgent({ type: "log", level: "error", text: formatConsoleArgs(args) })
+}
+
+export function restoreConsole(): void {
+  if (!originalConsole) return
+  console.log = originalConsole.log
+  console.warn = originalConsole.warn
+  console.error = originalConsole.error
+  originalConsole = null
+}
+
+/** Stringify console args the way the standard logger does, then strip
+ *  ANSI escapes so Ink renders the text cleanly. The level argument to
+ *  `<Text color>` in AgentStream paints the whole entry — inline ANSI
+ *  inside the string would just clutter the output. */
+function formatConsoleArgs(args: unknown[]): string {
+  const joined = args
+    .map((a) => {
+      if (typeof a === "string") return a
+      if (a instanceof Error) return a.stack ?? a.message
+      try { return JSON.stringify(a) } catch { return String(a) }
+    })
+    .join(" ")
+  return stripAnsi(joined)
+}
+
+const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g
+function stripAnsi(s: string): string {
+  return s.replace(ANSI_RE, "")
 }
