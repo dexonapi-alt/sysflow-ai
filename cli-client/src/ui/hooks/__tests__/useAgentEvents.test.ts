@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest"
 import { reduceAgentEvent, _resetIdsForTests, type AgentEventState } from "../useAgentEvents.js"
 
-const initial: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null }
+const initial: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null }
 
 beforeEach(() => _resetIdsForTests())
 
@@ -217,5 +217,47 @@ describe("reduceAgentEvent — assistant_message (Phase 12 Stage 6)", () => {
     expect(s.assistantMessage).not.toBeNull()
     s = reduceAgentEvent(s, { type: "clear" })
     expect(s.assistantMessage).toBeNull()
+  })
+})
+
+describe("reduceAgentEvent — reasoning_brief (Phase 14 Stage 4)", () => {
+  it("sets the brief from null with key=1", () => {
+    const after = reduceAgentEvent(initial, {
+      type: "reasoning_brief",
+      kind: "implement",
+      briefData: { confidence: "HIGH" },
+    })
+    expect(after.reasoningBrief).toMatchObject({
+      kind: "implement",
+      briefData: { confidence: "HIGH" },
+      key: 1,
+    })
+  })
+
+  it("ignores empty / non-string kind defensively", () => {
+    expect(reduceAgentEvent(initial, { type: "reasoning_brief", kind: "" }).reasoningBrief).toBeNull()
+    // @ts-expect-error — intentional bad payload
+    expect(reduceAgentEvent(initial, { type: "reasoning_brief", kind: 42 }).reasoningBrief).toBeNull()
+  })
+
+  it("increments key on each new brief (so the Pulse re-fires)", () => {
+    let s = reduceAgentEvent(initial, { type: "reasoning_brief", kind: "implement" })
+    expect(s.reasoningBrief?.key).toBe(1)
+    s = reduceAgentEvent(s, { type: "reasoning_brief", kind: "bug" })
+    expect(s.reasoningBrief?.key).toBe(2)
+    expect(s.reasoningBrief?.kind).toBe("bug")
+  })
+
+  it("clear wipes the brief", () => {
+    let s = reduceAgentEvent(initial, { type: "reasoning_brief", kind: "implement" })
+    expect(s.reasoningBrief).not.toBeNull()
+    s = reduceAgentEvent(s, { type: "clear" })
+    expect(s.reasoningBrief).toBeNull()
+  })
+
+  it("preserves briefData across emissions (most-recent wins)", () => {
+    let s = reduceAgentEvent(initial, { type: "reasoning_brief", kind: "implement", briefData: { confidence: "HIGH" } })
+    s = reduceAgentEvent(s, { type: "reasoning_brief", kind: "implement", briefData: { confidence: "LOW" } })
+    expect(s.reasoningBrief?.briefData).toEqual({ confidence: "LOW" })
   })
 })

@@ -3,6 +3,7 @@ import { Box, Static, Text } from "ink"
 import { useAgentEvents } from "../hooks/useAgentEvents.js"
 import { Spinner } from "./Spinner.js"
 import { ActionCard } from "./ActionCard.js"
+import { ReasoningPeek } from "./ReasoningPeek.js"
 import { Typewriter } from "../animation/primitives/index.js"
 import { palette } from "../theme.js"
 
@@ -21,7 +22,7 @@ import { palette } from "../theme.js"
  * actively-running card and the spinner re-render each frame.
  */
 export function AgentStream(): React.ReactElement {
-  const { log, spinnerText, toolCards, assistantMessage } = useAgentEvents()
+  const { log, spinnerText, toolCards, assistantMessage, reasoningBrief } = useAgentEvents()
 
   // Partition cards: settled ones go to <Static> (no per-frame redraw),
   // the in-flight one (if any) stays in the live region. There's at most
@@ -65,6 +66,15 @@ export function AgentStream(): React.ReactElement {
             {assistantMessage.text}
           </Typewriter>
         </Box>
+      )}
+      {/*
+        Phase 14 Stage 4: surface the latest reasoning brief above the
+        spinner so the user sees WHAT the agent reasoned about while it's
+        still working through the next chunk. Stays mounted until the
+        next `clear` event (new prompt).
+      */}
+      {reasoningBrief && (
+        <ReasoningPeek brief={reasoningBrief} />
       )}
       {spinnerText !== null && (
         <Box marginTop={0}>

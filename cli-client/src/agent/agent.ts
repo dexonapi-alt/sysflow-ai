@@ -329,7 +329,18 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   // Phase 5: render the pre-flight reasoning brief if the server returned one.
   if (response.reasoningBrief) {
     spinner.stop()
-    renderReasoningBrief(response.reasoningBrief)
+    // Phase 14 Stage 4: in Ink mode the brief is surfaced as a structured
+    // <ReasoningPeek> via the events bus. The legacy ASCII-box renderer
+    // (renderReasoningBrief in cli/reasoning-display.ts) prints chrome
+    // that would render as raw `┌── REASONING ──┐` text inside the
+    // AgentStream log if it ran in Ink mode.
+    if (shouldRenderInlineForLegacy()) {
+      renderReasoningBrief(response.reasoningBrief)
+    } else {
+      const brief = response.reasoningBrief as Record<string, unknown>
+      const kind = typeof brief.pipeline === "string" ? brief.pipeline : "unknown"
+      emitAgent({ type: "reasoning_brief", kind, briefData: brief })
+    }
     spinner.start(colors.muted("thinking..."))
   }
 
@@ -1246,7 +1257,14 @@ async function handleNeedsTool(
       // Phase 5: render decision brief inline if the reason tool just returned one.
       if (currentTool === "reason" && toolResult && (toolResult as Record<string, unknown>).brief) {
         spinner.stop()
-        renderDecisionBrief((toolResult as Record<string, unknown>).brief)
+        // Phase 14 Stage 4: gate the legacy ASCII box; surface as a Peek in Ink mode.
+        if (shouldRenderInlineForLegacy()) {
+          renderDecisionBrief((toolResult as Record<string, unknown>).brief)
+        } else {
+          const brief = (toolResult as Record<string, unknown>).brief as Record<string, unknown>
+          const kind = typeof brief.pipeline === "string" ? brief.pipeline : "decision"
+          emitAgent({ type: "reasoning_brief", kind, briefData: brief })
+        }
         spinner.start(colors.muted("thinking..."))
       }
     }
@@ -1255,7 +1273,14 @@ async function handleNeedsTool(
     let flashCallsThisTurn = 0
     if (response.reasoningBrief) {
       spinner.stop()
-      renderReasoningBrief(response.reasoningBrief)
+      // Phase 14 Stage 4: gate the legacy ASCII box; surface as a Peek in Ink mode.
+      if (shouldRenderInlineForLegacy()) {
+        renderReasoningBrief(response.reasoningBrief)
+      } else {
+        const brief = response.reasoningBrief as Record<string, unknown>
+        const kind = typeof brief.pipeline === "string" ? brief.pipeline : "unknown"
+        emitAgent({ type: "reasoning_brief", kind, briefData: brief })
+      }
       flashCallsThisTurn += 1
       spinner.start(colors.muted("thinking..."))
     }
