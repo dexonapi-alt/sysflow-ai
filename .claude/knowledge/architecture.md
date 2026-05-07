@@ -154,6 +154,115 @@ Free-tier models (`openrouter-auto` / `llama` / `mistral` / `gemini-flash-or`) a
 - Kill switch: `awareness.enabled` (default `true`); thresholds `awareness.threshold_off_course` (60), `awareness.threshold_blocked` (30)
 - CLI badge: `cli-client/src/cli/render.ts: renderConfidenceBadge`
 
+## Active memory loop (Phase 15)
+
+- **Source:** plan `applied/2026-05-07-phase-15-memory-handling-anti-staleness.md`
+
+Phase 8 built the memory store half (entries, validators, recall, compaction). Phase 15 wires the active half — every turn now records what was decided, cross-validates the model's claims about which entries it used / contradicted, and anchors awareness on the LITERAL original prompt instead of the preflight brief's interpretation.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  WRITE side  ── handlers fire recorders during a run                  │
+│                                                                       │
+│  user-message.ts (preflight)                                          │
+│    HIGH/MED implementBrief  →  recordImplementSummary                 │
+│    HIGH/MED bugBrief        →  recordBugPattern (with confidence)     │
+│    HIGH/MED decisionBrief   →  recordDecision                         │
+│    LITERAL prompt           →  recordOriginalIntent                   │
+│                                                                       │
+│  routes/reason.ts (self_invoked)                                      │
+│    Non-LOW decisionBrief    →  recordDecision                         │
+│                                                                       │
+│  tool-result.ts (on_error / on_completion / off_course)               │
+│    on_error bugBrief        →  recordBugPattern (with confidence)     │
+│    on_completion summary    →  recordImplementSummary (w/ confidence) │
+│    Backtrack / redirect     →  recordUserCorrection                   │
+│    Each chunk's outcome     →  recordChunkSummary (Phase 10)          │
+│                                                                       │
+│  Each recorder: LOW skip → secret-pattern guard → SHA256 dedup        │
+│                                                                       │
+├──────────────────────────────────────────────────────────────────────┤
+│  ACTIVE CONFIRMATION  ── per-response feedback loop                   │
+│                                                                       │
+│  System prompt (LEARNED_MEMORY section)                               │
+│    Renders [<id>] kind: content lines + a feedback contract block:    │
+│      "memoryFeedback": {                                              │
+│        "confirmed":   ["<id>", …],   // ids you used                  │
+│        "contradicted": ["<id>"]      // ids you disagreed with        │
+│      }                                                                │
+│                                                                       │
+│  Model response (any turn)                                            │
+│    JSON shape carries memoryFeedback alongside taskPlan               │
+│         │                                                             │
+│         ▼                                                             │
+│  base-provider.ts: extractMemoryFeedback(json)                        │
+│    Defensive shape filter → null OR {confirmed, contradicted}         │
+│         │                                                             │
+│         ▼                                                             │
+│  handler: applyMemoryFeedback(cwd, feedback, responseText)            │
+│    For each confirmed id:                                             │
+│      validateConfirmation(entry.content, responseText)                │
+│      ≥ 30% token overlap (dash-split, stopword-stripped)              │
+│        ✓ → noteAgreement (useCount + lastConfirmedAt bumped)          │
+│        ✗ → rejected (audit log only)                                  │
+│    For each contradicted id:                                          │
+│      validateContradiction(id, responseText)                          │
+│      response must contain `[<id>]` in bracket notation               │
+│        ✓ → noteContradiction (advances toward 2-strike kill)          │
+│        ✗ → rejected (audit log only)                                  │
+│    Gated by `memory.active_confirmation_enabled` (default true)       │
+│                                                                       │
+├──────────────────────────────────────────────────────────────────────┤
+│  ORIGINAL-INTENT ANCHOR  ── divergence reads from memory              │
+│                                                                       │
+│  tool-result.ts (awareness block)                                     │
+│    recallForReasoning({ kind: "original_intent" })                    │
+│         │                                                             │
+│         ▼                                                             │
+│  pickDivergenceAnchor(run.content, candidates)                        │
+│    run.content ≥ 30 chars  → use it verbatim                          │
+│    run.content < 30 chars  → fall back to longest original_intent     │
+│         │                                                             │
+│         ▼                                                             │
+│  detectDivergence + Flash divergence pipeline both anchor on          │
+│  the chosen prompt, so /continue + fix-request follow-ups still       │
+│  compare implementation against the canonical project intent.         │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Cross-validation guards
+
+The model's `memoryFeedback` field is treated as a CLAIM, not a fact. Free-tier models hallucinate "confirmed: [abc123]" for entries they never used and "contradicted: [def456]" without any actual disagreement. Two guards:
+
+- **`validateConfirmation`** — token overlap ≥ 0.3. Catches the obvious "completely unrelated response claims to use this entry" case. False positives cost a single bumped useCount; false confirms accumulate noise that future recall promotes — so the threshold matters.
+- **`validateContradiction`** — response MUST contain `[<id>]` in bracket notation (the same notation LEARNED_MEMORY renders). Stricter than overlap because killing an entry is irreversible after 2 strikes; this forces the model to point at exactly which entry it's disagreeing with.
+
+Both guards are pure functions, exported, and tested in isolation. The handler-side `applyMemoryFeedback` returns a per-id audit log (`confirmedHonoured / confirmedRejected / contradictedHonoured / contradictedRejected`) so telemetry can surface hallucination rates.
+
+### Failure modes the loop handles
+
+- **No memory entries** → recall returns empty; LEARNED_MEMORY section + contract block are not rendered (no prompt overhead); `applyMemoryFeedback` is a no-op.
+- **Model omits `memoryFeedback`** → `extractMemoryFeedback` returns null; helper short-circuits; no state changes.
+- **Malformed payload** (numbers, nulls, non-arrays in the lists) → defensive filtering normalises to clean shape or null.
+- **Hallucinated ids** → entries-by-id lookup fails; audit log records as `*Rejected`; no `note*` call fired.
+- **Hallucinated confirms** (no overlap) → cross-validation rejects; no useCount bump.
+- **Fabricated contradictions** (no `[id]` reference) → cross-validation rejects; no contradictionCount advance.
+- **Recall failure during anchor pick** → divergence falls back to today's `run.content` behaviour; no regression.
+- **`memory.active_confirmation_enabled = false`** → the helper is never called; recorder coverage half (Stages 1-2) keeps working.
+
+### Key files (one source of truth per concern)
+
+- Recorder API: `server/src/memory-store/recorder.ts` (`recordDecision` / `recordImplementSummary` / `recordBugPattern` / `recordUserCorrection` / `recordChunkSummary` / `recordOriginalIntent`)
+- Confirmation tracker: `server/src/memory-store/confirmation-tracker.ts` (`noteAgreement` / `noteContradiction`)
+- Active feedback helper: `server/src/memory-store/feedback.ts` (`applyMemoryFeedback`, `validateConfirmation`, `validateContradiction`)
+- Prompt section: `server/src/providers/prompt/sections/learned-memory.ts` (renders entries + feedback contract block)
+- Response extraction: `server/src/providers/base-provider.ts: extractMemoryFeedback`
+- Anchor picker: `server/src/services/divergence-detector.ts: pickDivergenceAnchor`
+- Apply call sites: `server/src/handlers/user-message.ts` + `server/src/handlers/tool-result.ts` (after model adapter returns)
+- Original-intent reader: `server/src/handlers/tool-result.ts` (awareness block, before `detectDivergence`)
+- Kill switch: flag `memory.active_confirmation_enabled` (default `true`)
+- Schema: `NormalizedResponse.memoryFeedback?: { confirmed?: string[]; contradicted?: string[] } | null` in `server/src/types.ts`
+
 ## Living CLI (Phase 12)
 
 - **Source:** plan `applied/2026-05-07-phase-12-living-cli-ui.md`

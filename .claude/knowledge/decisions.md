@@ -182,3 +182,46 @@ The canonical predicate is `cli-client/src/agent/events.ts: shouldRenderInlineFo
 1. **Discoverability.** A new contributor adding a console renderer can grep for `shouldRenderInlineForLegacy` and see exactly which callsites are dual-mode. `!isInkActive()` is less greppable and reads as "is X false" instead of "should I render this for the legacy console".
 2. **One place to change the meaning.** If a future flag (`SYS_LEGACY_INLINE=1`) wants to force inline rendering even with Ink active, the predicate is the single point to extend.
 3. **Symmetry with `isInkActive()`.** Two predicates side by side describe the dual-mode contract clearly: one for "should I emit Ink events", one for "should I render for the legacy console".
+
+## Active memory feedback is model-driven, not heuristic
+
+- **Source:** plan `applied/2026-05-07-phase-15-memory-handling-anti-staleness.md` (Stages 3-4)
+
+Phase 15 closes the active-confirmation loop by asking the **model** to declare which memory entries it used (`confirmed`) and which it disagreed with (`contradicted`) on each turn, in a structured `memoryFeedback` field on the response JSON. The handler then mutates the store via `noteAgreement` / `noteContradiction`. Two heuristic-only alternatives were considered + rejected:
+
+1. **Pure post-hoc inference.** Read the model's response, scan for entry-id mentions or content overlap with each recalled entry, infer "this entry was used" without asking. Rejected because it conflates "model used the knowledge" with "model wrote text similar to the entry" — a model can quote an entry while disagreeing with it, or use the underlying knowledge without echoing the entry's surface form. Token-overlap heuristics alone produce too many false positives, especially on short replies.
+2. **Periodic LLM judging.** Fire a separate Flash call per N turns asking "which of these entries did the agent use?" Rejected because it doubles the per-turn Flash cost on a problem the main model can self-report cheaply, and the judging Flash would face the same overlap-vs-usage ambiguity from the outside.
+
+The model-driven design wins because the model alone knows which memories actually steered its decision. Heuristics protect against hallucinations (next decision below) so a free-tier model claiming `confirmed: ["abc123"]` for an entry it never used can't pollute useCount.
+
+## Cross-validation guards are asymmetric (looser for confirm, stricter for contradict)
+
+- **Source:** plan `applied/2026-05-07-phase-15-memory-handling-anti-staleness.md` (Stage 3)
+
+`applyMemoryFeedback` cross-validates each model claim before mutating the store. The two guards intentionally differ in strictness:
+
+- **`validateConfirmation`** uses **30% token overlap** between entry content and response text (case-folded, dash-split, stopword-stripped, ≥4-char tokens). Looser bar — false confirms cost a single extra useCount bump.
+- **`validateContradiction`** requires the response to contain **`[<id>]` in literal bracket notation** (the exact format LEARNED_MEMORY uses to render entries). Stricter bar — killing an entry is irreversible after 2 strikes.
+
+The asymmetry is the design point. Honouring a fabricated confirm is cheap (the worst case is one bumped useCount on an irrelevant entry, which the recall scoring quickly outpaces). Honouring a fabricated contradict is expensive (the entry is gone after 2 strikes; legitimate knowledge is lost). When the cost of a false positive is asymmetric, the guard should be too.
+
+The bracket-id requirement also serves a UX purpose: if the model wants to contradict an entry, it has to point at it in the response text, so the user can see what was disagreed with and why. The cross-validation isn't just hallucination defence; it's also a self-auditing contract — the response itself documents which entries the model rejected.
+
+## Original-intent reader prefers longest substantive entry over current prompt
+
+- **Source:** plan `applied/2026-05-07-phase-15-memory-handling-anti-staleness.md` (Stage 5)
+
+The Phase 11 divergence pipeline anchors on the user's literal prompt. Today that means `run.content` — fine for new runs, broken for `/continue` and follow-up fix runs where `run.content` is `"continue"` / `"fix it"` / `"what's missing?"`. Three resolution strategies were considered:
+
+1. **Anchor on the current `run.content` always** (Phase 11 default). Simplest, but breaks awareness for the most common follow-up shape — exactly when the user is most likely to want awareness.
+2. **Anchor on the `chunk_summary` chain** (synthesise from chunk history). Works mid-run but doesn't help on the first chunk of a `/continue` run, when no chunk history exists yet.
+3. **Anchor on `original_intent` memory entries** (Phase 15 Stage 5). The verbatim user prompt from any prior run, recorded persistently. Pre-existing data, no new emission needed.
+
+We chose (3), with a hybrid heuristic: use the current prompt verbatim when it's substantive (≥ 30 chars after trim), otherwise fall back to the longest `original_intent` candidate. The 30-char threshold is curated — `"build a postgres-backed user API"` is 32 chars; typical follow-up prompts sit well below it.
+
+Why "longest" rather than "most-recent" or "most-confirmed":
+- Most-recent risks picking another short follow-up if the user submitted multiple in a row.
+- Most-confirmed (highest useCount) is a reasonable signal but currently zero on free-tier where the active confirmation loop is brand new and entries haven't accumulated history yet.
+- Longest is a cheap proxy for "most descriptive" — a 200-char architectural prompt beats a 40-char one-liner for divergence anchoring purposes.
+
+When this needs to evolve: if the recall score (recency × useCount × overlap) becomes load-bearing for memory in general, route through `recallForReasoning` directly and trust its scoring. For now the simpler "longest after threshold" rule is well-tested and predictable.
