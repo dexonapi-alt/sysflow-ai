@@ -45,6 +45,16 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
 
   await saveOrphanedSessions(body.projectId, body.chatId)
 
+  // Phase 16 Stage 1: classify task complexity pre-flight, before the
+  // preflight reasoning chain runs. The classifier is pure regex on the
+  // prompt so it's safe to fire this early. Phase 16 Stage 3 will use
+  // this result to gate the chained `implement_elaborate` Flash; for
+  // now it's plumbing and the existing post-hoc completion-validation
+  // call site (below, after the model adapter) reads from this same
+  // value instead of re-running the regex.
+  const taskComplexity = analyzeTaskComplexity(body.content)
+  console.log(`[user-message] task complexity: ${taskComplexity.complexity} (model=${body.model})`)
+
   const task = await createTask({
     taskId,
     runId,
@@ -450,8 +460,10 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     accumulateFrontendContent(runId, normalized)
   }
 
-  // Layer 3: Guard against AI completing on the FIRST call (before any tools run)
-  const analysis = analyzeTaskComplexity(body.content)
+  // Layer 3: Guard against AI completing on the FIRST call (before any tools run).
+  // Phase 16 Stage 1: reuse the pre-flight `taskComplexity` instead of
+  // re-running the regex; pure helper, identical input → identical output.
+  const analysis = taskComplexity
   if (normalized.kind === "completed") {
     if (analysis.complexity !== "simple") {
       console.log(`[user-message] AI tried to complete ${analysis.complexity} task on first call — overriding to needs_tool`)
