@@ -6,6 +6,7 @@ import { ChatInput } from "./components/ChatInput.js"
 import { Spinner } from "./components/Spinner.js"
 import { AgentStream } from "./components/AgentStream.js"
 import { LiveStatusBar } from "./components/LiveStatusBar.js"
+import { InteractiveHints } from "./components/InteractiveHints.js"
 import { palette } from "./theme.js"
 import { ensureSysbase, getSelectedModel, getAuthUser, getActiveChatInfo, getPlanMode, getSysbasePath } from "../lib/sysbase.js"
 import { runAgent } from "../agent/agent.js"
@@ -111,12 +112,22 @@ export function App(): React.ReactElement {
         </Box>
       )}
       {/*
+        Phase 14 Stage 5: contextual hint row. Sits above the heartbeat
+        so the user always knows what they can press right now — `↑
+        history · / commands · tab complete · ctrl+c exit` while idle,
+        `ctrl+c cancel` while working. Replaces the Header's old
+        slash-commands strip and ChatInput's inline `↑ history` line.
+      */}
+      <Box marginTop={1}>
+        <InteractiveHints />
+      </Box>
+      {/*
         Phase 12 Stage 3: bottom-row heartbeat. Always mounted so the
         breath glyph + elapsed clock are present whether the agent is
         working or idle. Tempo shifts active vs idle automatically by
         reading the spinner state from the events bus.
       */}
-      <Box marginTop={1}>
+      <Box>
         <LiveStatusBar />
       </Box>
     </Box>
