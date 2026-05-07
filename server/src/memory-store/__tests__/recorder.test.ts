@@ -99,6 +99,36 @@ describe("recorder", () => {
     expect(entries[0].useCount).toBe(1)  // bumped on the re-record
   })
 
+  // ─── Phase 15 Stage 1: off-course resolution shapes ───
+
+  it("recordUserCorrection persists the backtrack-resolution shape used by tool-result.ts", async () => {
+    // This is the exact string shape Phase 15 Stage 1 emits when the user
+    // picks `b` in the off-course modal. Pinning it here so a future change
+    // to tool-result.ts can't silently drop the run.content + chunk anchor.
+    const r = await recordUserCorrection(
+      cwd,
+      `Backtracked chunk 3 after awareness flagged off-course on: "build a postgres-backed user API"`,
+      { runId: "r1", trigger: "off_course_resolution" },
+    )
+    expect(r).not.toBeNull()
+    expect(r?.kind).toBe("user_correction")
+    expect(r?.content).toContain("Backtracked chunk 3")
+    expect(r?.content).toContain("postgres-backed user API")
+    expect(r?.sourceRef.trigger).toBe("off_course_resolution")
+  })
+
+  it("recordUserCorrection persists the redirect-resolution shape used by tool-result.ts", async () => {
+    const r = await recordUserCorrection(
+      cwd,
+      `Course-corrected: "use postgres not mongo" (original ask: "build a user API")`,
+      { runId: "r1", trigger: "off_course_resolution" },
+    )
+    expect(r).not.toBeNull()
+    expect(r?.content).toContain("Course-corrected")
+    expect(r?.content).toContain("use postgres not mongo")
+    expect(r?.content).toContain("original ask")
+  })
+
   it("empty content is rejected", async () => {
     const r = await recordUserCorrection(cwd, "   ")
     expect(r).toBeNull()

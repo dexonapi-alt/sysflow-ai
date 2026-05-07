@@ -23,7 +23,7 @@ import { applyToolResultBudget, estimateTokens, shouldBlockOnTokens } from "../s
 import { classifyToolError, classifyToolErrorFromResult } from "../services/tool-error-classifier.js"
 import { persistLargeToolResult } from "../store/tool-result-persistence.js"
 import { runReasoning } from "../reasoning/task-reasoner.js"
-import { recordImplementSummary, recordBugPattern, recordChunkSummary } from "../memory-store/index.js"
+import { recordImplementSummary, recordBugPattern, recordChunkSummary, recordUserCorrection } from "../memory-store/index.js"
 import {
   attachReflection,
   recordChunkStart,
@@ -165,6 +165,22 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
         ? `[OFF-COURSE BACKTRACK] The user just rolled back chunk ${lastGoodChunkIndex ?? 0} after the awareness loop flagged the run as off-course. The disk has been restored to that snapshot. Re-plan from this point — read the current files first, then implement the original ask: "${run.content}".`
         : `[OFF-COURSE REDIRECT] The user just course-corrected the run. Their new direction: "${text ?? ""}". Drop everything you were doing and pivot. Original ask was: "${run.content}".`
       actionPlanner.injectContext(body.runId, note)
+
+      // Phase 15 Stage 1: a redirect or backtrack IS a correction signal —
+      // the agent's last direction was wrong enough that the user had to
+      // intervene. Persist as a user_correction memory entry so the next
+      // run on the same project can recall the prior course-correction
+      // when it considers a similar approach.
+      if (run.cwd) {
+        const correctionText = action === "backtrack"
+          ? `Backtracked chunk ${lastGoodChunkIndex ?? 0} after awareness flagged off-course on: "${run.content}"`
+          : `Course-corrected: "${text ?? "(no text)"}" (original ask: "${run.content}")`
+        recordUserCorrection(
+          run.cwd as string,
+          correctionText,
+          { runId: body.runId, trigger: "off_course_resolution" },
+        ).catch(() => { /* best-effort */ })
+      }
     }
 
     // Rewrite body.result so downstream guards (the scaffold-choice probe

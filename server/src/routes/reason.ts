@@ -10,6 +10,7 @@
  */
 
 import { runReasoning } from "../reasoning/task-reasoner.js"
+import { recordDecision } from "../memory-store/index.js"
 import { getFlag } from "../services/flags.js"
 import { extractUser } from "./auth.js"
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify"
@@ -78,6 +79,19 @@ export async function reasonRoute(fastify: FastifyInstance): Promise<void> {
         fallback: true,
         answer: "(reasoning unavailable — proceed with best judgement based on the project context)",
       }
+    }
+
+    // Phase 15 Stage 1: persist non-LOW-confidence decisions so a future
+    // self-invocation on the same project surfaces the prior call from
+    // recall instead of running another Flash from scratch. The recorder
+    // self-skips LOW confidence; we still gate on `cwd` because a server
+    // call without a working directory can't write memory.
+    if (cwd) {
+      recordDecision(
+        cwd,
+        { decisionBrief: brief.decisionBrief, confidence: brief.confidence },
+        { runId, trigger: "self_invoked" },
+      ).catch(() => { /* best-effort */ })
     }
 
     return {
