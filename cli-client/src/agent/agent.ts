@@ -38,7 +38,7 @@ import { list as listBackgroundJobs, cleanupRun as cleanupBackgroundJobs } from 
 import { createChunkSnapshot, cleanupChunkSnapshots, rollbackToChunk } from "./git.js"
 import { askOffCourse, type OffCourseEvidence } from "../cli/off-course-prompt.js"
 import { registerSpinner, unregisterSpinner } from "../cli/spinner-control.js"
-import { emitAgent, isInkActive } from "./events.js"
+import { emitAgent, isInkActive, shouldRenderInlineForLegacy } from "./events.js"
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -846,7 +846,12 @@ async function renderCompletion(
   console.log("")
 
   const summary = response.summary as Record<string, unknown> | null
-  if (summary && summary.memoryUpdated) {
+  if (summary && summary.memoryUpdated && shouldRenderInlineForLegacy()) {
+    // Phase 14 Stage 1: legacy MEMORY box. Stage 2+ will surface the
+    // memory-update event as a structured Ink card so the alive UI shows
+    // it without ASCII chrome. Until then the redirected console.log
+    // would print these `│ Pattern: X │` lines as inline log entries
+    // which read as visual noise — gate behind the helper.
     console.log("  " + boxTop("MEMORY", 36))
     if (summary.patternSaved) {
       console.log("  " + boxMid(colors.bright(`Pattern: ${summary.patternSaved}`)))
@@ -861,22 +866,38 @@ async function renderCompletion(
       completedSteps.add(s.id)
       s.status = "completed"
     }
-    const completedTask = response.task as Record<string, unknown> | null
-    const title = (completedTask?.title as string) || `${completedSteps.size}/${taskSteps.length} COMPLETE`
-    const goal = (completedTask?.goal as string) || ""
-    renderPipelineBox(title, goal, taskSteps, completedSteps)
-    console.log("")
+    // Phase 14 Stage 1: in Ink mode the pipeline plan was already rendered
+    // as a list of ToolCards at the start of the run (one per planned step,
+    // upgraded from running → success as each lands). Re-rendering it as a
+    // static box at completion is duplication. Stage 2 will replace
+    // renderPipelineBox with a proper Ink ActionCard list summary.
+    if (shouldRenderInlineForLegacy()) {
+      const completedTask = response.task as Record<string, unknown> | null
+      const title = (completedTask?.title as string) || `${completedSteps.size}/${taskSteps.length} COMPLETE`
+      const goal = (completedTask?.goal as string) || ""
+      renderPipelineBox(title, goal, taskSteps, completedSteps)
+      console.log("")
+    }
   }
 
   if (message) {
-    const rendered = renderMarkdown(message)
-    const renderedLines = rendered.split("\n")
-    console.log("  " + boxTop("SUMMARY", 50))
-    for (const line of renderedLines) {
-      console.log("  " + boxMid(line, 50))
+    // Phase 14 Stage 1: in Ink mode, the SUMMARY is rendered exclusively
+    // via the Typewriter that consumes `assistant_message`. The legacy
+    // boxTop/boxMid/boxBot console.log block would print the same text
+    // instantly (via the Phase 13 console redirect) and the user would
+    // read it twice — once as a static log entry, once as the slow
+    // Typewriter reveal. Gate the box behind shouldRenderInlineForLegacy()
+    // so legacy mode keeps its box and Ink mode gets the single source.
+    if (shouldRenderInlineForLegacy()) {
+      const rendered = renderMarkdown(message)
+      const renderedLines = rendered.split("\n")
+      console.log("  " + boxTop("SUMMARY", 50))
+      for (const line of renderedLines) {
+        console.log("  " + boxMid(line, 50))
+      }
+      console.log("  " + boxBot(50))
+      console.log("")
     }
-    console.log("  " + boxBot(50))
-    console.log("")
     // Phase 12 Stage 6: surface the completion message to the Ink stream
     // so AgentStream can render it via <Typewriter>. Use the unrendered
     // markdown text — the typewriter reveals plain characters and the
@@ -968,8 +989,16 @@ async function handleNeedsTool(
       spinner.stop()
       taskShown = true
       console.log("")
-      renderPipelineBox(task.title as string, task.goal as string, taskSteps, completedSteps)
-      console.log("")
+      // Phase 14 Stage 1: the big pipeline-plan box at the start of a run.
+      // Stage 2 will replace this with a list of <ActionCard>s — one per
+      // planned step, leading bullet greyed (○) until the step starts and
+      // upgraded to ● in flight, ✔ on completion. Until then, gate the
+      // legacy box behind shouldRenderInlineForLegacy() so Ink mode
+      // doesn't show a `╭── ──╮` block as redirected log entries.
+      if (shouldRenderInlineForLegacy()) {
+        renderPipelineBox(task.title as string, task.goal as string, taskSteps, completedSteps)
+        console.log("")
+      }
       const activeStep = taskSteps.find((s) => s.status === "in_progress")
       lastPipelineStepId = activeStep?.id || null
       spinner.start(colors.muted("thinking..."))
@@ -1045,17 +1074,27 @@ async function handleNeedsTool(
       )
       spinner.stop()
 
-      process.stdout.write(`\x1b[${toolCalls!.length}A`)
-      for (let i = 0; i < toolCalls!.length; i++) {
-        const tc = toolCalls![i]
-        const label = formatToolLabel(tc.tool, tc.args)
-        process.stdout.write("\r\x1b[K")
-        console.log(colors.accent(`    ${BOX.v}`) + `  ${colors.success(BOX.check)} ` + (label || `${tc.tool}`))
-        await sleep(50)
-      }
+      // Phase 14 Stage 1: in Ink mode the running ToolCard set already
+      // represents the in-flight tools; the overdraw below (cursor-up
+      // + line-erase to upgrade ○ placeholders into ✔ checks in place)
+      // both duplicates that information AND corrupts Ink's layout
+      // state — the raw `\x1b[nA` escapes move the terminal cursor
+      // outside Ink's reconciler model, which is the root cause of the
+      // scroll-jump glitch users see during a run. Skip the entire
+      // block when shouldRenderInlineForLegacy() is false.
+      if (shouldRenderInlineForLegacy()) {
+        process.stdout.write(`\x1b[${toolCalls!.length}A`)
+        for (let i = 0; i < toolCalls!.length; i++) {
+          const tc = toolCalls![i]
+          const label = formatToolLabel(tc.tool, tc.args)
+          process.stdout.write("\r\x1b[K")
+          console.log(colors.accent(`    ${BOX.v}`) + `  ${colors.success(BOX.check)} ` + (label || `${tc.tool}`))
+          await sleep(50)
+        }
 
-      console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.success("done")}`)
-      console.log("")
+        console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.success("done")}`)
+        console.log("")
+      }
       spinner.start(colors.muted("thinking..."))
     } catch (batchError) {
       budget.failure.consecutiveErrors++
