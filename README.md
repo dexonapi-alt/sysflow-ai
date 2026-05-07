@@ -205,6 +205,8 @@ sys "refactor @src/app.js to use async/await"
 | `/mode <default\|auto\|plan\|bypass>` | Switch the permission mode |
 | `/permissions [list\|remove n\|clear]` | Manage saved allow/deny rules |
 | `/plan-mode [on\|off]` | Toggle plan mode |
+| `/memory` | Inspect the persistent reasoning memory for this project |
+| `/remember <text>` | Add a verbatim user correction to memory |
 | `/continue` | Resume the last interrupted run |
 | `/exit` / `/quit` | Leave |
 
@@ -277,12 +279,16 @@ sysflow-ai/
 │       └── lib/                # Server transport, sysbase config
 ├── server/                     # API server + orchestration
 │   └── src/
-│       ├── reasoning/          # Phase 5: pre-flight / self-invoked / on-error / on-completion
-│       ├── scaffold/           # Phase 6: 22-stack scaffolder registry + recommender
+│       ├── reasoning/          # Reasoning pipelines (pre-flight / self-invoked /
+│       │                       # on-error / on-completion / chunk_plan / chunk_reflect / divergence)
+│       ├── scaffold/           # 22-stack scaffolder registry + recommender
+│       ├── memory-store/       # Persistent reasoning memory + recorder + validators
+│       ├── services/           # chunk-state, divergence-detector, verification-gate,
+│       │                       # confidence-tracker, action-planner, flags
 │       ├── providers/prompt/   # Modular system prompt sections
 │       ├── handlers/           # user_message + tool_result handlers
 │       ├── routes/             # Fastify routes
-│       └── store/              # Run, session, tool-result, memory, audit storage
+│       └── store/              # Run, session, tool-result, audit storage
 ├── docs/                       # Architecture + improvement docs
 ├── docker-compose.yml
 └── README.md
@@ -308,6 +314,10 @@ GEMINI_API_KEY=         # https://aistudio.google.com/apikey
 
 # Auth
 JWT_SECRET=change-me-in-production
+
+# Self-host bypass — when running your own server with your own AI keys, the
+# Free-plan daily prompt cap is just dev friction. Set to "true" to skip it.
+SYSFLOW_BILLING_DISABLED=false
 
 # Optional — only if running paid plans
 STRIPE_SECRET_KEY=
