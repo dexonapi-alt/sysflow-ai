@@ -23,7 +23,7 @@ import { applyToolResultBudget, estimateTokens, shouldBlockOnTokens } from "../s
 import { classifyToolError, classifyToolErrorFromResult } from "../services/tool-error-classifier.js"
 import { persistLargeToolResult } from "../store/tool-result-persistence.js"
 import { runReasoning } from "../reasoning/task-reasoner.js"
-import { recordImplementSummary, recordBugPattern, recordChunkSummary, recordUserCorrection } from "../memory-store/index.js"
+import { recordImplementSummary, recordBugPattern, recordChunkSummary, recordUserCorrection, applyMemoryFeedback } from "../memory-store/index.js"
 import {
   attachReflection,
   recordChunkStart,
@@ -972,6 +972,23 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
 
   // Step transitions are now fully managed by the server-side pipeline
   // (updatePipelineProgress sets stepTransition based on actual tool execution)
+
+  // Phase 15 Stage 4: apply the model's memoryFeedback against the
+  // on-disk store (cross-validation guards in feedback.ts). Same gating
+  // as user-message.ts. Best-effort.
+  if (
+    run.cwd
+    && normalized.memoryFeedback
+    && getFlag<boolean>("memory.active_confirmation_enabled", run.sysbasePath as string | null | undefined)
+  ) {
+    applyMemoryFeedback(run.cwd as string, normalized.memoryFeedback, normalized.content || "")
+      .then((audit) => {
+        if (audit.confirmedHonoured.length > 0 || audit.contradictedHonoured.length > 0) {
+          console.log(`[memory] feedback applied: confirmed=${audit.confirmedHonoured.length} contradicted=${audit.contradictedHonoured.length} (rejected: c=${audit.confirmedRejected.length} d=${audit.contradictedRejected.length})`)
+        }
+      })
+      .catch(() => { /* best-effort */ })
+  }
 
   const response = mapNormalizedResponseToClient(body.runId, normalized)
   if (onErrorBrief) response.reasoningBrief = onErrorBrief

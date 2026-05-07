@@ -19,7 +19,7 @@ import { detectScaffoldingNeed, buildScaffoldConfirmationMessage } from "../scaf
 import { estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import { runReasoning } from "../reasoning/task-reasoner.js"
 import { recommendScaffold, resolveCommand, getInstallCommand } from "../scaffold/index.js"
-import { recordImplementSummary, recordOriginalIntent, recordDecision, recordBugPattern } from "../memory-store/index.js"
+import { recordImplementSummary, recordOriginalIntent, recordDecision, recordBugPattern, applyMemoryFeedback } from "../memory-store/index.js"
 import { recordChunkStart } from "../services/chunk-state.js"
 import type { ChunkPlanBrief } from "../reasoning/reasoning-schema.js"
 import { getFlag } from "../services/flags.js"
@@ -494,6 +494,26 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     }
     const pipeline = createPipelineFromAiPlan(runId, pipelinePrompt, normalized.taskPlan)
     normalized.task = pipelineToTaskMeta(pipeline)
+  }
+
+  // Phase 15 Stage 4: apply the model's memoryFeedback against the on-disk
+  // store. cross-validation guards in feedback.ts reject hallucinated
+  // confirms (entry content nowhere in response) and fabricated
+  // contradictions (response doesn't reference the entry's [id]). Best
+  // effort — never blocks the run. Gated by a flag so users can disable
+  // when free-tier hallucinations make the signal noisier than useful.
+  if (
+    body.cwd
+    && normalized.memoryFeedback
+    && getFlag<boolean>("memory.active_confirmation_enabled", body.sysbasePath)
+  ) {
+    applyMemoryFeedback(body.cwd, normalized.memoryFeedback, normalized.content || "")
+      .then((audit) => {
+        if (audit.confirmedHonoured.length > 0 || audit.contradictedHonoured.length > 0) {
+          console.log(`[memory] feedback applied: confirmed=${audit.confirmedHonoured.length} contradicted=${audit.contradictedHonoured.length} (rejected: c=${audit.confirmedRejected.length} d=${audit.contradictedRejected.length})`)
+        }
+      })
+      .catch(() => { /* best-effort */ })
   }
 
   const clientResp = mapNormalizedResponseToClient(runId, normalized)

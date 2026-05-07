@@ -64,6 +64,14 @@ defineFlag("memory.stale_after_days_high_use", 180, parseNumber)
 defineFlag("memory.file_max_bytes", 102_400, parseNumber)
 defineFlag("memory.max_recall_entries", 12, parseNumber)
 
+// ─── Phase 15 Stage 4: active memory feedback loop ───
+// When true, the model's `memoryFeedback: { confirmed, contradicted }`
+// field on each response is processed via applyMemoryFeedback — bumping
+// useCount on confirmed entries, advancing contradictionCount on
+// contradicted ones (with cross-validation guards in feedback.ts).
+// Off-switch in case free-tier hallucinations make the signal noisy.
+defineFlag("memory.active_confirmation_enabled", true, parseBool)
+
 // ─── Phase 10: chunked reasoning loop ───
 // Default ON as of Stage 4 — the prompt now teaches the model to honour the
 // planner's file list, so turning the loop on actually produces structured
