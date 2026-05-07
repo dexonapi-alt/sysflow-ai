@@ -104,9 +104,13 @@ export function Header({ model, user, chatTitle, planMode, cwd }: Props): React.
           </>
         )}
       </Box>
-      <Box>
-        <Text color={palette.muted}>  /model /mode /permissions /plan-mode /memory /remember /chats /billing /usage /login /whoami /continue /exit</Text>
-      </Box>
+      {/*
+       * Phase 14 Stage 5: the second row of slash-command names that
+       * used to live here was duplicated by the new <InteractiveHints>
+       * row at the bottom of the App and the slash autocomplete popup
+       * inside ChatInput. Removing it tightens the top zone to the
+       * single identity row + live cells.
+       */}
     </Box>
   )
 }

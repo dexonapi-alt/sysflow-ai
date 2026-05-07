@@ -188,11 +188,14 @@ export function ChatInput({ placeholder, disabled, onSubmit, history = [] }: Pro
       {matches.length > 0 && (
         <SlashPopup matches={matches} />
       )}
-      {!showPlaceholder && lines.length === 1 && history.length > 0 && historyIndex === null && (
-        <Box>
-          <Text color={palette.muted}>    ↑ history · Tab complete · \↵ newline</Text>
-        </Box>
-      )}
+      {/*
+       * Phase 14 Stage 5: the inline `↑ history · Tab complete · \↵
+       * newline` row that used to live here was relocated to the
+       * always-visible <InteractiveHints> at the bottom of the App so
+       * keys live in one discoverable place that's present even when
+       * the input is empty / under the placeholder. The hints row
+       * picks up the same affordances from `state/hints.ts`.
+       */}
     </Box>
   )
 }
