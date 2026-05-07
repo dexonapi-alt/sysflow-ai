@@ -111,6 +111,32 @@ export const summaryBriefSchema = z.object({
 })
 export type SummaryBrief = z.infer<typeof summaryBriefSchema>
 
+// ─── Implement-elaborate pipeline brief (Phase 16 Stage 2) ───
+//
+// The chained second-stage Flash call that fires after preflight on
+// free-tier when confidence < HIGH and complexity ≥ medium (Phase 16
+// Stage 3 wires the gate). Re-examines the implement brief's chosen
+// approach: WHY this stack vs alternatives, WHAT preconditions are
+// assumed, and a re-scored confidence after the deeper look. The output
+// is plumbed into the main model's prompt so the model knows the
+// elaboration's reasoning, not just the surface brief.
+//
+// Kept tight on purpose — elaborating shouldn't mean re-deriving the
+// whole implement brief. If the elaboration disagrees with the
+// preflight's stack pick, that surfaces as a LOW re-scored confidence
+// and the orchestrator can fall back to ask_user.
+export const implementElaborationBriefSchema = z.object({
+  /** 1-3 sentences explaining why the chosen approach is right for THIS task. */
+  whyThisApproach: z.string().min(1).max(400),
+  /** Why each of the obvious alternatives was rejected (e.g. "Express adds runtime overhead we don't need at this scale"). */
+  whyNotAlternative: z.array(z.string().max(200)).max(4),
+  /** Concrete preconditions the approach assumes (e.g. "cwd is a git repo", "package.json exists", "docker is installed"). */
+  preconditions: z.array(z.string().max(200)).max(6),
+  /** Re-scored confidence after the elaboration. May upgrade or downgrade the preflight's confidence. */
+  confidence: confidenceSchema,
+})
+export type ImplementElaborationBrief = z.infer<typeof implementElaborationBriefSchema>
+
 // ─── Decision pipeline brief (self-invoked) ───
 export const decisionBriefSchema = z.object({
   recommendation: z.string().min(1).max(200),
@@ -192,7 +218,7 @@ export type DivergenceVerdictBrief = z.infer<typeof divergenceVerdictBriefSchema
 // nullable brief fields and validate post-hoc that exactly one is filled.
 
 export const reasoningEnvelopeSchema = z.object({
-  pipeline: z.enum(["implement", "bug", "summary", "decision", "simple", "chunk_plan", "chunk_reflect", "divergence"]),
+  pipeline: z.enum(["implement", "bug", "summary", "decision", "simple", "chunk_plan", "chunk_reflect", "divergence", "implement_elaborate"]),
   confidence: confidenceSchema,
   decision: decisionSchema,
   missingContext: z.array(missingContextItemSchema).max(5).default([]),
@@ -203,6 +229,8 @@ export const reasoningEnvelopeSchema = z.object({
   chunkPlanBrief: chunkPlanBriefSchema.nullable().optional(),
   chunkReflectionBrief: chunkReflectionBriefSchema.nullable().optional(),
   divergenceVerdictBrief: divergenceVerdictBriefSchema.nullable().optional(),
+  /** Phase 16 Stage 2: chained elaboration on top of an implement brief. */
+  implementElaborationBrief: implementElaborationBriefSchema.nullable().optional(),
   reasoningTrace: z.string().max(800),
 })
 export type ReasoningBrief = z.infer<typeof reasoningEnvelopeSchema>
@@ -216,14 +244,15 @@ export type ReasoningBrief = z.infer<typeof reasoningEnvelopeSchema>
 export function assertEnvelopeShape(env: ReasoningBrief): ReasoningBrief {
   const slot = ((): unknown => {
     switch (env.pipeline) {
-      case "implement":      return env.implementBrief
-      case "bug":            return env.bugBrief
-      case "summary":        return env.summaryBrief
-      case "decision":       return env.decisionBrief
-      case "chunk_plan":     return env.chunkPlanBrief
-      case "chunk_reflect":  return env.chunkReflectionBrief
-      case "divergence":     return env.divergenceVerdictBrief
-      case "simple":         return null
+      case "implement":            return env.implementBrief
+      case "bug":                  return env.bugBrief
+      case "summary":              return env.summaryBrief
+      case "decision":             return env.decisionBrief
+      case "chunk_plan":           return env.chunkPlanBrief
+      case "chunk_reflect":        return env.chunkReflectionBrief
+      case "divergence":           return env.divergenceVerdictBrief
+      case "implement_elaborate":  return env.implementElaborationBrief
+      case "simple":               return null
     }
   })()
   if (env.pipeline !== "simple" && (slot === null || slot === undefined)) {
