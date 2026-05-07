@@ -216,3 +216,46 @@ export function extractFilePathsFromMessage(message: string): string[] {
     .filter((m) => !/^\d+\.\d+/.test(m))
     .map((m) => m.toLowerCase())
 }
+
+/**
+ * Phase 15 Stage 5: pick the best prompt to anchor divergence comparison
+ * against. The current run's `run.content` is usually the right answer,
+ * but for `/continue` and follow-up fix prompts it's a short throwaway
+ * like "continue", "fix it", or "what's missing?" — anchoring on that
+ * gives the divergence pipeline nothing to compare implementation
+ * against.
+ *
+ * When the current prompt is short (< MIN_SUBSTANTIVE_PROMPT_CHARS), the
+ * helper falls back to the longest `original_intent` memory entry on
+ * file. The verbatim user prompt from a previous run is the canonical
+ * record of what the project is actually trying to be.
+ *
+ * Pure: takes the current prompt + a list of candidate original_intent
+ * contents and returns the chosen anchor. The caller is responsible for
+ * loading the memory entries (via recallForReasoning).
+ */
+const MIN_SUBSTANTIVE_PROMPT_CHARS = 30
+
+export function pickDivergenceAnchor(currentPrompt: string, originalIntentContents: string[]): string {
+  const trimmedCurrent = (currentPrompt ?? "").trim()
+  if (trimmedCurrent.length >= MIN_SUBSTANTIVE_PROMPT_CHARS) return trimmedCurrent
+
+  // Current prompt is short — likely a continuation. Look for a
+  // substantive original_intent on file.
+  const candidates = (originalIntentContents ?? [])
+    .filter((c): c is string => typeof c === "string")
+    .map((c) => c.trim())
+    .filter((c) => c.length >= MIN_SUBSTANTIVE_PROMPT_CHARS)
+
+  if (candidates.length === 0) return trimmedCurrent
+
+  // Longest-content wins as a proxy for "most descriptive intent". Ties
+  // resolve in iteration order (recall already orders by relevance score
+  // recency × useCount × overlap, so the most-confirmed is near the
+  // front of the input list).
+  let best = candidates[0]
+  for (const c of candidates) {
+    if (c.length > best.length) best = c
+  }
+  return best
+}

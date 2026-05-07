@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { detectDivergence, extractIntentKeywords, extractFilePathsFromMessage, type DetectorInput } from "../divergence-detector.js"
+import { detectDivergence, extractIntentKeywords, extractFilePathsFromMessage, pickDivergenceAnchor, type DetectorInput } from "../divergence-detector.js"
 import type { ChunkBoundary } from "../chunk-state.js"
 import type { ChunkPlanBrief } from "../../reasoning/reasoning-schema.js"
 
@@ -175,5 +175,62 @@ describe("extractFilePathsFromMessage", () => {
 
   it("returns [] on empty input", () => {
     expect(extractFilePathsFromMessage("")).toEqual([])
+  })
+})
+
+// ─── Phase 15 Stage 5: original-intent reader anchor selection ───
+
+describe("pickDivergenceAnchor — original_intent reader for divergence", () => {
+  it("returns the current prompt verbatim when it's substantive (≥ 30 chars)", () => {
+    const current = "Build a postgres-backed user API with auth"
+    expect(pickDivergenceAnchor(current, [])).toBe(current)
+    // Even when original_intent entries exist, a substantive current prompt wins.
+    expect(pickDivergenceAnchor(current, ["a much longer historical prompt with details about something else entirely"])).toBe(current)
+  })
+
+  it("falls back to the longest original_intent when current prompt is short", () => {
+    // /continue, fix it, etc.
+    const got = pickDivergenceAnchor("continue", [
+      "build a small thing",
+      "build a postgres-backed user API with auth, sessions, and audit log",
+      "fix typo",
+    ])
+    expect(got).toBe("build a postgres-backed user API with auth, sessions, and audit log")
+  })
+
+  it("returns trimmed current prompt when no substantive original_intent is on file", () => {
+    expect(pickDivergenceAnchor("continue", [])).toBe("continue")
+    expect(pickDivergenceAnchor("continue", ["fix it", "go on"])).toBe("continue")
+  })
+
+  it("trims whitespace on both inputs", () => {
+    expect(pickDivergenceAnchor("   continue   ", [])).toBe("continue")
+    expect(pickDivergenceAnchor("  ", ["  build a postgres-backed user API with auth  "])).toBe("build a postgres-backed user API with auth")
+  })
+
+  it("ignores non-string entries in the candidates list defensively", () => {
+    const got = pickDivergenceAnchor("/continue", [
+      // @ts-expect-error — intentional bad input to assert the runtime guard
+      null,
+      "build a postgres-backed user API with all the trimmings",
+      // @ts-expect-error — intentional bad input
+      42,
+    ])
+    expect(got).toBe("build a postgres-backed user API with all the trimmings")
+  })
+
+  it("never returns null/undefined — always a string", () => {
+    expect(typeof pickDivergenceAnchor("", [])).toBe("string")
+    expect(typeof pickDivergenceAnchor("", ["only short"])).toBe("string")
+  })
+
+  it("the 30-char threshold is exclusive — exactly 29 chars falls back, 30 chars wins", () => {
+    const at29 = "x".repeat(29)
+    const at30 = "x".repeat(30)
+    const longHist = "build a postgres-backed user API"
+    // 29 → falls back to the longer original_intent
+    expect(pickDivergenceAnchor(at29, [longHist])).toBe(longHist)
+    // 30 → wins
+    expect(pickDivergenceAnchor(at30, [longHist])).toBe(at30)
   })
 })

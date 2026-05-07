@@ -23,7 +23,7 @@ import { applyToolResultBudget, estimateTokens, shouldBlockOnTokens } from "../s
 import { classifyToolError, classifyToolErrorFromResult } from "../services/tool-error-classifier.js"
 import { persistLargeToolResult } from "../store/tool-result-persistence.js"
 import { runReasoning } from "../reasoning/task-reasoner.js"
-import { recordImplementSummary, recordBugPattern, recordChunkSummary, recordUserCorrection, applyMemoryFeedback } from "../memory-store/index.js"
+import { recordImplementSummary, recordBugPattern, recordChunkSummary, recordUserCorrection, applyMemoryFeedback, recallForReasoning } from "../memory-store/index.js"
 import {
   attachReflection,
   recordChunkStart,
@@ -34,7 +34,7 @@ import {
 } from "../services/chunk-state.js"
 import type { ChunkPlanBrief, ChunkReflectionBrief } from "../reasoning/reasoning-schema.js"
 import { getFlag } from "../services/flags.js"
-import { detectDivergence, type DetectorInput } from "../services/divergence-detector.js"
+import { detectDivergence, pickDivergenceAnchor, type DetectorInput } from "../services/divergence-detector.js"
 import { recordSignals as recordConfidenceSignals, clearConfidence, getConfidence, getConfidenceState, getThresholdState } from "../services/confidence-tracker.js"
 import { runVerificationGate, gateSignals } from "../services/verification-gate.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
@@ -572,7 +572,31 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
           awarenessCooldownChunks.set(body.runId, cooldownLeft - 1)
           console.log(`[awareness] in cooldown (${cooldownLeft - 1} chunk(s) remaining), skipping`)
         } else if (awarenessOn) {
-          const input = buildDetectorInput(body.runId, run.content)
+          // Phase 15 Stage 5: prefer the recorded `original_intent` as the
+          // divergence anchor when the current run's prompt is a short
+          // continuation ("/continue", "fix it", "what's missing?"). The
+          // verbatim prompt from a previous run is the canonical record
+          // of what the project is trying to be — comparing chunks
+          // against "/continue" gives the pipeline nothing to compare,
+          // while comparing against the original ask catches drift even
+          // on follow-up turns.
+          let anchorPrompt = run.content
+          try {
+            if (run.cwd) {
+              const recall = await recallForReasoning({
+                cwd: run.cwd as string,
+                userMessage: "",
+                kind: "original_intent",
+                maxEntries: 5,
+              })
+              const candidates = recall.entries.map((e) => e.content)
+              anchorPrompt = pickDivergenceAnchor(run.content, candidates)
+            }
+          } catch (err) {
+            console.warn(`[awareness] original_intent recall failed:`, (err as Error).message)
+          }
+
+          const input = buildDetectorInput(body.runId, anchorPrompt)
           const heuristicSignals = detectDivergence(input)
           const gateOutcomes = await runVerificationGate({
             cwd: run.cwd as string,
@@ -593,12 +617,12 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
             try {
               const verdict = await runReasoning({
                 trigger: "divergence_check",
-                userMessage: run.content, // LITERAL prompt — anchors the comparison
+                userMessage: anchorPrompt, // Phase 15 Stage 5: anchor = pickDivergenceAnchor result
                 model: run.model,
                 cwd: run.cwd as string | undefined,
                 sysbasePath: run.sysbasePath as string | null | undefined,
                 context: {
-                  originalUserPrompt: run.content,
+                  originalUserPrompt: anchorPrompt,
                   filesModified: input.filesModified.slice(0, 30),
                   chunkCount: input.chunkHistory.length,
                   lastReflection: chunkReflectionBrief,
