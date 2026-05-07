@@ -1,7 +1,7 @@
 # Phase 14 — Premium CLI experience: stability, coherence, density
 
 - **Created:** 2026-05-07
-- **Status:** in-progress
+- **Status:** implemented (2026-05-07)
 - **Scope:** Fix five user-visible breakages on the live CLI: terminal scroll glitch, slow-repeat completion summary, heavy ASCII boxes around every iteration, no visibility into thinking/reasoning, and a generic spinner. Result should feel as polished as Claude Code's session view — ● bullets, indented diffs, live elapsed/token counter, no double-rendered content, no cursor jumps.
 
 ## Goal
@@ -177,3 +177,31 @@ Phase 14 leans hard on the Phase 12 + Phase 13 work that's already in. **If the 
 Phase 12 built the component layer. Phase 13 made it the default. **Phase 14 polishes the renderers + closes the visible-quality gap to Claude Code without touching the underlying architecture.** Every Phase 12 primitive (`<Breath>`, `<Pulse>`, `<Shimmer>`, `<Fade>`, `<Typewriter>`) is reused in the new components. The events bus + reducer pattern stays. The breath metaphor stays. The motion + theme stores stay.
 
 What changes is what gets rendered and how the agent emits — not how the rendering engine works.
+
+## Completion notes
+
+Shipped across 6 PRs (#39 → #45). All five user-visible breakages from the goal section addressed.
+
+### Stages as designed → as shipped
+
+- **Stage 1** (#39) — output coherence: `shouldRenderInlineForLegacy()` predicate added to `events.ts`; gated 4 callsites in `agent.ts` (SUMMARY box, raw `\x1b[nA` cursor-up dance, `renderPipelineBox`). Stage 4 added 3 more for the legacy reasoning-brief renderers. Net: scroll-glitch + repeat-summary fixed.
+- **Stage 2** (#40) — `<ActionCard>` replaces bordered `<ToolCard>` on the Ink path. Pure `verbFor`, `formatActionHeader`, `truncateTarget` helpers + 20 tests. Legacy mode unchanged.
+- **Stage 3** (#41) — `<RichSpinner>` shipped with the planned 4-glyph swirl + verb cycle + `(elapsed · ↑ tokens)` overlay. **Followed up twice:**
+  - PR #44 — single colour-shifting glyph instead of 4-glyph row (user feedback: original was too subtle on most terminals). Each glyph paired with its own hex via `SPINNER_COLORS`.
+  - PR #45 — verb cycle expanded from 7 generic words to 22 workflow-flavoured entries (`hmm…`, `debugging…`, `searching…`, `weighing options…`, …); initial Ink spinner text changed from `"thinking..."` to `""` so the cycle actually runs.
+- **Stage 4** (#42) — `<ReasoningPeek>` lands the latest Flash brief above the spinner. Stayed scoped to one-shot rendering (not streaming) — server-side streaming for reasoning calls is a follow-up the plan flagged as cleanly deferrable.
+- **Stage 5** (#43) — `<InteractiveHints>` row at the bottom; pure `pickHints` + `formatHints` in `state/hints.ts`. Header lost its second slash-command row; ChatInput lost its inline `↑ history` line.
+- **Stage 6** — this PR: KB docs (`architecture.md` Phase 14 component additions; 4 new `decisions.md` entries; 2 new `gotchas.md` entries) + plan archive.
+
+### Deferred (cleanly, with hooks in place)
+
+- **`ctrl+o expand` / `ctrl+b background` handlers from Stage 5.** The `<InteractiveHints>` row advertises the IDLE / WORKING affordances we already have; the focus-stack store these would need (to coordinate `useInput` between ChatInput and the rest of the tree) is bigger than the stage warranted. Hint table in `state/hints.ts` is a one-line addition when the handlers ship.
+- **Tool-aware verb derivation.** When `grep` is running, the spinner could surface `searching…` instead of cycling generic verbs. `VERBS` array is exported from `RichSpinner.tsx` for that path; the change would live in `<AgentStream>`, deriving the verb from the running `toolCard.tool` and passing it as the `text` prop.
+- **Streaming reasoning peek.** Stage 4's `<ReasoningPeek>` shows the brief once it lands. Real streaming (partial chunks while the Flash call is in flight) needs `reasoning_stream_chunk` events the server doesn't emit yet. The component's `key`-based re-trigger pattern means dropping streaming in is a server-side change + reducer extension; the renderer is ready.
+
+### Telemetry from the run
+
+- cli-client tests: 254 → 308 (+54 across the 6 PRs).
+- Server-side untouched — Phase 14 was renderer-only by design.
+- Manual verification on Windows Terminal: terminal stability ✓, single completion summary ✓, ●-bullet ActionCards ✓, single colour-shifting spinner ✓, ReasoningPeek surfacing implement / decision briefs ✓, hints row visible idle + working states ✓.
+- The `\x1b[nA` cursor-trap and the `spinner.text = "thinking..."` default-override both turned out to be subtler-than-expected bugs — captured as gotchas so the next contributor doesn't re-discover them.

@@ -100,3 +100,19 @@ Past bugs and non-obvious constraints worth preserving so the next contributor d
 - **Root cause:** `useFrame` registered its motion-change listener at module-load time. When a test reset the motion store (`_resetForTests` clears the listener Set), the registration was lost and the next motion-state flip had no listener to call `stop()`.
 - **Fix:** lazy-register inside `subscribeFrame` / inside the `useEffect` of `useFrame` itself, via `ensureMotionListener()` which is idempotent. `_resetForTests` on the use-frame side also clears the registration so the next subscribe gets a fresh listener (covers the case where motion was already reset between tests).
 - **What to do:** if you add another module-level cross-store listener (e.g. a future awareness-state subscription), use the same lazy pattern. Module-load-time registrations are silently broken by test resets and the failure mode isn't obvious.
+
+## Raw `\x1b[nA` cursor-up writes corrupt Ink's render zone
+
+- **Source:** plan `applied/2026-05-07-phase-14-premium-cli-experience.md` (Stage 1)
+- **Symptom:** during a multi-tool turn the terminal would scroll up and down on its own, the user couldn't keep their viewport stable, and the in-flight tool list rendered partly under previous lines.
+- **Root cause:** `cli-client/src/agent/agent.ts` (around line 1048) printed `○` placeholders for the in-flight tools, then ran `process.stdout.write("\\x1b[${toolCalls.length}A")` followed by `\\r\\x1b[K` per line to move the cursor back up and overwrite each row with the resolved `✔ / ✖`. That dance works fine for a raw console renderer that owns the bottom rows. With Ink mounted, the cursor escapes land INSIDE Ink's reserved render region — Ink then re-paints that region without knowing the cursor is offset, so subsequent frames overlap, scroll, or partially erase prior content.
+- **Fix:** every raw cursor-up / clear-line write is gated behind `shouldRenderInlineForLegacy()` (`agent/events.ts`). In Ink mode the visible representation of "running tools" is the live `<ActionCard>` set in `<AgentStream>` — re-printing rows is unnecessary AND breaks layout.
+- **What to do:** never call `process.stdout.write` with VT100 cursor escapes from a code path that might run with Ink active. If the path needs both modes, use the `shouldRenderInlineForLegacy()` gate. If it's Ink-only, emit a structured event and let the reducer drive the visual transition.
+
+## `spinner.text = "thinking..."` as default silently disabled the verb cycle
+
+- **Source:** PR #45 (post-Phase 14 Stage 3 follow-up)
+- **Symptom:** users reported the spinner was stuck on `thinking…` for the entire duration of a long pause — the cycling verbs (`debugging`, `searching`, `weighing options`, …) inside `<RichSpinner>` were never showing up. The fix in PR #44 (single-glyph + colour rotation) made the spinner LOOK alive, but the word was still static.
+- **Root cause:** `cli-client/src/agent/agent.ts: createSpinner` initialised the Ink shim with `let current = "thinking..."` and emitted `{type:"spinner", text:"thinking..."}` immediately. `<RichSpinner>` only runs the verb cycle when no `text` prop is supplied — a non-empty default text override blocks it from the very first frame. Server phase events that update `spinner.text` later kept it overridden through the rest of the wait, but during the long initial pause before any phase event arrives, the verb cycle never got a chance to run.
+- **Fix:** initial text is now `""` (empty). `<AgentStream>` passes `text={spinnerText || undefined}` so empty becomes `undefined`, which lets the cycle take over until a real label arrives.
+- **What to do:** when adding a new spinner-driving codepath that needs to surface a specific label, set the text to that label only when you have one. Don't pre-fill with a placeholder ("thinking…", "loading…", "working…") that you intend the cycle to replace — the cycle is contractually disabled while a `text` prop is set.
