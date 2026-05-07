@@ -1,8 +1,7 @@
 import { BaseProvider, MODEL_FALLBACK_CHAINS, isProviderRateLimited, getRateLimitState } from "./base-provider.js"
 import { GeminiProvider } from "./gemini.js"
 import { OpenRouterProvider } from "./openrouter.js"
-import { ClaudeSonnetProvider } from "./claude-sonnet.js"
-import { ClaudeOpusProvider } from "./claude-opus.js"
+import { AnthropicProvider } from "./anthropic.js"
 import { SweProvider } from "./swe.js"
 import type { ProviderPayload, NormalizedResponse } from "../types.js"
 
@@ -16,11 +15,11 @@ function registerProvider(provider: BaseProvider): void {
   }
 }
 
-// Register all providers
+// Register all providers. AnthropicProvider handles both `claude-sonnet`
+// and `claude-opus` user-facing IDs (replaced the day-one mock providers).
 registerProvider(new GeminiProvider())
 registerProvider(new OpenRouterProvider())
-registerProvider(new ClaudeSonnetProvider())
-registerProvider(new ClaudeOpusProvider())
+registerProvider(new AnthropicProvider())
 registerProvider(new SweProvider())
 
 function sleep(ms: number): Promise<void> {
