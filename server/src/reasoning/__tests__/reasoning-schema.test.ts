@@ -358,4 +358,85 @@ describe("reasoning-schema", () => {
     })
     expect(() => assertEnvelopeShape(env)).not.toThrow()
   })
+
+  // ─── Phase 16 Stage 2: implement_elaborate pipeline ───
+
+  it("parses a valid implement_elaborate envelope", () => {
+    const r = reasoningEnvelopeSchema.safeParse({
+      pipeline: "implement_elaborate",
+      confidence: "MEDIUM",
+      decision: "proceed",
+      missingContext: [],
+      implementElaborationBrief: {
+        whyThisApproach: "TypeScript + Fastify gives us type safety with low runtime overhead.",
+        whyNotAlternative: ["Express adds middleware overhead we don't need", "Nest requires decorators we'd have to teach the team"],
+        preconditions: ["cwd is a git repo", "package.json exists"],
+        confidence: "HIGH",
+      },
+      reasoningTrace: "elaboration thinking",
+    })
+    expect(r.success).toBe(true)
+  })
+
+  it("rejects implementElaborationBrief with empty whyThisApproach", () => {
+    const r = reasoningEnvelopeSchema.safeParse({
+      pipeline: "implement_elaborate",
+      confidence: "MEDIUM",
+      decision: "proceed",
+      missingContext: [],
+      implementElaborationBrief: {
+        whyThisApproach: "", // min(1) violation
+        whyNotAlternative: [],
+        preconditions: [],
+        confidence: "HIGH",
+      },
+      reasoningTrace: "x",
+    })
+    expect(r.success).toBe(false)
+  })
+
+  it("rejects implementElaborationBrief with too many alternatives (>4)", () => {
+    const r = reasoningEnvelopeSchema.safeParse({
+      pipeline: "implement_elaborate",
+      confidence: "MEDIUM",
+      decision: "proceed",
+      missingContext: [],
+      implementElaborationBrief: {
+        whyThisApproach: "x",
+        whyNotAlternative: ["a", "b", "c", "d", "e"], // max(4) violation
+        preconditions: [],
+        confidence: "HIGH",
+      },
+      reasoningTrace: "x",
+    })
+    expect(r.success).toBe(false)
+  })
+
+  it("assertEnvelopeShape rejects implement_elaborate without the elaboration brief", () => {
+    const env = reasoningEnvelopeSchema.parse({
+      pipeline: "implement_elaborate",
+      confidence: "HIGH",
+      decision: "proceed",
+      missingContext: [],
+      reasoningTrace: "x",
+    })
+    expect(() => assertEnvelopeShape(env)).toThrow(/implement_elaborate.*null/)
+  })
+
+  it("assertEnvelopeShape passes implement_elaborate with brief", () => {
+    const env = reasoningEnvelopeSchema.parse({
+      pipeline: "implement_elaborate",
+      confidence: "HIGH",
+      decision: "proceed",
+      missingContext: [],
+      implementElaborationBrief: {
+        whyThisApproach: "x",
+        whyNotAlternative: [],
+        preconditions: [],
+        confidence: "HIGH",
+      },
+      reasoningTrace: "x",
+    })
+    expect(() => assertEnvelopeShape(env)).not.toThrow()
+  })
 })
