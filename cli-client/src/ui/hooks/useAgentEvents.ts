@@ -16,6 +16,10 @@ export interface ToolCardState {
   tool: string
   /** Human-readable label rendered in the card header. */
   label: string
+  /** Phase 14 Stage 2: original tool args, used by <ActionCard> to derive
+   *  the Claude-style `Verb(target)` header without round-tripping through
+   *  the legacy `formatToolLabel` chalk-coloured string. */
+  args?: Record<string, unknown>
   /** Lifecycle status; transitions running → success | error on tool_end. */
   status: ToolCardStatus
   /** Wall-clock millis when the card mounted. Used by ToolCard to drive
@@ -106,6 +110,7 @@ export function reduceAgentEvent(prev: AgentEventState, event: AgentEvent): Agen
         id: event.id,
         tool: event.tool,
         label: event.label,
+        args: event.args,
         status: "running",
         startedAt: Date.now(),
       }
