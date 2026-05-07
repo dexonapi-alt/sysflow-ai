@@ -1,8 +1,22 @@
+/**
+ * Phase 14 Stage 3: `<Spinner>` is now an alias for `<RichSpinner>` so
+ * existing call sites (`<App>`, `<AgentStream>`) automatically get the
+ * 4-glyph swirl + elapsed/tokens overlay without any import changes.
+ *
+ * The single-glyph breath spinner from Phase 12 Stage 3 is preserved
+ * as `<MiniSpinner>` for one-cell slots where the swirl would be
+ * overkill (e.g. inline status notes, future modal headers). The
+ * `LiveStatusBar` doesn't import from here — it has its own inline
+ * breath glyph, untouched.
+ */
+
 import * as React from "react"
 import { useEffect, useState } from "react"
 import { Box, Text } from "ink"
 import { palette, tempo } from "../theme.js"
 import { Breath } from "../animation/primitives/index.js"
+
+export { RichSpinner as Spinner } from "./RichSpinner.js"
 
 const VERBS = [
   "thinking",
@@ -16,27 +30,16 @@ const VERBS = [
 
 const VERB_MS = 3000
 
-interface Props {
+interface MiniProps {
   /** Optional override — when set, replaces the cycling verbs. */
   text?: string
 }
 
 /**
- * Phase 12 Stage 3: replaces the legacy ora-style braille rotation with
- * a single glyph wrapped in a `<Breath>` pulse. The verb cycling stays
- * — that part of the design (rotating implementation-flavoured verbs
- * every ~3s) reads as progress and is independent of the animation
- * primitive underneath.
- *
- * Visual: `  ●  thinking…`
- *   - The dot breathes between accentDim and accent at activeBpm (60),
- *     which feels like a working pulse without the staccato of dots.
- *   - The verb fades through every 3s.
- *
- * Motion-disabled: Breath collapses to its `to` color (the bright
- * accent), so the dot is steady and the verb still cycles.
+ * `<MiniSpinner>` — single-glyph breath. The Phase 12 spinner shape,
+ * preserved here for low-density slots.
  */
-export function Spinner({ text }: Props): React.ReactElement {
+export function MiniSpinner({ text }: MiniProps): React.ReactElement {
   const [verbIndex, setVerbIndex] = useState(0)
 
   useEffect(() => {
