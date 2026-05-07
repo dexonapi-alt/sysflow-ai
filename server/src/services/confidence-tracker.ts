@@ -13,6 +13,13 @@
  */
 
 import type { DivergenceCategory, DivergenceSignal } from "./divergence-detector.js"
+import { isFreeTierModel, FREE_MODEL_SENSITIVITY_BUMP } from "./free-tier-policy.js"
+
+// Phase 16 Stage 1: `isFreeTierModel` and `FREE_MODEL_SENSITIVITY_BUMP`
+// moved to `free-tier-policy.ts`. Re-exported here so existing importers
+// (tests, future callers) keep working while the module is the new source
+// of truth.
+export { isFreeTierModel, FREE_MODEL_SENSITIVITY_BUMP }
 import { getFlag } from "./flags.js"
 
 export type ThresholdState = "on_track" | "off_course" | "blocked"
@@ -124,26 +131,6 @@ export function getThresholdState(runId: string, sysbasePath?: string | null, mo
   if (score < blockedAt) return "blocked"
   if (score < offCourseAt) return "off_course"
   return "on_track"
-}
-
-/** How many points to bump both thresholds when the run's model is free-tier. */
-export const FREE_MODEL_SENSITIVITY_BUMP = 10
-
-/**
- * True when the run's model identifier looks like a free-tier OpenRouter
- * route or one of the free-tier-class providers we explicitly call out
- * (the Phase 11 plan's free-model list).
- */
-export function isFreeTierModel(model: string): boolean {
-  const lower = model.toLowerCase()
-  if (lower.includes("openrouter-auto")) return true
-  if (lower.includes("gemini-flash-or")) return true
-  // Loose substring matches — `meta-llama/llama-3.1-405b` and
-  // `mistralai/mistral-large` both qualify. False positives like
-  // a paid LLaMA-finetune are tolerable; the cost is just slightly
-  // earlier off-course warnings on a model that probably isn't drifting.
-  if (/\b(?:llama|mistral)\b/.test(lower)) return true
-  return false
 }
 
 /** Wipe a run's state. Called from the same teardown path as `clearChunkState`. */
