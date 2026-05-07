@@ -18,8 +18,18 @@ import { classifyIntent, type IntentHint } from "./intent-classifier.js"
 import { reasoningEnvelopeSchema, assertEnvelopeShape, type ReasoningBrief, type ReasoningTrigger } from "./reasoning-schema.js"
 import { getReasoningCache, setReasoningCache } from "./reasoning-cache.js"
 import { applyCriticalContextDetector } from "./critical-context-detector.js"
+import { repairReasoningResponse } from "./repair.js"
 import { getPipelineSystemPrompt, type PipelineKind } from "./pipelines/index.js"
 import { getFlag } from "../services/flags.js"
+
+/**
+ * Hard timeout on a single reasoner SDK call. The Google SDK does its own
+ * exponential backoff on 5xx / network errors with no externally-settable
+ * cap, which means a sustained 4xx (e.g. an IP-blocked key) can hold the
+ * whole agent for minutes silently. 30s is well past any healthy Flash
+ * response time and well short of "the user gives up".
+ */
+const REASONER_TIMEOUT_MS = 30_000
 
 export interface ReasoningPayload {
   trigger: ReasoningTrigger
@@ -109,21 +119,28 @@ async function runReasoningInner(payload: ReasoningPayload): Promise<ReasoningBr
     return cached
   }
 
-  // Model call.
+  // Model call. Guarded with a hard timeout so a stuck SDK retry can't
+  // hold the whole agent flow — `runReasoningInner` returns null on
+  // timeout and the handler keeps going in legacy / no-brief mode.
   let raw: string
   try {
-    raw = await callReasoner(payload, kind)
+    raw = await callReasonerWithTimeout(payload, kind)
   } catch (err) {
     console.warn(`[reasoning] model call failed: ${(err as Error).message}`)
     return null
   }
 
-  // Parse + validate.
+  // Parse + validate. The repair pass runs BEFORE Zod validation and
+  // coerces common Flash quirks (empty `recommendedStack.language`, null
+  // arrays, missing `reasoningTrace`) into placeholder-but-valid shapes
+  // so the brief isn't dropped over a single field. Genuinely malformed
+  // responses (no JSON, wrong pipeline) still return null.
   let parsed: ReasoningBrief
   try {
     const json = stripFences(raw)
     const obj = JSON.parse(json)
-    parsed = reasoningEnvelopeSchema.parse(obj)
+    const repaired = repairReasoningResponse(obj)
+    parsed = reasoningEnvelopeSchema.parse(repaired)
     parsed = assertEnvelopeShape(parsed)
   } catch (err) {
     console.warn(`[reasoning] parse/validate failed: ${(err as Error).message}; falling back to no-brief`)
@@ -156,6 +173,34 @@ function pickPipeline(payload: ReasoningPayload): PipelineKind | "simple" {
   // preflight: defer to intent classifier.
   const hint: IntentHint = classifyIntent(payload.userMessage)
   return hint
+}
+
+/**
+ * Guard `callReasoner` with a hard timeout. The Google SDK does its own
+ * exponential backoff internally with no externally-settable cap, so a
+ * sustained 4xx (IP-blocked key, region restriction, etc.) can hold the
+ * whole agent for minutes silently. The race below loses to a 30s
+ * timeout — the caller then logs and returns null, and the handler
+ * continues in legacy / no-brief mode.
+ *
+ * The `setTimeout` is `unref`'d so it doesn't keep the process alive
+ * past graceful shutdown, and cleared on the success path so test runs
+ * don't leak handles between cases.
+ */
+async function callReasonerWithTimeout(payload: ReasoningPayload, kind: PipelineKind): Promise<string> {
+  let timer: NodeJS.Timeout | undefined
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`reasoner timed out after ${REASONER_TIMEOUT_MS}ms`)),
+      REASONER_TIMEOUT_MS,
+    )
+    timer.unref?.()
+  })
+  try {
+    return await Promise.race([callReasoner(payload, kind), timeoutPromise])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 async function callReasoner(payload: ReasoningPayload, kind: PipelineKind): Promise<string> {
