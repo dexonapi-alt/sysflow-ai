@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest"
 import { reduceAgentEvent, _resetIdsForTests, type AgentEventState } from "../useAgentEvents.js"
 
-const initial: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null }
+const initial: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null, runStartedAt: null }
 
 beforeEach(() => _resetIdsForTests())
 
@@ -26,6 +26,51 @@ describe("reduceAgentEvent — log + spinner", () => {
     const a = reduceAgentEvent(initial, { type: "spinner", text: "x" })
     const b = reduceAgentEvent(a, { type: "complete" })
     expect(b.spinnerText).toBeNull()
+  })
+
+  // ─── Phase 16-fixup (Bug 5): run-level timer survives chunks ───
+
+  it("runStartedAt is null on initial state", () => {
+    expect(initial.runStartedAt).toBeNull()
+  })
+
+  it("runStartedAt is set on the first spinner event of a fresh run", () => {
+    const before = Date.now()
+    const after = reduceAgentEvent(initial, { type: "spinner", text: "thinking" })
+    const t = after.runStartedAt
+    expect(t).not.toBeNull()
+    expect(t!).toBeGreaterThanOrEqual(before)
+    expect(t!).toBeLessThanOrEqual(Date.now())
+  })
+
+  it("runStartedAt is preserved across spinner_stop → spinner restart (between chunks)", async () => {
+    // First spinner stamps the start time.
+    const a = reduceAgentEvent(initial, { type: "spinner", text: "first" })
+    const stamped = a.runStartedAt
+    expect(stamped).not.toBeNull()
+    // Sleep just enough for a second spinner event to have a later Date.now()
+    // value if the reducer were resetting it.
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    // Spinner stops between chunks (spinner_stop) — runStartedAt must persist.
+    const b = reduceAgentEvent(a, { type: "spinner_stop" })
+    expect(b.runStartedAt).toBe(stamped)
+    // New spinner for the next chunk — same run, same start time.
+    const c = reduceAgentEvent(b, { type: "spinner", text: "second" })
+    expect(c.runStartedAt).toBe(stamped)
+  })
+
+  it("complete clears runStartedAt (run is over; elapsed should stop)", () => {
+    const a = reduceAgentEvent(initial, { type: "spinner", text: "x" })
+    expect(a.runStartedAt).not.toBeNull()
+    const b = reduceAgentEvent(a, { type: "complete" })
+    expect(b.runStartedAt).toBeNull()
+  })
+
+  it("clear wipes runStartedAt along with everything else (new prompt = new run)", () => {
+    const a = reduceAgentEvent(initial, { type: "spinner", text: "x" })
+    expect(a.runStartedAt).not.toBeNull()
+    const b = reduceAgentEvent(a, { type: "clear" })
+    expect(b.runStartedAt).toBeNull()
   })
 
   it("clear wipes log + spinner + tool cards", () => {

@@ -86,9 +86,15 @@ export interface AgentEventState {
   /** Phase 14 Stage 4: latest reasoning brief, rendered as ReasoningPeek
    *  in the live region above the spinner. */
   reasoningBrief: ReasoningBriefState | null
+  /** Phase 16-fixup (Bug 5): wall-clock millis when this run started.
+   *  Set on the first `spinner` event after a `clear`; survives
+   *  spinner_stop / spinner re-mounts between chunks so RichSpinner's
+   *  elapsed clock keeps counting until the run actually finishes.
+   *  Cleared on `clear` and `complete`. */
+  runStartedAt: number | null
 }
 
-const INITIAL: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null }
+const INITIAL: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null, runStartedAt: null }
 
 let nextLogId = 1
 
@@ -112,11 +118,23 @@ export function reduceAgentEvent(prev: AgentEventState, event: AgentEvent): Agen
         ...prev,
         log: [...prev.log, { id: nextLogId++, level: event.level, text: event.text }],
       }
-    case "spinner":
-      return { ...prev, spinnerText: event.text }
+    case "spinner": {
+      // Phase 16-fixup (Bug 5): start the run-level timer on the first
+      // spinner of a fresh run. Subsequent spinner events (between
+      // chunks, between phases) preserve the original start so
+      // RichSpinner's elapsed clock counts the WHOLE run, not just
+      // the current spinner instance's lifetime.
+      const runStartedAt = prev.runStartedAt ?? Date.now()
+      return { ...prev, spinnerText: event.text, runStartedAt }
+    }
     case "spinner_stop":
-    case "complete":
+      // Spinner stops between chunks but the run isn't done yet; keep
+      // runStartedAt so the next spinner picks up where the old one left.
       return { ...prev, spinnerText: null }
+    case "complete":
+      // Run is finished — clear the timer along with the spinner text so
+      // a stale "elapsed" doesn't keep ticking after the run ends.
+      return { ...prev, spinnerText: null, runStartedAt: null }
     case "tool_start": {
       // Defensive: ignore a duplicate start with the same id (would otherwise
       // produce two cards for one tool call).

@@ -37,6 +37,7 @@ import { palette, tempo } from "../theme.js"
 import { useFrame, nowMs } from "../animation/use-frame.js"
 import { isMotionEnabled } from "../state/motion.js"
 import { formatElapsed } from "./LiveStatusBar.js"
+import { useAgentEvents } from "../hooks/useAgentEvents.js"
 
 /**
  * Workflow-flavoured verb cycle. Mixes interjections (`hmm…`) with action
@@ -136,11 +137,14 @@ export function formatTokens(n: number): string {
 
 export function RichSpinner({ text, tokens }: Props): React.ReactElement {
   const [verbIndex, setVerbIndex] = useState(0)
-  // Per-mount elapsed clock. The parent (AgentStream) re-mounts this
-  // component implicitly when the spinner state transitions from null →
-  // non-null, so tracking startedAt at mount time gives us the "this
-  // turn's elapsed" without needing event coordination.
-  const startedAtRef = useRef<number>(nowMs())
+  // Phase 16-fixup (Bug 5): the elapsed clock now reads `runStartedAt`
+  // from the reducer, which is stamped on the first spinner of a fresh
+  // run and survives spinner_stop/restart between chunks. The component
+  // still keeps a per-mount fallback ref so tests + standalone uses
+  // (e.g. <App>'s "loading…" boot spinner) don't depend on a populated
+  // store. Run-level wins when present.
+  const fallbackStartedAtRef = useRef<number>(nowMs())
+  const { runStartedAt } = useAgentEvents()
   const [now, setNow] = useState<number>(() => nowMs())
 
   useEffect(() => {
@@ -153,7 +157,7 @@ export function RichSpinner({ text, tokens }: Props): React.ReactElement {
 
   const label = text ?? `${VERBS[verbIndex]}…`
   const primaryIdx = isMotionEnabled() ? pickPrimaryGlyph(now, tempo.activeBpm, SPINNER_GLYPHS.length) : 0
-  const elapsedMs = now - startedAtRef.current
+  const elapsedMs = now - (runStartedAt ?? fallbackStartedAtRef.current)
   const showOverlay = elapsedMs >= 1000 || (tokens != null && tokens > 0)
 
   return (

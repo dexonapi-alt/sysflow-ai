@@ -109,6 +109,19 @@ export function formatBriefSummary(kind: string, briefData: Record<string, unkno
     return { pipelineLabel: "Reasoning(divergence)", lines: lines.length > 0 ? lines : [confidenceLine(data)] }
   }
 
+  // Phase 16 Stage 3: chained implement_elaborate brief — surfaced from
+  // the response's `reasoningElaborationBrief` field. The free-tier
+  // second look's whole point is to make WHY visible, so we render it
+  // with a bit more space than the chunk briefs do.
+  if (kind === "implement_elaborate") {
+    const eb = (data.implementElaborationBrief as Record<string, unknown> | undefined) ?? data
+    if (typeof eb.whyThisApproach === "string") lines.push(`→ ${truncate(eb.whyThisApproach, 90)}`)
+    if (typeof eb.confidence === "string") lines.push(`→ re-scored confidence: ${eb.confidence}`)
+    const preconds = Array.isArray(eb.preconditions) ? (eb.preconditions as string[]) : []
+    if (preconds.length > 0) lines.push(`→ preconditions: ${preconds.slice(0, 2).join(" · ")}`)
+    return { pipelineLabel: "Reasoning(elaborate)", lines: lines.length > 0 ? lines : [confidenceLine(data)] }
+  }
+
   // Phase 10 chunk plan / reflect — short summaries because these fire
   // every chunk and we don't want the peek to dominate the screen.
   if (kind === "chunk_plan") {

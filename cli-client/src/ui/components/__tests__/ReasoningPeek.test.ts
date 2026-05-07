@@ -139,6 +139,40 @@ describe("formatBriefSummary — chunk pipelines (Phase 10)", () => {
   })
 })
 
+describe("formatBriefSummary — implement_elaborate pipeline (Phase 16 Stage 3)", () => {
+  it("surfaces whyThisApproach + re-scored confidence", () => {
+    const out = formatBriefSummary("implement_elaborate", {
+      implementElaborationBrief: {
+        whyThisApproach: "Drizzle's typed schema gives the user's strict-typing ask a working foundation",
+        whyNotAlternative: ["Express adds middleware overhead we don't need at this scale"],
+        preconditions: ["package.json must exist", "DATABASE_URL env var assumed"],
+        confidence: "HIGH",
+      },
+    })
+    expect(out.pipelineLabel).toBe("Reasoning(elaborate)")
+    expect(out.lines.some((l) => l.includes("Drizzle"))).toBe(true)
+    expect(out.lines.some((l) => l.includes("re-scored confidence: HIGH"))).toBe(true)
+    expect(out.lines.some((l) => l.includes("preconditions"))).toBe(true)
+  })
+
+  it("accepts the brief at the envelope level too (briefData = the elaboration brief itself)", () => {
+    const out = formatBriefSummary("implement_elaborate", {
+      whyThisApproach: "tight loop wins on free-tier",
+      confidence: "MEDIUM",
+      preconditions: [],
+      whyNotAlternative: [],
+    })
+    expect(out.lines.some((l) => l.includes("tight loop wins"))).toBe(true)
+    expect(out.lines.some((l) => l.includes("re-scored confidence: MEDIUM"))).toBe(true)
+  })
+
+  it("falls back to the confidence line when no whyThisApproach is present", () => {
+    const out = formatBriefSummary("implement_elaborate", { confidence: "LOW", decision: "proceed" })
+    expect(out.lines).toHaveLength(1)
+    expect(out.lines[0]).toContain("confidence: LOW")
+  })
+})
+
 describe("formatBriefSummary — unknown / simple pipeline", () => {
   it("falls through to a generic confidence/decision line", () => {
     const out = formatBriefSummary("simple", { confidence: "HIGH", decision: "proceed" })
