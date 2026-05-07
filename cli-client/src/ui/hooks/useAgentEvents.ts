@@ -56,6 +56,18 @@ export interface AssistantMessageState {
   key: number
 }
 
+/** Phase 14 Stage 4: latest reasoning brief surfaced by a Flash call.
+ *  The renderer (`<ReasoningPeek>`) reads this via the hook and renders
+ *  pipeline-specific summary lines so the user sees the agent's thinking
+ *  inline instead of after the fact. `key` increments per emission so
+ *  duplicate briefs (e.g. cache hit + cache miss for same prompt) still
+ *  trigger a re-render. */
+export interface ReasoningBriefState {
+  kind: string
+  briefData: Record<string, unknown> | undefined
+  key: number
+}
+
 export interface AgentEventState {
   /** Past log lines, append-only — rendered via Ink <Static> for cheap scroll. */
   log: LogLine[]
@@ -71,9 +83,12 @@ export interface AgentEventState {
   /** Phase 12 Stage 6: latest assistant message, rendered via Typewriter
    *  in the live region of AgentStream. */
   assistantMessage: AssistantMessageState | null
+  /** Phase 14 Stage 4: latest reasoning brief, rendered as ReasoningPeek
+   *  in the live region above the spinner. */
+  reasoningBrief: ReasoningBriefState | null
 }
 
-const INITIAL: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null }
+const INITIAL: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null }
 
 let nextLogId = 1
 
@@ -162,6 +177,16 @@ export function reduceAgentEvent(prev: AgentEventState, event: AgentEvent): Agen
       return {
         ...prev,
         assistantMessage: { text: event.text, key: prevKey + 1 },
+      }
+    }
+    case "reasoning_brief": {
+      // Defensive: ignore briefs without a kind — the renderer keys off it
+      // to choose the summary shape and a missing kind would render blank.
+      if (typeof event.kind !== "string" || event.kind.length === 0) return prev
+      const prevKey = prev.reasoningBrief?.key ?? 0
+      return {
+        ...prev,
+        reasoningBrief: { kind: event.kind, briefData: event.briefData, key: prevKey + 1 },
       }
     }
     default:

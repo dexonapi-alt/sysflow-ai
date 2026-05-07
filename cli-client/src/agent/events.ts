@@ -57,6 +57,17 @@ export type AgentEvent =
   // instead of appearing instantly — feels like writing, not loading.
   // Cleared by `clear` when a new prompt arrives.
   | { type: "assistant_message"; text: string }
+  // ── Phase 14 Stage 4: reasoning brief surfacing ──
+  // The agent emits `reasoning_brief` whenever a Flash reasoning call
+  // returns a brief (preflight, on-error, on-completion, self-invoked
+  // decision, chunk plan/reflect). The Ink AgentStream renders a
+  // <ReasoningPeek> with the brief's most relevant 2-3 lines per
+  // pipeline kind, so the user can see WHAT the agent reasoned about
+  // instead of staring at "thinking…" until the result lands.
+  // `briefData` is the parsed reasoning envelope (loose-typed here
+  // because the schema lives server-side; the renderer reads only
+  // the fields it knows). Cleared by `clear`.
+  | { type: "reasoning_brief"; kind: string; briefData?: Record<string, unknown> }
 
 const emitter = new EventEmitter()
 emitter.setMaxListeners(20)
