@@ -8,6 +8,7 @@ import {
   FREE_TIER_CHUNK_CAP_TIGHTEN,
   FREE_TIER_CHUNK_FILES_TIGHTEN,
   shouldRunPreflightElaboration,
+  shouldRunDivergenceSecondLook,
 } from "../free-tier-policy.js"
 
 describe("isFreeTierModel", () => {
@@ -148,5 +149,60 @@ describe("shouldRunPreflightElaboration", () => {
         }
       }
     }
+  })
+})
+
+// ─── Phase 16 Stage 4: shouldRunDivergenceSecondLook gate matrix ───
+
+describe("shouldRunDivergenceSecondLook", () => {
+  // Default: free-tier + score in band + flag on → fire.
+  const baseHit = {
+    model: "openrouter-auto",
+    firstVerdictScore: 50,
+    flagEnabled: true,
+  }
+
+  it("fires on the canonical free-tier + borderline-50 + flag-on case", () => {
+    expect(shouldRunDivergenceSecondLook(baseHit)).toBe(true)
+  })
+
+  it("fires at the band edges (40 and 60 inclusive)", () => {
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: FREE_TIER_DIVERGENCE_CHAIN_LOWER })).toBe(true)
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: FREE_TIER_DIVERGENCE_CHAIN_UPPER })).toBe(true)
+  })
+
+  it("does NOT fire on a clear off-course score (≤39 — already decisive)", () => {
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: FREE_TIER_DIVERGENCE_CHAIN_LOWER - 1 })).toBe(false)
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: 0 })).toBe(false)
+  })
+
+  it("does NOT fire on a clear on-track score (≥61 — no need to second-guess)", () => {
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: FREE_TIER_DIVERGENCE_CHAIN_UPPER + 1 })).toBe(false)
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: 100 })).toBe(false)
+  })
+
+  it("does NOT fire when the flag is off (off-switch wins)", () => {
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, flagEnabled: false })).toBe(false)
+  })
+
+  it("does NOT fire on a paid model", () => {
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, model: "gpt-4o" })).toBe(false)
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, model: "claude-3-5-sonnet" })).toBe(false)
+  })
+
+  it("does NOT fire on null / undefined / non-finite inputs (defensive)", () => {
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, model: null })).toBe(false)
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, model: undefined })).toBe(false)
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: null })).toBe(false)
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: undefined })).toBe(false)
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: NaN })).toBe(false)
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: Infinity })).toBe(false)
+  })
+
+  it("score boundary matrix walks the band edges (39, 40, 60, 61)", () => {
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: 39 })).toBe(false)
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: 40 })).toBe(true)
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: 60 })).toBe(true)
+    expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: 61 })).toBe(false)
   })
 })

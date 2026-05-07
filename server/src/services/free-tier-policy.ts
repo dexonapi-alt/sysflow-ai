@@ -102,3 +102,36 @@ export function shouldRunPreflightElaboration(input: PreflightElaborationGateInp
   if (input.preflightConfidence !== "MEDIUM" && input.preflightConfidence !== "LOW") return false
   return true
 }
+
+/**
+ * Phase 16 Stage 4: should the chained divergence second-look fire after
+ * a borderline first verdict? All four conditions must hold:
+ *
+ *   1. The flag `reasoning.chained.divergence_second_look_enabled` is on.
+ *   2. The run's model is free-tier.
+ *   3. The first verdict's score lands in the borderline band
+ *      [FREE_TIER_DIVERGENCE_CHAIN_LOWER, FREE_TIER_DIVERGENCE_CHAIN_UPPER]
+ *      (currently 40-60). Clear off-course (≤ lower) is already
+ *      decisive; clear on-track (≥ upper) doesn't need second-guessing.
+ *   4. The first verdict's score is a valid number.
+ *
+ * Pure helper — testable without invoking `runReasoning`.
+ */
+export interface DivergenceSecondLookGateInput {
+  /** Run's model identifier. */
+  model: string | null | undefined
+  /** First divergence verdict's score (0-100). */
+  firstVerdictScore: number | null | undefined
+  /** Resolved value of `reasoning.chained.divergence_second_look_enabled`. */
+  flagEnabled: boolean
+}
+
+export function shouldRunDivergenceSecondLook(input: DivergenceSecondLookGateInput): boolean {
+  if (!input.flagEnabled) return false
+  if (!isFreeTierModel(input.model)) return false
+  const score = input.firstVerdictScore
+  if (typeof score !== "number" || !Number.isFinite(score)) return false
+  if (score < FREE_TIER_DIVERGENCE_CHAIN_LOWER) return false
+  if (score > FREE_TIER_DIVERGENCE_CHAIN_UPPER) return false
+  return true
+}

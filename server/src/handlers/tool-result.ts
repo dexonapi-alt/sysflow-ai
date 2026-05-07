@@ -35,6 +35,7 @@ import {
 import type { ChunkPlanBrief, ChunkReflectionBrief } from "../reasoning/reasoning-schema.js"
 import { getFlag } from "../services/flags.js"
 import { detectDivergence, pickDivergenceAnchor, type DetectorInput } from "../services/divergence-detector.js"
+import { shouldRunDivergenceSecondLook } from "../services/free-tier-policy.js"
 import { recordSignals as recordConfidenceSignals, clearConfidence, getConfidence, getConfidenceState, getThresholdState } from "../services/confidence-tracker.js"
 import { runVerificationGate, gateSignals } from "../services/verification-gate.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
@@ -615,7 +616,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
           const underCap = lastChecked === -2 || (chunkIdx - lastChecked) <= MAX_LLM_DIVERGENCE_PER_RUN * 2
           if ((heuristicFired || cadenceDue) && underCap) {
             try {
-              const verdict = await runReasoning({
+              const firstVerdict = await runReasoning({
                 trigger: "divergence_check",
                 userMessage: anchorPrompt, // Phase 15 Stage 5: anchor = pickDivergenceAnchor result
                 model: run.model,
@@ -630,8 +631,62 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
                 },
               })
               lastLlmDivergenceCheckedChunk.set(body.runId, chunkIdx)
+
+              // Phase 16 Stage 4: chained divergence second-look.
+              // When the first verdict's score lands in the borderline band
+              // (40-60) on a free-tier model, fire a SECOND divergence call
+              // with the first verdict carried in its context. The second
+              // verdict replaces the first — the deeper look is what we
+              // trust. Decisive scores (≤40 off-course, ≥60 on-track)
+              // don't need a second-guess; the band is exactly where the
+              // confidence is genuinely uncertain.
+              let verdict = firstVerdict
+              const firstDvb = firstVerdict?.divergenceVerdictBrief
+              if (
+                firstDvb
+                && shouldRunDivergenceSecondLook({
+                  model: run.model as string,
+                  firstVerdictScore: firstDvb.score,
+                  flagEnabled: ((): boolean => {
+                    try { return getFlag<boolean>("reasoning.chained.divergence_second_look_enabled", run.sysbasePath as string | null | undefined) }
+                    catch { return true }
+                  })(),
+                })
+              ) {
+                try {
+                  const secondVerdict = await runReasoning({
+                    trigger: "divergence_check",
+                    userMessage: anchorPrompt,
+                    model: run.model,
+                    cwd: run.cwd as string | undefined,
+                    sysbasePath: run.sysbasePath as string | null | undefined,
+                    context: {
+                      originalUserPrompt: anchorPrompt,
+                      filesModified: input.filesModified.slice(0, 30),
+                      chunkCount: input.chunkHistory.length,
+                      lastReflection: chunkReflectionBrief,
+                      recentHeuristicSignals: heuristicSignals.slice(0, 4).map((s) => ({ category: s.category, detail: s.detail })),
+                      // Carry the first verdict so the model knows this is a SECOND look.
+                      priorVerdict: {
+                        onTrack: firstDvb.onTrack,
+                        score: firstDvb.score,
+                        mismatches: firstDvb.mismatches.slice(0, 6),
+                        suggestion: firstDvb.suggestion,
+                      },
+                      secondLookHint: "The first divergence call returned a borderline score. Re-check carefully — confirm or correct.",
+                    },
+                  })
+                  if (secondVerdict?.divergenceVerdictBrief) {
+                    verdict = secondVerdict
+                    console.log(`[awareness] divergence second-look: first score=${firstDvb.score} → second score=${secondVerdict.divergenceVerdictBrief.score}`)
+                  }
+                } catch (err) {
+                  console.warn(`[awareness] divergence second-look failed:`, (err as Error).message)
+                }
+              }
+
               const dvb = verdict?.divergenceVerdictBrief
-              if (dvb && dvb.onTrack === false && dvb.mismatches.length > 0) {
+              if (verdict && dvb && dvb.onTrack === false && dvb.mismatches.length > 0) {
                 llmSignals.push({
                   category: "llm_off_track",
                   detail: `LLM verdict (${verdict.confidence}): ${dvb.mismatches.slice(0, 3).join("; ")}`,
