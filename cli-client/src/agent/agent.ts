@@ -68,10 +68,11 @@ async function surfaceToolCall<T>(
   id: string,
   tool: string,
   label: string,
+  args: Record<string, unknown> | undefined,
   runFn: () => Promise<T>,
 ): Promise<T> {
   if (!isInkActive()) return runFn()
-  emitAgent({ type: "tool_start", id, tool, label })
+  emitAgent({ type: "tool_start", id, tool, label, args })
   try {
     const out = await runFn()
     emitAgent({ type: "tool_end", id, ok: true })
@@ -98,7 +99,10 @@ async function surfaceToolBatch<T>(
   const ids = toolCalls.map((tc) => {
     const id = nextToolEventId()
     const label = formatToolLabel(tc.tool, tc.args) ?? tc.tool
-    emitAgent({ type: "tool_start", id, tool: tc.tool, label })
+    // Phase 14 Stage 2: include args so the new ActionCard can derive
+    // its own Verb(target) header on the cli side. Existing label still
+    // emitted for back-compat with consumers that already use it.
+    emitAgent({ type: "tool_start", id, tool: tc.tool, label, args: tc.args })
     return id
   })
   try {
@@ -1222,7 +1226,8 @@ async function handleNeedsTool(
     // existing console.log lines.
     const toolEventId = nextToolEventId()
     const cardLabel = formatToolLabel(currentTool, args ?? {}) ?? currentTool
-    response = await surfaceToolCall(toolEventId, currentTool, cardLabel, () =>
+    // Phase 14 Stage 2: pass args so ActionCard can derive Verb(target).
+    response = await surfaceToolCall(toolEventId, currentTool, cardLabel, args ?? {}, () =>
       executeTool(response as never, (label) => {
         spinner.text = colors.muted(label)
       }),

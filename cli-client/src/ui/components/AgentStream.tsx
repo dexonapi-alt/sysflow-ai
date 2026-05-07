@@ -2,7 +2,7 @@ import * as React from "react"
 import { Box, Static, Text } from "ink"
 import { useAgentEvents } from "../hooks/useAgentEvents.js"
 import { Spinner } from "./Spinner.js"
-import { ToolCard } from "./ToolCard.js"
+import { ActionCard } from "./ActionCard.js"
 import { Typewriter } from "../animation/primitives/index.js"
 import { palette } from "../theme.js"
 
@@ -14,9 +14,10 @@ import { palette } from "../theme.js"
  * trap. The live region (current spinner + active tool cards) lives in a
  * regular <Box> below and updates per event.
  *
- * Phase 12 Stage 4: tool calls are now rendered as living <ToolCard>
- * components. Settled cards (success / error) join the static region so
- * their internal Shimmer / Pulse animations stop ticking — only the
+ * Phase 12 Stage 4 introduced living tool cards; Phase 14 Stage 2 replaced
+ * the bordered <ToolCard> with the cleaner <ActionCard> (Claude-style
+ * `● Verb(target)` single-line render, no surrounding box). Settled cards
+ * still join the <Static> region so their breath ticks stop — only the
  * actively-running card and the spinner re-render each frame.
  */
 export function AgentStream(): React.ReactElement {
@@ -41,13 +42,13 @@ export function AgentStream(): React.ReactElement {
       <Static items={settledCards}>
         {(card) => (
           <Box key={card.id} marginTop={0}>
-            <ToolCard card={card} />
+            <ActionCard card={card} />
           </Box>
         )}
       </Static>
       {runningCards.map((card) => (
         <Box key={card.id} marginTop={0}>
-          <ToolCard card={card} />
+          <ActionCard card={card} />
         </Box>
       ))}
       {/*

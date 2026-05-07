@@ -34,7 +34,7 @@ export type AgentEvent =
   // counter) and treated as opaque by the renderer.
   // `label` is the human-readable formatToolLabel output, computed at
   // start time so the card has the right title before the tool resolves.
-  | { type: "tool_start"; id: string; tool: string; label: string }
+  | { type: "tool_start"; id: string; tool: string; label: string; args?: Record<string, unknown> }
   | { type: "tool_end"; id: string; ok: boolean; error?: string }
   // ── Phase 12 Stage 5: Header zone state events ──
   // The agent emits these whenever the server response carries fresh
