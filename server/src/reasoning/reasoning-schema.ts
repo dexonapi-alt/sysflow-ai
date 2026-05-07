@@ -24,6 +24,13 @@ export const triggerSchema = z.enum([
   // OR every 2nd chunk. Gated by `awareness.enabled` (default false in
   // Stages 1-3, true from Stage 4). ~300 tok.
   "divergence_check",
+  // Phase 16 Stage 3: chained second-stage Flash that fires AFTER the
+  // preflight `implement` brief on free-tier when confidence < HIGH and
+  // task complexity ≥ medium. Re-examines the chosen approach with fresh
+  // attention to "why this stack vs alternatives, what preconditions are
+  // assumed, re-scored confidence". Output feeds the main model's prompt
+  // alongside the original implement brief.
+  "implement_elaborate",
 ])
 export type ReasoningTrigger = z.infer<typeof triggerSchema>
 

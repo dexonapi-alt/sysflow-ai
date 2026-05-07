@@ -439,4 +439,19 @@ describe("reasoning-schema", () => {
     })
     expect(() => assertEnvelopeShape(env)).not.toThrow()
   })
+
+  // ─── Phase 16 Stage 3: implement_elaborate trigger + pipeline routing ───
+
+  it("triggerSchema accepts implement_elaborate", async () => {
+    const { triggerSchema } = await import("../reasoning-schema.js")
+    expect(triggerSchema.safeParse("implement_elaborate").success).toBe(true)
+  })
+
+  it("getPipelineSystemPrompt returns the elaborate prompt for the implement_elaborate kind", async () => {
+    const { getPipelineSystemPrompt } = await import("../pipelines/index.js")
+    const prompt = getPipelineSystemPrompt("implement_elaborate")
+    expect(prompt).toContain("IMPLEMENT-ELABORATE")
+    expect(prompt).toContain("whyThisApproach")
+    expect(prompt).toContain("preconditions")
+  })
 })

@@ -20,6 +20,8 @@ import { estimateTokens, shouldBlockOnTokens } from "../services/context-budget.
 import { runReasoning } from "../reasoning/task-reasoner.js"
 import { recommendScaffold, resolveCommand, getInstallCommand } from "../scaffold/index.js"
 import { recordImplementSummary, recordOriginalIntent, recordDecision, recordBugPattern, applyMemoryFeedback } from "../memory-store/index.js"
+import { runReasoningChain } from "../reasoning/chain.js"
+import { shouldRunPreflightElaboration } from "../services/free-tier-policy.js"
 import { recordChunkStart } from "../services/chunk-state.js"
 import type { ChunkPlanBrief } from "../reasoning/reasoning-schema.js"
 import { getFlag } from "../services/flags.js"
@@ -308,6 +310,66 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     console.warn(`[reasoning] preflight failed:`, (err as Error).message)
   }
 
+  // ─── Phase 16 Stage 3: chained preflight elaboration (free-tier only) ───
+  // When the run uses a free-tier model AND the preflight returned
+  // implement with confidence < HIGH AND the task complexity is medium
+  // or complex, fire a second-stage `implement_elaborate` Flash. The
+  // gate is computed pure-function-style in free-tier-policy.ts; here we
+  // just consult it. Output is plumbed into the main model's prompt
+  // alongside the original implement brief — the model sees both the
+  // surface brief AND the elaboration's "whyThisApproach / preconditions"
+  // reasoning. Best-effort: a chain failure leaves reasoningElaborationBrief
+  // null and the run continues with the preflight brief alone (today's
+  // behaviour).
+  let reasoningElaborationBrief: unknown = null
+  const briefAsEnv = reasoningBrief as { pipeline?: string; confidence?: "HIGH" | "MEDIUM" | "LOW"; decision?: string } | null
+  if (
+    briefAsEnv
+    && briefAsEnv.pipeline === "implement"
+    && briefAsEnv.decision === "proceed"
+    && shouldRunPreflightElaboration({
+      model: body.model,
+      complexity: taskComplexity.complexity,
+      preflightConfidence: briefAsEnv.confidence ?? null,
+      flagEnabled: ((): boolean => {
+        try { return getFlag<boolean>("reasoning.chained.preflight_elaboration_enabled", body.sysbasePath) }
+        catch { return true }
+      })(),
+    })
+  ) {
+    try {
+      const chain = await runReasoningChain(
+        {
+          trigger: "preflight",
+          userMessage: body.content,
+          model: body.model,
+          cwd: body.cwd,
+          sysbasePath: body.sysbasePath,
+        },
+        [
+          {
+            name: "implement_elaborate",
+            buildPayload: (_prior, original) => ({
+              ...original,
+              trigger: "implement_elaborate" as const,
+              context: {
+                preflightBrief: reasoningBrief,
+                taskComplexity: taskComplexity.complexity,
+              },
+            }),
+          },
+        ],
+      )
+      if (chain.finalBrief && chain.finalBrief.pipeline === "implement_elaborate") {
+        reasoningElaborationBrief = chain.finalBrief
+        const elabBrief = (chain.finalBrief as { implementElaborationBrief?: { confidence?: string } }).implementElaborationBrief
+        console.log(`[reasoning] preflight elaboration: confidence=${elabBrief?.confidence ?? "?"} (${chain.stages.length} stages)`)
+      }
+    } catch (err) {
+      console.warn(`[reasoning] preflight elaboration failed:`, (err as Error).message)
+    }
+  }
+
   // ─── Phase 10: chunked reasoning loop — first chunk-plan call.
   //
   // After preflight, when the implement intent is in play AND the chunked
@@ -426,6 +488,7 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     cwd: body.cwd,
     planMode: body.planMode === true,
     reasoningBrief,
+    reasoningElaborationBrief,
     chunkPlanBrief,
     userId: body.userId || null,
     chatId: body.chatId || null

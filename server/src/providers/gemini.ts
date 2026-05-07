@@ -143,6 +143,10 @@ export class GeminiProvider extends BaseProvider {
       // an import cycle into the reasoning module; cast here so the prompt
       // section receives the typed shape it expects.
       reasoningBrief: payload.reasoningBrief as never,
+      // Phase 16 Stage 3: chained-elaboration brief. Same untyped-on-payload
+      // pattern as reasoningBrief; the prompt section renders it as a
+      // DEEPER REASONING sub-block when present.
+      reasoningElaborationBrief: payload.reasoningElaborationBrief as never,
       learnedMemoryLines,
       learnedMemorySummary,
     })

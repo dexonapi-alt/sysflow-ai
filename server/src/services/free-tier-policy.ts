@@ -68,3 +68,37 @@ export function isFreeTierModel(model: string | null | undefined): boolean {
   if (/\b(?:llama|mistral)\b/.test(lower)) return true
   return false
 }
+
+/**
+ * Phase 16 Stage 3: should the chained preflight elaboration fire for
+ * this run? All four conditions must hold:
+ *
+ *   1. The run's model is free-tier (otherwise the preflight Flash is
+ *      already strong enough; no need to chain).
+ *   2. Task complexity is medium or complex (simple tasks aren't worth
+ *      a second Flash — over-thinking a typo fix wastes the budget).
+ *   3. Preflight confidence was MEDIUM or LOW (HIGH means the preflight
+ *      is already certain enough; chaining adds no signal).
+ *   4. The flag `reasoning.chained.preflight_elaboration_enabled` is on.
+ *
+ * Pure helper — exported so the gate matrix is unit-testable without
+ * invoking `runReasoning`.
+ */
+export interface PreflightElaborationGateInput {
+  /** Run's model identifier (e.g. `"openrouter-auto"`, `"gpt-4o"`). */
+  model: string | null | undefined
+  /** Output of `analyzeTaskComplexity(prompt).complexity`. */
+  complexity: "simple" | "medium" | "complex" | null | undefined
+  /** Preflight envelope's confidence ("HIGH" / "MEDIUM" / "LOW"). */
+  preflightConfidence: "HIGH" | "MEDIUM" | "LOW" | null | undefined
+  /** Resolved value of `reasoning.chained.preflight_elaboration_enabled`. */
+  flagEnabled: boolean
+}
+
+export function shouldRunPreflightElaboration(input: PreflightElaborationGateInput): boolean {
+  if (!input.flagEnabled) return false
+  if (!isFreeTierModel(input.model)) return false
+  if (input.complexity !== "medium" && input.complexity !== "complex") return false
+  if (input.preflightConfidence !== "MEDIUM" && input.preflightConfidence !== "LOW") return false
+  return true
+}

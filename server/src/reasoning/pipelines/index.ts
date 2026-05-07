@@ -4,6 +4,7 @@
  */
 
 import { IMPLEMENT_SYSTEM_PROMPT } from "./implement-pipeline.js"
+import { IMPLEMENT_ELABORATE_SYSTEM_PROMPT } from "./implement-elaborate-pipeline.js"
 import { BUG_SYSTEM_PROMPT } from "./bug-pipeline.js"
 import { SUMMARY_SYSTEM_PROMPT } from "./summary-pipeline.js"
 import { DECISION_SYSTEM_PROMPT } from "./decision-pipeline.js"
@@ -11,16 +12,17 @@ import { CHUNK_PLAN_SYSTEM_PROMPT } from "./chunk-plan-pipeline.js"
 import { CHUNK_REFLECT_SYSTEM_PROMPT } from "./chunk-reflector-pipeline.js"
 import { DIVERGENCE_SYSTEM_PROMPT } from "./divergence-pipeline.js"
 
-export type PipelineKind = "implement" | "bug" | "summary" | "decision" | "chunk_plan" | "chunk_reflect" | "divergence"
+export type PipelineKind = "implement" | "implement_elaborate" | "bug" | "summary" | "decision" | "chunk_plan" | "chunk_reflect" | "divergence"
 
 export function getPipelineSystemPrompt(kind: PipelineKind): string {
   switch (kind) {
-    case "implement":     return IMPLEMENT_SYSTEM_PROMPT
-    case "bug":           return BUG_SYSTEM_PROMPT
-    case "summary":       return SUMMARY_SYSTEM_PROMPT
-    case "decision":      return DECISION_SYSTEM_PROMPT
-    case "chunk_plan":    return CHUNK_PLAN_SYSTEM_PROMPT
-    case "chunk_reflect": return CHUNK_REFLECT_SYSTEM_PROMPT
-    case "divergence":    return DIVERGENCE_SYSTEM_PROMPT
+    case "implement":           return IMPLEMENT_SYSTEM_PROMPT
+    case "implement_elaborate": return IMPLEMENT_ELABORATE_SYSTEM_PROMPT
+    case "bug":                 return BUG_SYSTEM_PROMPT
+    case "summary":             return SUMMARY_SYSTEM_PROMPT
+    case "decision":            return DECISION_SYSTEM_PROMPT
+    case "chunk_plan":          return CHUNK_PLAN_SYSTEM_PROMPT
+    case "chunk_reflect":       return CHUNK_REFLECT_SYSTEM_PROMPT
+    case "divergence":          return DIVERGENCE_SYSTEM_PROMPT
   }
 }
