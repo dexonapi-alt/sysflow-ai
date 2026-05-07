@@ -236,7 +236,7 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
       if (briefResult.pipeline === "implement" && briefResult.implementBrief) {
         recordImplementSummary(
           body.cwd,
-          { implementBrief: briefResult.implementBrief },
+          { implementBrief: briefResult.implementBrief, confidence: briefResult.confidence },
           { runId, trigger: "preflight" },
         ).catch(() => { /* best-effort */ })
       } else if (briefResult.pipeline === "bug" && briefResult.bugBrief) {
@@ -256,6 +256,7 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
           summary,
           bb.proposedFix?.filesAffected,
           { runId, trigger: "preflight" },
+          { confidence: briefResult.confidence },
         ).catch(() => { /* best-effort */ })
       } else if (briefResult.pipeline === "decision" && briefResult.decisionBrief) {
         // Preflight rarely classifies as `decision` (the routing prefers

@@ -90,6 +90,128 @@ describe("recorder", () => {
     expect(r?.sourceRef.filePaths).toEqual(["src/config.ts"])
   })
 
+  // ─── Phase 15 Stage 2: LOW-confidence skip parity ───
+
+  it("recordBugPattern skips when options.confidence === 'LOW' (parity with recordDecision)", async () => {
+    const r = await recordBugPattern(
+      cwd,
+      "Symptom: flaky test\nBoundary: timing",
+      undefined,
+      { runId: "r1", trigger: "on_error" },
+      { confidence: "LOW" },
+    )
+    expect(r).toBeNull()
+    const entries = await loadMemoryEntries(cwd)
+    expect(entries.length).toBe(0)
+  })
+
+  it("recordBugPattern records when options.confidence is HIGH or MEDIUM", async () => {
+    const r1 = await recordBugPattern(
+      cwd,
+      "Symptom: high-confidence diagnosis",
+      undefined,
+      { runId: "r1", trigger: "on_error" },
+      { confidence: "HIGH" },
+    )
+    expect(r1).not.toBeNull()
+
+    const r2 = await recordBugPattern(
+      cwd,
+      "Symptom: medium-confidence diagnosis",
+      undefined,
+      { runId: "r1", trigger: "on_error" },
+      { confidence: "MEDIUM" },
+    )
+    expect(r2).not.toBeNull()
+  })
+
+  it("recordBugPattern records unconditionally when no options bag is passed (back-compat)", async () => {
+    // Existing callers that don't yet pass `confidence` keep their pre-Stage-2
+    // behaviour: record whatever they're given.
+    const r = await recordBugPattern(
+      cwd,
+      "Legacy caller content",
+      undefined,
+      { runId: "r1" },
+    )
+    expect(r).not.toBeNull()
+  })
+
+  it("recordImplementSummary skips when brief.confidence === 'LOW' (recorder-level guard)", async () => {
+    const r = await recordImplementSummary(
+      cwd,
+      {
+        implementBrief: {
+          intent: "scaffold a thing",
+          recommendedStack: { language: "TypeScript", frameworks: ["Express"], libraries: ["zod"], rationale: "fast" },
+        },
+        confidence: "LOW",
+      },
+      { runId: "r1", trigger: "preflight" },
+    )
+    expect(r).toBeNull()
+    const entries = await loadMemoryEntries(cwd)
+    expect(entries.length).toBe(0)
+  })
+
+  it("recordImplementSummary records when brief.confidence is HIGH or undefined (back-compat)", async () => {
+    const r1 = await recordImplementSummary(
+      cwd,
+      {
+        implementBrief: {
+          intent: "scaffold a thing",
+          recommendedStack: { language: "TypeScript", frameworks: ["Express"], libraries: ["zod"], rationale: "fast" },
+        },
+        confidence: "HIGH",
+      },
+      { runId: "r1", trigger: "preflight" },
+    )
+    expect(r1).not.toBeNull()
+
+    // Back-compat: omit `confidence` entirely; existing callers keep working.
+    const r2 = await recordImplementSummary(
+      cwd,
+      {
+        implementBrief: {
+          intent: "another thing",
+          recommendedStack: { language: "Python", frameworks: ["FastAPI"], libraries: ["pydantic"], rationale: "typing" },
+        },
+      },
+      { runId: "r1", trigger: "preflight" },
+    )
+    expect(r2).not.toBeNull()
+  })
+
+  // ─── Phase 15 Stage 2: per-run dedup verification ───
+
+  it("recording the same bug pattern twice in a run upserts via SHA256, never duplicates", async () => {
+    // Stage 1's wiring records a bug pattern from the on-error reasoner's
+    // brief. If a tool errors twice with the same diagnosis (which can
+    // happen on free models retrying the same approach), the recorder
+    // must dedup by content hash so memory doesn't grow noise.
+    const summary = "Symptom: same error\nBoundary: same boundary\nFix: same fix"
+    const r1 = await recordBugPattern(cwd, summary, undefined, { runId: "r1", trigger: "on_error" })
+    const r2 = await recordBugPattern(cwd, summary, undefined, { runId: "r1", trigger: "on_error" })
+    expect(r1?.id).toBe(r2?.id)
+    const entries = await loadMemoryEntries(cwd)
+    expect(entries.filter((e) => e.kind === "bug_pattern").length).toBe(1)
+  })
+
+  it("recording the same implement summary twice in a run upserts via SHA256, never duplicates", async () => {
+    const brief = {
+      implementBrief: {
+        intent: "build a todo list",
+        recommendedStack: { language: "TypeScript", frameworks: ["Vite"], libraries: ["zustand"], rationale: "simple" },
+      },
+      confidence: "HIGH",
+    }
+    const r1 = await recordImplementSummary(cwd, brief, { runId: "r1", trigger: "preflight" })
+    const r2 = await recordImplementSummary(cwd, brief, { runId: "r1", trigger: "preflight" })
+    expect(r1?.id).toBe(r2?.id)
+    const entries = await loadMemoryEntries(cwd)
+    expect(entries.filter((e) => e.kind === "implement").length).toBe(1)
+  })
+
   it("dedup: recording the same content twice updates in place", async () => {
     const r1 = await recordUserCorrection(cwd, "we use pnpm")
     const r2 = await recordUserCorrection(cwd, "we use pnpm")
