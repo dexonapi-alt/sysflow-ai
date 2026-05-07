@@ -21,7 +21,7 @@ import { runReasoning } from "../reasoning/task-reasoner.js"
 import { recommendScaffold, resolveCommand, getInstallCommand } from "../scaffold/index.js"
 import { recordImplementSummary, recordOriginalIntent, recordDecision, recordBugPattern, applyMemoryFeedback } from "../memory-store/index.js"
 import { runReasoningChain } from "../reasoning/chain.js"
-import { shouldRunPreflightElaboration } from "../services/free-tier-policy.js"
+import { shouldRunPreflightElaboration, resolveMaxFilesPerChunk } from "../services/free-tier-policy.js"
 import { recordChunkStart } from "../services/chunk-state.js"
 import type { ChunkPlanBrief } from "../reasoning/reasoning-schema.js"
 import { getFlag } from "../services/flags.js"
@@ -403,10 +403,18 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
       })
       if (planResult?.chunkPlanBrief) {
         chunkPlanBrief = planResult.chunkPlanBrief
+        // Phase 16 Stage 5: tighten the planner's file list to the
+        // free-tier cap. Schema allows up to 5; free-tier drops to 4 so
+        // the free model has fewer balls in the air per chunk. Paid-tier
+        // passes through at 5 (slice is a no-op).
+        const maxFiles = resolveMaxFilesPerChunk(body.model)
+        if (chunkPlanBrief.files.length > maxFiles) {
+          chunkPlanBrief.files = chunkPlanBrief.files.slice(0, maxFiles)
+        }
         // Initialise executedFiles with the planner's intent. Stage 4 will
         // refine this once the main model actually executes the chunk.
         recordChunkStart(runId, chunkPlanBrief, [...chunkPlanBrief.files])
-        console.log(`[chunked-loop] chunk 0 planned: ${chunkPlanBrief.nextAction} (${chunkPlanBrief.files.length} files)`)
+        console.log(`[chunked-loop] chunk 0 planned: ${chunkPlanBrief.nextAction} (${chunkPlanBrief.files.length} files, cap=${maxFiles})`)
       }
     }
   } catch (err) {

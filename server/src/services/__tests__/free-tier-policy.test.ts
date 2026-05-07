@@ -9,6 +9,9 @@ import {
   FREE_TIER_CHUNK_FILES_TIGHTEN,
   shouldRunPreflightElaboration,
   shouldRunDivergenceSecondLook,
+  resolveChunkCaps,
+  resolveMaxChunksPerRun,
+  resolveMaxFilesPerChunk,
 } from "../free-tier-policy.js"
 
 describe("isFreeTierModel", () => {
@@ -204,5 +207,85 @@ describe("shouldRunDivergenceSecondLook", () => {
     expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: 40 })).toBe(true)
     expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: 60 })).toBe(true)
     expect(shouldRunDivergenceSecondLook({ ...baseHit, firstVerdictScore: 61 })).toBe(false)
+  })
+})
+
+// ─── Phase 16 Stage 5: chunk-cap resolution ───
+
+describe("resolveMaxFilesPerChunk", () => {
+  it("returns the schema cap (5) for paid models", () => {
+    expect(resolveMaxFilesPerChunk("gpt-4o")).toBe(5)
+    expect(resolveMaxFilesPerChunk("claude-3-5-sonnet")).toBe(5)
+  })
+
+  it("returns the tightened cap for free-tier models", () => {
+    expect(resolveMaxFilesPerChunk("openrouter-auto")).toBe(FREE_TIER_CHUNK_FILES_TIGHTEN)
+    expect(resolveMaxFilesPerChunk("meta-llama/llama-3.1-405b")).toBe(FREE_TIER_CHUNK_FILES_TIGHTEN)
+    expect(resolveMaxFilesPerChunk("mistralai/mistral-large")).toBe(FREE_TIER_CHUNK_FILES_TIGHTEN)
+  })
+
+  it("returns the schema cap (5) on null / undefined / non-string input", () => {
+    expect(resolveMaxFilesPerChunk(null)).toBe(5)
+    expect(resolveMaxFilesPerChunk(undefined)).toBe(5)
+    expect(resolveMaxFilesPerChunk("")).toBe(5)
+  })
+
+  it("the tightened cap is below the schema cap (otherwise it's a no-op)", () => {
+    expect(FREE_TIER_CHUNK_FILES_TIGHTEN).toBeLessThan(5)
+  })
+})
+
+describe("resolveMaxChunksPerRun", () => {
+  it("returns the base value unchanged for paid models", () => {
+    expect(resolveMaxChunksPerRun("gpt-4o", 12)).toBe(12)
+    expect(resolveMaxChunksPerRun("claude-3-5-sonnet", 20)).toBe(20)
+    expect(resolveMaxChunksPerRun(null, 12)).toBe(12)
+  })
+
+  it("multiplies by FREE_TIER_CHUNK_CAP_TIGHTEN for free-tier models (default 0.7)", () => {
+    // 12 × 0.7 = 8.4 → floor = 8
+    expect(resolveMaxChunksPerRun("openrouter-auto", 12)).toBe(Math.floor(12 * FREE_TIER_CHUNK_CAP_TIGHTEN))
+    // 20 × 0.7 = 14 → floor = 14
+    expect(resolveMaxChunksPerRun("openrouter-auto", 20)).toBe(Math.floor(20 * FREE_TIER_CHUNK_CAP_TIGHTEN))
+  })
+
+  it("never returns less than 1 for free-tier (small base values floor to 1)", () => {
+    expect(resolveMaxChunksPerRun("openrouter-auto", 1)).toBe(1) // 1 × 0.7 = 0.7 → floor 0 → max 1
+    expect(resolveMaxChunksPerRun("openrouter-auto", 2)).toBe(1) // 2 × 0.7 = 1.4 → floor 1
+  })
+
+  it("coerces non-finite / non-positive base to 1", () => {
+    expect(resolveMaxChunksPerRun("gpt-4o", NaN)).toBe(1)
+    expect(resolveMaxChunksPerRun("gpt-4o", Infinity)).toBe(1)
+    expect(resolveMaxChunksPerRun("gpt-4o", 0)).toBe(1)
+    expect(resolveMaxChunksPerRun("gpt-4o", -5)).toBe(1)
+  })
+
+  it("floors fractional bases (12.7 → 12)", () => {
+    expect(resolveMaxChunksPerRun("gpt-4o", 12.7)).toBe(12)
+  })
+})
+
+describe("resolveChunkCaps — combined helper", () => {
+  it("returns both caps in one call for paid", () => {
+    const caps = resolveChunkCaps("gpt-4o", 12)
+    expect(caps.maxChunks).toBe(12)
+    expect(caps.maxFilesPerChunk).toBe(5)
+  })
+
+  it("returns both caps in one call for free-tier", () => {
+    const caps = resolveChunkCaps("openrouter-auto", 12)
+    expect(caps.maxChunks).toBe(Math.floor(12 * FREE_TIER_CHUNK_CAP_TIGHTEN))
+    expect(caps.maxFilesPerChunk).toBe(FREE_TIER_CHUNK_FILES_TIGHTEN)
+  })
+
+  it("matches the individual helpers' outputs", () => {
+    for (const model of ["gpt-4o", "openrouter-auto", "mistralai/mistral-large", null]) {
+      for (const base of [1, 5, 12, 20]) {
+        const caps = resolveChunkCaps(model, base)
+        expect(caps.maxChunks).toBe(resolveMaxChunksPerRun(model, base))
+        expect(caps.maxFilesPerChunk).toBe(resolveMaxFilesPerChunk(model))
+      }
+    }
   })
 })

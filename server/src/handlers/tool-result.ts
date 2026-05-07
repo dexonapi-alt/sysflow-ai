@@ -35,7 +35,7 @@ import {
 import type { ChunkPlanBrief, ChunkReflectionBrief } from "../reasoning/reasoning-schema.js"
 import { getFlag } from "../services/flags.js"
 import { detectDivergence, pickDivergenceAnchor, type DetectorInput } from "../services/divergence-detector.js"
-import { shouldRunDivergenceSecondLook } from "../services/free-tier-policy.js"
+import { shouldRunDivergenceSecondLook, resolveMaxChunksPerRun, resolveMaxFilesPerChunk } from "../services/free-tier-policy.js"
 import { recordSignals as recordConfidenceSignals, clearConfidence, getConfidence, getConfidenceState, getThresholdState } from "../services/confidence-tracker.js"
 import { runVerificationGate, gateSignals } from "../services/verification-gate.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
@@ -769,10 +769,14 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
         return resp
       }
 
-      // Hard cap: prevent runaway loops.
-      const maxChunks = getFlag<number>("reasoning.max_chunks_per_run", run.sysbasePath as string | null | undefined)
+      // Hard cap: prevent runaway loops. Phase 16 Stage 5: free-tier
+      // models get a tightened cap (default 0.7× = 12 → 8 chunks) so a
+      // free model can't overshoot its affordable budget. Paid models
+      // keep the configured `reasoning.max_chunks_per_run` value.
+      const baseMaxChunks = getFlag<number>("reasoning.max_chunks_per_run", run.sysbasePath as string | null | undefined)
+      const maxChunks = resolveMaxChunksPerRun(run.model as string, baseMaxChunks)
       if (activeChunks >= maxChunks) {
-        console.warn(`[chunked-loop] hit max_chunks_per_run=${maxChunks}, stopping`)
+        console.warn(`[chunked-loop] hit max_chunks_per_run=${maxChunks} (base=${baseMaxChunks}, model=${run.model}), stopping`)
         clearPipeline(body.runId)
         clearChunkState(body.runId)
         const synthesised: NormalizedResponse = {
@@ -804,8 +808,14 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
 
       if (planResult?.chunkPlanBrief) {
         chunkPlanBrief = planResult.chunkPlanBrief
+        // Phase 16 Stage 5: tighten the planner's file list to the
+        // free-tier cap. Paid-tier slice is a no-op (cap = schema max 5).
+        const maxFiles = resolveMaxFilesPerChunk(run.model as string)
+        if (chunkPlanBrief.files.length > maxFiles) {
+          chunkPlanBrief.files = chunkPlanBrief.files.slice(0, maxFiles)
+        }
         recordChunkStart(body.runId, chunkPlanBrief, [...chunkPlanBrief.files])
-        console.log(`[chunked-loop] chunk ${activeChunks} planned: ${chunkPlanBrief.nextAction}`)
+        console.log(`[chunked-loop] chunk ${activeChunks} planned: ${chunkPlanBrief.nextAction} (${chunkPlanBrief.files.length} files, cap=${maxFiles})`)
       }
     }
   } catch (err) {
