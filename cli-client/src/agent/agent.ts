@@ -153,7 +153,13 @@ type Ora = ReturnType<typeof ora>
 
 function createSpinner(): Ora {
   if (isInkActive()) {
-    let current = "thinking..."
+    // Initial text is empty so the Ink <RichSpinner> takes over with its
+    // own ~22-verb cycle (`thinking… hmm… debugging… searching…`). The
+    // agent overrides this with specific labels (server phase events,
+    // tool prep, etc.) via `spinner.text =` calls below; whenever those
+    // clear out we fall back to the cycle instead of repeating a single
+    // static `thinking…` for the duration of a long pause.
+    let current = ""
     emitAgent({ type: "spinner", text: current })
     // Stub mimicking the slice of the ora interface the agent + diff-preview
     // listener actually use. Anything unimplemented (succeed/render/clear/…)

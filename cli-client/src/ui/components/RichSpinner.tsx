@@ -13,9 +13,13 @@
  *     gets its own colour (`SPINNER_COLORS`) so the swap is visible
  *     even at small sizes — the row reads as a single colour-shifting
  *     star, not as "an icon".
- *   - **Verb**: cycles through `VERBS` every 3s. Same behaviour as the
- *     prior `<Spinner>`. An optional `text` prop overrides the cycle (used
- *     by callers like `<App>` to surface a one-off "loading…" label).
+ *   - **Verb**: cycles through `VERBS` every 3s — a curated list of ~22
+ *     workflow-flavoured words (`thinking…`, `hmm…`, `debugging…`,
+ *     `searching…`, `weighing options…`, …) so the spinner reads like
+ *     a human working through a problem rather than repeating one
+ *     neutral word. An optional `text` prop overrides the cycle (used
+ *     by callers like `<App>` to surface a one-off "loading…" label
+ *     or a server-emitted phase label like `asking openrouter-auto…`).
  *   - **Overlay**: muted parens block with `(elapsed · ↑ tokens)`. The
  *     elapsed counter resets when the spinner mounts. Tokens are passed
  *     in via the `tokens` prop — the parent (AgentStream eventually)
@@ -34,14 +38,46 @@ import { useFrame, nowMs } from "../animation/use-frame.js"
 import { isMotionEnabled } from "../state/motion.js"
 import { formatElapsed } from "./LiveStatusBar.js"
 
-const VERBS = [
+/**
+ * Workflow-flavoured verb cycle. Mixes interjections (`hmm…`) with action
+ * verbs (`debugging…`, `searching…`) so the spinner reads like a human
+ * thinking through a problem instead of repeating one neutral word over
+ * and over.
+ *
+ * The list is intentionally ~22 entries long: at `VERB_MS` cadence the
+ * full loop is ~66s, which is well past the duration of most agent
+ * pauses — the user almost never sees the same verb twice in one wait.
+ *
+ * Order is curated, not alphabetical: action / interjection alternation
+ * keeps the rhythm varied without needing randomisation (which would
+ * make tests harder to assert and the cadence harder to reason about).
+ *
+ * Exported so a future tool-aware override can match a specific verb
+ * (e.g. when `read_file` is in flight, surface "reading…").
+ */
+export const VERBS = [
   "thinking",
-  "implementing",
-  "wiring up",
-  "verifying",
-  "polishing",
-  "reasoning",
+  "hmm",
+  "considering",
+  "weighing options",
+  "deciding",
+  "planning",
+  "exploring",
+  "searching",
+  "looking it up",
+  "reading",
+  "tracing",
+  "debugging",
+  "understanding",
   "drafting",
+  "writing",
+  "wiring up",
+  "implementing",
+  "verifying",
+  "double-checking",
+  "polishing",
+  "reflecting",
+  "reasoning",
 ] as const
 
 const VERB_MS = 3000
