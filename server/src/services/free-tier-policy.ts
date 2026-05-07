@@ -135,3 +135,51 @@ export function shouldRunDivergenceSecondLook(input: DivergenceSecondLookGateInp
   if (score > FREE_TIER_DIVERGENCE_CHAIN_UPPER) return false
   return true
 }
+
+/**
+ * Phase 16 Stage 5: resolve the chunked-loop caps for the run's model.
+ *
+ * Free-tier runs use tighter caps to keep each chunk inside the
+ * affordable budget AND give the free model fewer balls in the air per
+ * chunk. Paid runs keep the original flag values + the schema's hard
+ * 5-file maximum.
+ *
+ * Pure helper — no flag reads, no I/O. Caller passes the resolved base
+ * `max_chunks_per_run` flag value; we apply the multiplier here and
+ * floor to at least 1 chunk so a tiny base value can't zero out.
+ *
+ * Mirrors the constants declared in this module:
+ *   - `FREE_TIER_CHUNK_CAP_TIGHTEN`  (default 0.7 — 12 → 8 chunks)
+ *   - `FREE_TIER_CHUNK_FILES_TIGHTEN` (default 4 — vs schema cap 5)
+ */
+export interface ChunkCaps {
+  /** Effective per-run chunk cap after tightening. */
+  maxChunks: number
+  /** Effective per-chunk file cap after tightening. */
+  maxFilesPerChunk: number
+}
+
+export function resolveChunkCaps(model: string | null | undefined, baseMaxChunks: number): ChunkCaps {
+  return {
+    maxChunks: resolveMaxChunksPerRun(model, baseMaxChunks),
+    maxFilesPerChunk: resolveMaxFilesPerChunk(model),
+  }
+}
+
+/** Phase 16 Stage 5: resolve the per-run chunk cap. Free-tier multiplies
+ *  the base by `FREE_TIER_CHUNK_CAP_TIGHTEN` (default 0.7). Floors to at
+ *  least 1 so a tiny base value can't zero out. */
+export function resolveMaxChunksPerRun(model: string | null | undefined, baseMaxChunks: number): number {
+  const base = (typeof baseMaxChunks === "number" && Number.isFinite(baseMaxChunks) && baseMaxChunks >= 1)
+    ? Math.floor(baseMaxChunks)
+    : 1
+  if (!isFreeTierModel(model)) return base
+  return Math.max(1, Math.floor(base * FREE_TIER_CHUNK_CAP_TIGHTEN))
+}
+
+/** Phase 16 Stage 5: resolve the per-chunk file cap. Paid-tier returns
+ *  the schema's hard maximum (5); free-tier drops to
+ *  `FREE_TIER_CHUNK_FILES_TIGHTEN` (default 4). */
+export function resolveMaxFilesPerChunk(model: string | null | undefined): number {
+  return isFreeTierModel(model) ? FREE_TIER_CHUNK_FILES_TIGHTEN : 5
+}
