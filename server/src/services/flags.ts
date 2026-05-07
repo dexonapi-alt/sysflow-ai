@@ -83,6 +83,16 @@ defineFlag("memory.active_confirmation_enabled", true, parseBool)
 // behaviour (single-stage preflight, no chain).
 defineFlag("reasoning.chained.preflight_elaboration_enabled", true, parseBool)
 
+// ─── Phase 16 Stage 4: chained divergence second-look on borderline ───
+// When true (and gate matches: free-tier model + first divergence verdict
+// score in the borderline band 40-60), a second `divergence_check` Flash
+// fires with the first verdict carried in its context. The second
+// verdict replaces the first — the deeper look is what we trust. Only
+// fires inside the awareness block, which is already gated by
+// `awareness.enabled`; this flag is a per-stage off-switch that doesn't
+// affect the first-pass divergence call.
+defineFlag("reasoning.chained.divergence_second_look_enabled", true, parseBool)
+
 // ─── Phase 10: chunked reasoning loop ───
 // Default ON as of Stage 4 — the prompt now teaches the model to honour the
 // planner's file list, so turning the loop on actually produces structured
