@@ -3,6 +3,7 @@ import { GeminiProvider } from "./gemini.js"
 import { OpenRouterProvider } from "./openrouter.js"
 import { AnthropicProvider } from "./anthropic.js"
 import { SweProvider } from "./swe.js"
+import { getFlag } from "../services/flags.js"
 import type { ProviderPayload, NormalizedResponse } from "../types.js"
 
 // ─── Provider Registry ───
@@ -27,6 +28,21 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Stage A of model-lock-and-portable-reasoning: pure decision over whether
+ * the adapter should walk MODEL_FALLBACK_CHAINS on a rate-limit.
+ *
+ * Returns false (lock-in) when:
+ *   - `providers.lock_to_chosen_model` flag is true (default), AND
+ *   - the model id is NOT an "...-auto" pick (auto picks expect cycling).
+ *
+ * Exported for tests.
+ */
+export function shouldFallback(model: string, lockEnabled: boolean): boolean {
+  if (!lockEnabled) return true
+  return model.endsWith("-auto")
+}
+
+/**
  * Call the model adapter with automatic retry and fallback on rate limits.
  *
  * Strategy:
@@ -40,7 +56,28 @@ export async function callModelAdapter(payload: ProviderPayload): Promise<Normal
   const result = await callWithRetry(payload.model, payload)
   if (result.kind !== "rate_limited") return result
 
-  // Primary exhausted — try fallback chain
+  // Stage A lock-in check. When `providers.lock_to_chosen_model` is on
+  // (default) and the user picked an explicit single-provider model, do
+  // NOT walk the fallback chain — surface a clear error so the user can
+  // switch with /model instead of silently getting responses from a
+  // different provider.
+  const lockEnabled = (() => {
+    try { return getFlag<boolean>("providers.lock_to_chosen_model") } catch { return true }
+  })()
+  if (!shouldFallback(payload.model, lockEnabled)) {
+    console.log(`[adapter] ${payload.model} rate-limited — lock-in is on, no fallback. Run /model to swap.`)
+    return {
+      kind: "failed",
+      error:
+        `${payload.model} is rate-limited. Wait a moment and retry, or run /model to swap providers. ` +
+        `(Set providers.lock_to_chosen_model=false to restore cross-provider auto-fallback.) ` +
+        `Original: ${result.error}`,
+      usage: { inputTokens: 0, outputTokens: 0 },
+    }
+  }
+
+  // Primary exhausted — try fallback chain (only reachable for auto picks
+  // when lock-in is on, or any model when lock-in is off).
   const fallbacks = MODEL_FALLBACK_CHAINS[payload.model] || []
   for (const fallbackModel of fallbacks) {
     const fbProvider = providers.get(fallbackModel)

@@ -114,6 +114,17 @@ defineFlag("awareness.enabled", true, parseBool)
 defineFlag("awareness.threshold_off_course", 60, parseNumber)
 defineFlag("awareness.threshold_blocked", 30, parseNumber)
 
+// ─── Stage A of model-lock-and-portable-reasoning plan ───
+// When true (default), the adapter does NOT walk MODEL_FALLBACK_CHAINS
+// for explicit single-provider picks (claude-*, gemini-*, llama-70b,
+// mistral-small). A rate-limited or failed call surfaces as a clear
+// "rate-limited, swap model with /model" error instead of silently
+// swapping providers (the user's reported "i used claude sonnet why it
+// switches to gemini lol" symptom). `openrouter-auto` is exempt because
+// the "auto" suffix is the user's explicit signal they expect cycling.
+// Set to false to restore pre-Stage-A cross-provider fallback.
+defineFlag("providers.lock_to_chosen_model", true, parseBool)
+
 export function getFlag<T = unknown>(name: string, sysbasePath?: string | null): T {
   const memoKey = `${name}::${sysbasePath ?? ""}`
   if (memo.has(memoKey)) return memo.get(memoKey) as T
