@@ -78,6 +78,14 @@ export function getReasoningBriefSection(ctx: ReasoningBriefCtx): string | null 
         lines.push("EDGE CASES TO HANDLE:")
         b.edgeCases.forEach((e) => lines.push(`  - ${e}`))
       }
+      // Stage 3 of command-first-investigation: investigation plan
+      // renders as a directive block. Confidence-aware framing routes
+      // through getInvestigationPlanBlock.
+      const implPlanBlock = getInvestigationPlanBlock(b.investigationPlan, brief.confidence)
+      if (implPlanBlock) {
+        lines.push("")
+        lines.push(implPlanBlock)
+      }
       break
     }
     case "bug": {
@@ -94,6 +102,12 @@ export function getReasoningBriefSection(ctx: ReasoningBriefCtx): string | null 
       if (b.sideEffects.length > 0) {
         lines.push("SIDE EFFECTS TO WATCH:")
         b.sideEffects.forEach((s) => lines.push(`  - ${s}`))
+      }
+      // Stage 3: same investigation plan block for bug briefs.
+      const bugPlanBlock = getInvestigationPlanBlock(b.investigationPlan, brief.confidence)
+      if (bugPlanBlock) {
+        lines.push("")
+        lines.push(bugPlanBlock)
       }
       break
     }
@@ -153,6 +167,56 @@ export function getReasoningBriefSection(ctx: ReasoningBriefCtx): string | null 
   // benefits from the reasoner's deliberation even when the structured
   // recommendation is tentative.
   lines.push(getDirectiveTrailer(brief.confidence))
+  return lines.join("\n")
+}
+
+/**
+ * Stage 3 of command-first-investigation: render the reasoner's
+ * suggested starting commands as a directive block. Returns null when
+ * the plan is empty (so old briefs / trivial tasks don't render the
+ * block at all).
+ *
+ * Confidence-aware framing — same gradient as the trailer directive:
+ *   - HIGH   → RUN THESE BEFORE WRITING
+ *   - MEDIUM → CONSIDER RUNNING (deviate if you have stronger signal)
+ *   - LOW    → SUGGESTED (the reasoner is uncertain; treat as hints)
+ *
+ * Exported for unit tests.
+ */
+interface InvestigationPlanEntryLike {
+  command: string
+  expectedSignal: string
+  pivotIf?: string
+}
+export function getInvestigationPlanBlock(
+  plan: InvestigationPlanEntryLike[] | undefined,
+  confidence: "HIGH" | "MEDIUM" | "LOW",
+): string | null {
+  if (!Array.isArray(plan) || plan.length === 0) return null
+
+  const header = confidence === "HIGH"
+    ? "═══ INVESTIGATE FIRST — RUN THESE BEFORE WRITING ═══"
+    : confidence === "MEDIUM"
+    ? "═══ INVESTIGATE FIRST — consider running these before writing ═══"
+    : "═══ INVESTIGATE — suggested commands (reasoner confidence is LOW) ═══"
+
+  const trailer = confidence === "HIGH"
+    ? "Run each in order. After every command, reason in `reasoningChain` about whether the result matched the expected signal — if it didn't, pivot per the pivotIf clause before proceeding."
+    : confidence === "MEDIUM"
+    ? "Run them in order unless a stronger signal makes one redundant. Reason about each result before moving on."
+    : "These are starting hints — the reasoner wasn't confident. Use your judgement; one or two may be enough to verify the brief."
+
+  const lines: string[] = [header]
+  plan.forEach((entry, i) => {
+    lines.push(`${i + 1}. ${entry.command}`)
+    lines.push(`   expect: ${entry.expectedSignal}`)
+    if (entry.pivotIf && entry.pivotIf.trim().length > 0) {
+      lines.push(`   pivot:  ${entry.pivotIf}`)
+    }
+  })
+  lines.push("")
+  lines.push(trailer)
+  lines.push("═══")
   return lines.join("\n")
 }
 

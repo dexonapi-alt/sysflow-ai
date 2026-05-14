@@ -116,6 +116,11 @@ function repairImplementBrief(ib: Record<string, unknown>): void {
   ensureArray(ib, "edgeCases")
   ensureArray(ib, "consistencyNotes")
   ensureArray(ib, "buildPlan")
+  // Stage 3 of command-first-investigation: investigationPlan defaults
+  // to []. Old briefs (pre-Stage-3) won't have it; new briefs may emit
+  // entries with missing optional fields — filter those out via
+  // sanitizeInvestigationPlan so Zod doesn't reject the whole brief.
+  ib.investigationPlan = sanitizeInvestigationPlan(ib.investigationPlan)
 
   if (typeof ib.architectureSketch !== "string") ib.architectureSketch = ""
 
@@ -163,6 +168,36 @@ function repairBugBrief(bb: Record<string, unknown>): void {
   } else {
     bb.proposedFix = { description: PLACEHOLDER, scope: "minimal", filesAffected: [] }
   }
+
+  // Stage 3 of command-first-investigation: investigationPlan defaults
+  // to [] and malformed entries get filtered.
+  bb.investigationPlan = sanitizeInvestigationPlan(bb.investigationPlan)
+}
+
+/**
+ * Stage 3 of command-first-investigation: sanitize an investigationPlan
+ * payload before Zod validation. Filters out entries that lack a
+ * non-empty `command` or `expectedSignal` (both are `min(1)` in the
+ * schema) so a single malformed Flash entry doesn't drop the whole
+ * plan. Caps at 6 entries. Returns an empty array when the input is
+ * not an array or yields zero valid entries.
+ */
+function sanitizeInvestigationPlan(raw: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(raw)) return []
+  const out: Array<Record<string, unknown>> = []
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue
+    const e = entry as Record<string, unknown>
+    const command = typeof e.command === "string" ? e.command.trim() : ""
+    const expectedSignal = typeof e.expectedSignal === "string" ? e.expectedSignal.trim() : ""
+    if (!command || !expectedSignal) continue
+    const pivotIf = typeof e.pivotIf === "string" && e.pivotIf.trim().length > 0
+      ? e.pivotIf.trim()
+      : undefined
+    out.push(pivotIf ? { command, expectedSignal, pivotIf } : { command, expectedSignal })
+    if (out.length === 6) break
+  }
+  return out
 }
 
 function repairDecisionBrief(db: Record<string, unknown>): void {

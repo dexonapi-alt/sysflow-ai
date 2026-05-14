@@ -37,7 +37,10 @@ Output ONLY a single JSON object matching this envelope:
     "rootCauseGuess": "<one line> | null",
     "proposedFix": { "description": "<minimal safe change>", "scope": "minimal" | "moderate" | "large", "filesAffected": ["..."] },
     "sideEffects": ["..."],
-    "verificationSteps": ["<how to confirm the fix works>"]
+    "verificationSteps": ["<how to confirm the fix works>"],
+    "investigationPlan": [
+      { "command": "<concrete read-only shell command>", "expectedSignal": "<what we expect to see>", "pivotIf": "<optional: what to do when signal differs>" }
+    ]
   },
   "reasoningTrace": "<≤800 chars>",
   "reasoningChain": ["<paragraph 1: RESTATE symptom>", "<paragraph 2: ALTERNATIVES (likely causes considered)>", "<paragraph 3: TRADE-OFFS of each cause>", "<paragraph 4: ROOT CAUSE — why three times>", "<paragraph 5: INVESTIGATION LEADS — cheap commands to disambiguate>", "<paragraph 6: SELF-CRITIQUE — what if you're wrong?>", "<paragraph 7: FINAL JUSTIFICATION of the proposedFix>"]
@@ -51,6 +54,18 @@ Output ONLY a single JSON object matching this envelope:
 - If the symptom is too vague to commit (e.g., "fix the build" with no log), set confidence=MEDIUM/LOW, decision=ask_user, and ask for the discriminating evidence.
 - Do NOT invent file paths in proposedFix.filesAffected. List paths only if you can derive them from context.
 - Empty arrays are fine; never emit null in array slots.
+
+═══ INVESTIGATION PLAN ═══
+
+Populate \`investigationPlan\` with 2-5 concrete read-only commands the agent should run BEFORE attempting the fix. For bugs, the goal is DISAMBIGUATION — each command should rule a hypothesis in or out. Pair each command with what you expect to see AND (optionally) what to do when the expected signal doesn't match.
+
+Examples:
+- \`git log --oneline -10\` → expect: recent commit that touched the failure surface. pivot: if none, the symptom is older — widen the search.
+- \`grep -rn "<symptom>" src/\` → expect: 1-3 call sites of the failing code path. pivot: if 0 hits, search the test files OR the symptom is masked by a wrapper.
+- \`cat package.json | jq .dependencies\` → expect: confirms the dependency we suspect is wired in. pivot: if absent, the hypothesis about \`<lib>\` is wrong.
+- \`npm list <lib>\` → expect: version match with lockfile. pivot: if mismatched, that IS the bug.
+
+Aim for cheap, disambiguating commands. Skip ones whose output doesn't change the agent's next move.
 
 ═══ FEW-SHOT EXAMPLES ═══
 

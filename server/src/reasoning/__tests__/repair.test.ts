@@ -279,6 +279,12 @@ describe("repairReasoningResponse — pre-validation cleanup", () => {
         ],
         edgeCases: ["empty-result handling"],
         consistencyNotes: ["use drizzle-kit for migrations"],
+        // Stage 3: well-formed envelopes include investigationPlan (or [])
+        // explicitly. Repair preserves a well-formed plan as-is.
+        investigationPlan: [
+          { command: "cat package.json", expectedSignal: "existing project to match" },
+          { command: "git status", expectedSignal: "clean working tree", pivotIf: "if dirty, surface to user" },
+        ],
       },
       reasoningTrace: "implement plan",
       // Stage C: reasoningChain is now a recognised envelope field. A well-

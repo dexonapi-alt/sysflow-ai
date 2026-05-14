@@ -33,7 +33,10 @@ Output ONLY a single JSON object matching this envelope:
     "architectureSketch": "<2-3 sentences>",
     "buildPlan": [{ "step": "...", "deliverable": "...", "blockedBy": ["<missingContext.field>"] }],
     "edgeCases": ["..."],
-    "consistencyNotes": ["<reminders that prevent rework, e.g., share-with-service-account-email for Sheets>"]
+    "consistencyNotes": ["<reminders that prevent rework, e.g., share-with-service-account-email for Sheets>"],
+    "investigationPlan": [
+      { "command": "<concrete read-only shell command>", "expectedSignal": "<what we expect to see>", "pivotIf": "<optional: what to do when signal differs>" }
+    ]
   },
   "reasoningTrace": "<≤800 chars on how you reached the brief>",
   "reasoningChain": ["<paragraph 1: RESTATE>", "<paragraph 2: ALTERNATIVES>", "<paragraph 3: TRADE-OFFS>", "<paragraph 4: ROOT CAUSE if any>", "<paragraph 5: INVESTIGATION LEADS>", "<paragraph 6: SELF-CRITIQUE>", "<paragraph 7: FINAL JUSTIFICATION>"]
@@ -46,6 +49,18 @@ Output ONLY a single JSON object matching this envelope:
 - For every missing context item, write the suggestedQuestion as the user would actually answer it (concrete, not "what do you want?").
 - Empty arrays are fine; never emit null in array slots.
 - When a Google Sheets / Stripe / Discord / Drive integration is detected, add the canonical share/permission reminder to consistencyNotes.
+
+═══ INVESTIGATION PLAN ═══
+
+Populate \`investigationPlan\` with 2-5 concrete read-only commands the agent should run BEFORE writing any files. These commands BUILD THE AGENT'S MENTAL MODEL so it doesn't hallucinate against unread file content. Each entry pairs a command with what you expect to learn AND (optionally) what to do when the expected signal doesn't match.
+
+Examples of good investigation commands:
+- \`git status\` → expect: nothing modified, safe to scaffold. pivot: if dirty, surface to user before scaffolding.
+- \`cat package.json\` → expect: existing React project we should match. pivot: if missing, fresh dir — scaffold via Vite.
+- \`find . -name "*.test.*" -maxdepth 3\` → expect: existing test patterns to follow. pivot: if none, default to vitest.
+- \`Get-ChildItem -Force\` (Windows) → expect: empty / clean directory. pivot: if files present, read them before assuming structure.
+
+Be tight: each command must reveal something that CHANGES the agent's next move. Skip ceremonial commands (no \`echo hello\`, no \`pwd\` unless cwd ambiguity is load-bearing). Empty array is acceptable when the task is trivial enough that investigation adds nothing.
 
 ═══ FEW-SHOT EXAMPLES ═══
 

@@ -48,6 +48,24 @@ const missingContextItemSchema = z.object({
 })
 export type MissingContextItem = z.infer<typeof missingContextItemSchema>
 
+// ─── Stage 3 of command-first-investigation plan: investigationPlan ───
+//
+// One reasoner-suggested investigation command. The agent runs these
+// BEFORE writing any files — each entry pairs a concrete command with
+// the signal we expect from its output and (optionally) what to do
+// when the signal doesn't match. Tight schema: 6 entries max, short
+// fields. The render uses these to populate the prompt's "INVESTIGATE
+// FIRST" directive block.
+export const investigationPlanEntrySchema = z.object({
+  /** Concrete shell command — `git status`, `cat package.json`, `Get-ChildItem`, etc. */
+  command: z.string().min(1).max(240),
+  /** What output the reasoner expects — "nothing modified", "existing React project", etc. */
+  expectedSignal: z.string().min(1).max(200),
+  /** Optional: what to do when expectedSignal doesn't match. */
+  pivotIf: z.string().max(200).optional(),
+})
+export type InvestigationPlanEntry = z.infer<typeof investigationPlanEntrySchema>
+
 // ─── Implement pipeline brief ───
 export const implementBriefSchema = z.object({
   intent: z.string().min(1).max(300),
@@ -70,6 +88,13 @@ export const implementBriefSchema = z.object({
   })).max(8),
   edgeCases: z.array(z.string().max(160)).max(6),
   consistencyNotes: z.array(z.string().max(160)).max(4),
+  /**
+   * Stage 3 of command-first-investigation: 0-6 read-only commands the
+   * agent should run BEFORE writing files. The render injects these as
+   * an "INVESTIGATE FIRST" directive block. Optional + default []; old
+   * briefs (pre-Stage-3) still parse.
+   */
+  investigationPlan: z.array(investigationPlanEntrySchema).max(6).default([]),
 })
 export type ImplementBrief = z.infer<typeof implementBriefSchema>
 
@@ -97,6 +122,14 @@ export const bugBriefSchema = z.object({
   }),
   sideEffects: z.array(z.string().max(160)).max(5),
   verificationSteps: z.array(z.string().max(200)).max(5),
+  /**
+   * Stage 3 of command-first-investigation: 0-6 read-only commands the
+   * agent should run BEFORE attempting the fix. For bug briefs these
+   * often disambiguate hypotheses (e.g. `git log` to see what changed,
+   * `grep -r <symptom>` to locate the failure surface). Optional +
+   * default []; old briefs (pre-Stage-3) still parse.
+   */
+  investigationPlan: z.array(investigationPlanEntrySchema).max(6).default([]),
 })
 export type BugBrief = z.infer<typeof bugBriefSchema>
 
