@@ -67,6 +67,10 @@ export function formatBriefSummary(kind: string, briefData: Record<string, unkno
       const composed = [language, ...fws, ...libs].filter(Boolean).slice(0, 5).join(" + ")
       if (composed) lines.push(`→ stack: ${composed}`)
     }
+    // Stage 3 of command-first-investigation: surface the planned
+    // investigation commands so the user sees what the agent's about to
+    // run before any writes happen. Compact mono list — first 3 commands.
+    appendInvestigationLines(lines, ib.investigationPlan)
     return { pipelineLabel: "Reasoning(implement)", lines: lines.length > 0 ? lines : [confidenceLine(data)] }
   }
 
@@ -77,6 +81,7 @@ export function formatBriefSummary(kind: string, briefData: Record<string, unkno
     if (typeof bb.suspectedBoundary === "string") lines.push(`→ boundary: ${bb.suspectedBoundary}`)
     const fix = bb.proposedFix as Record<string, unknown> | undefined
     if (fix && typeof fix.description === "string") lines.push(`→ fix: ${truncate(fix.description, 70)}`)
+    appendInvestigationLines(lines, bb.investigationPlan)
     return { pipelineLabel: "Reasoning(bug)", lines: lines.length > 0 ? lines : [confidenceLine(data)] }
   }
 
@@ -144,6 +149,26 @@ function confidenceLine(data: Record<string, unknown>): string {
   const c = typeof data.confidence === "string" ? data.confidence : "?"
   const d = typeof data.decision === "string" ? data.decision : "?"
   return `→ confidence: ${c} · decision: ${d}`
+}
+
+/**
+ * Stage 3 + 4 of command-first-investigation: surface the reasoner's
+ * suggested starting commands in the peek so the user sees what the
+ * agent's about to investigate before any writes happen.
+ *
+ * Defensive: skips when the plan is missing / empty / malformed.
+ * Renders up to 3 commands as `→ investigate: <cmd1> · <cmd2> · <cmd3>`
+ * (compact to fit the peek's 1-3 line budget).
+ */
+function appendInvestigationLines(lines: string[], plan: unknown): void {
+  if (!Array.isArray(plan) || plan.length === 0) return
+  const commands = (plan as Array<Record<string, unknown>>)
+    .map((e) => typeof e.command === "string" ? e.command.trim() : "")
+    .filter((c) => c.length > 0)
+    .slice(0, 3)
+  if (commands.length === 0) return
+  const more = (plan as unknown[]).length > 3 ? ` +${(plan as unknown[]).length - 3}` : ""
+  lines.push(`→ investigate: ${truncate(commands.join(" · "), 80)}${more}`)
 }
 
 function truncate(s: string, max: number): string {

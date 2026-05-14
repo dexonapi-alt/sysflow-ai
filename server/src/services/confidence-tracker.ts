@@ -47,6 +47,7 @@ const CATEGORY_WEIGHT: Record<DivergenceCategory, number> = {
   scope_creep: 8,                        // chunk count overshoot — softer
   mkdir_empty_at_chunk_boundary: 5,      // common during scaffold; weakest
   llm_off_track: 25,                     // Phase 11 Stage 3: Flash second-opinion verdict — same heft as keyword-absent
+  no_investigation_before_write: 15,    // Stage 4 of command-first-investigation: mild signal — investigation is preferred, not required
 }
 
 function severityMultiplier(sev: DivergenceSignal["severity"]): number {
