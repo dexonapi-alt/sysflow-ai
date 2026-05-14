@@ -41,10 +41,17 @@ describe("checkPermissions", () => {
     expect(checkPermissions({ tool: "run_command", args: { command: "rm -rf /" }, mode: "bypass", rules }).decision).toBe("allow")
   })
 
-  it("plan mode allows read tools, denies writes", () => {
+  it("plan mode allows read tools, denies writes; Stage 2 lets safe run_commands through", () => {
     expect(checkPermissions({ tool: "read_file", args: { path: "x" }, mode: "plan", rules }).decision).toBe("allow")
     expect(checkPermissions({ tool: "write_file", args: { path: "x", content: "" }, mode: "plan", rules }).decision).toBe("deny")
-    expect(checkPermissions({ tool: "run_command", args: { command: "ls" }, mode: "plan", rules }).decision).toBe("deny")
+    // Stage 2 of command-first-investigation: safe read-only commands
+    // (ls, git status, etc.) ARE allowed even in plan mode — investigation
+    // is read-only by signature.
+    expect(checkPermissions({ tool: "run_command", args: { command: "ls" }, mode: "plan", rules }).decision).toBe("allow")
+    expect(checkPermissions({ tool: "run_command", args: { command: "git status" }, mode: "plan", rules }).decision).toBe("allow")
+    // But destructive run_commands still deny in plan mode.
+    expect(checkPermissions({ tool: "run_command", args: { command: "rm -rf node_modules" }, mode: "plan", rules }).decision).toBe("deny")
+    expect(checkPermissions({ tool: "run_command", args: { command: "npm install" }, mode: "plan", rules }).decision).toBe("deny")
   })
 
   it("read tools default to allow in default mode", () => {
@@ -52,11 +59,53 @@ describe("checkPermissions", () => {
     expect(checkPermissions({ tool: "list_directory", args: { path: "." }, mode: "default", rules }).decision).toBe("allow")
   })
 
-  it("authoring tools default to allow; shell + destructive default to ask", () => {
+  it("authoring tools default to allow; shell + destructive default to ask; Stage 2 auto-approves safe commands", () => {
     expect(checkPermissions({ tool: "write_file", args: { path: "x", content: "" }, mode: "default", rules }).decision).toBe("allow")
     expect(checkPermissions({ tool: "edit_file", args: { path: "x" }, mode: "default", rules }).decision).toBe("allow")
-    expect(checkPermissions({ tool: "run_command", args: { command: "ls" }, mode: "default", rules }).decision).toBe("ask")
     expect(checkPermissions({ tool: "delete_file", args: { path: "x" }, mode: "default", rules }).decision).toBe("ask")
+    // Stage 2: safe read-only commands auto-allow (was ask pre-Stage-2).
+    expect(checkPermissions({ tool: "run_command", args: { command: "ls" }, mode: "default", rules }).decision).toBe("allow")
+    expect(checkPermissions({ tool: "run_command", args: { command: "git status" }, mode: "default", rules }).decision).toBe("allow")
+    expect(checkPermissions({ tool: "run_command", args: { command: "grep -r foo src/" }, mode: "default", rules }).decision).toBe("allow")
+    // Destructive / unknown commands still ask.
+    expect(checkPermissions({ tool: "run_command", args: { command: "npm install" }, mode: "default", rules }).decision).toBe("ask")
+    expect(checkPermissions({ tool: "run_command", args: { command: "rm file.txt" }, mode: "default", rules }).decision).toBe("ask")
+  })
+
+  it("Stage 2: autoApproveSafeCommands=false restores pre-Stage-2 ask behaviour", () => {
+    // Off-switch: when the sysbase setting is disabled, even ls falls back
+    // to the per-tool default (ask).
+    expect(checkPermissions({
+      tool: "run_command",
+      args: { command: "ls" },
+      mode: "default",
+      rules,
+      autoApproveSafeCommands: false,
+    }).decision).toBe("ask")
+    expect(checkPermissions({
+      tool: "run_command",
+      args: { command: "git status" },
+      mode: "default",
+      rules,
+      autoApproveSafeCommands: false,
+    }).decision).toBe("ask")
+  })
+
+  it("Stage 2: persistent deny rule overrides safe-command auto-approve", () => {
+    const localRules: Rule[] = [{ tool: "run_command", pattern: "git*", decision: "deny" }]
+    expect(checkPermissions({
+      tool: "run_command",
+      args: { command: "git status" },
+      mode: "default",
+      rules: localRules,
+    }).decision).toBe("deny")
+    // Non-matching safe command still auto-approves.
+    expect(checkPermissions({
+      tool: "run_command",
+      args: { command: "ls" },
+      mode: "default",
+      rules: localRules,
+    }).decision).toBe("allow")
   })
 
   it("auto mode keeps read-tools allowed and authoring tools allowed", () => {
