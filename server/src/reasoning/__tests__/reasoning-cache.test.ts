@@ -16,6 +16,7 @@ const stubBrief = (note: string): ReasoningBrief => ({
   decision: "proceed",
   missingContext: [],
   reasoningTrace: note,
+  reasoningChain: [],
 })
 
 const baseKey = {

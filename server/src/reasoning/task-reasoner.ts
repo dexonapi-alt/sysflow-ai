@@ -21,6 +21,8 @@ import { applyCriticalContextDetector } from "./critical-context-detector.js"
 import { repairReasoningResponse } from "./repair.js"
 import { getPipelineSystemPrompt, type PipelineKind } from "./pipelines/index.js"
 import { getFlag } from "../services/flags.js"
+import { shouldRunIterativeRefine } from "../services/free-tier-policy.js"
+import { analyzeTaskComplexity } from "../services/completion-guard.js"
 
 /**
  * Hard timeout on a single reasoner SDK call. The Google SDK does its own
@@ -98,6 +100,7 @@ async function runReasoningInner(payload: ReasoningPayload): Promise<ReasoningBr
       decision: "proceed",
       missingContext: [],
       reasoningTrace: "intent classifier returned simple — no reasoning call",
+      reasoningChain: [],
     }
   }
 
@@ -128,6 +131,35 @@ async function runReasoningInner(payload: ReasoningPayload): Promise<ReasoningBr
   } catch (err) {
     console.warn(`[reasoning] model call failed: ${(err as Error).message}`)
     return null
+  }
+
+  // Stage C of model-lock-and-portable-reasoning: iterative refine pass.
+  // A second reasoner invocation takes the first draft as input, finds
+  // 2-3 weaknesses in the reasoningChain, and produces a revised
+  // envelope. The revised raw replaces the draft for parsing; if the
+  // refine call fails (network / timeout) we fall back to the draft.
+  // Gate via `shouldRunIterativeRefine` — skips summary /
+  // implement_elaborate / divergence (see free-tier-policy.ts for why).
+  const refineEnabled = (() => {
+    try { return getFlag<boolean>("reasoning.iterative_refine_enabled", payload.sysbasePath) } catch { return true }
+  })()
+  // Stage C: complexity-aware gating. `analyzeTaskComplexity` is a cheap pure
+  // helper (keyword + length heuristics) — running it inline costs nothing
+  // and gives us a "skip refine on trivial work" signal. User feedback was
+  // explicit: *"when super easy task and so obvious it doesnt need to reason
+  // deeply"*. The system-level skip complements the prompt-level "be smart
+  // about depth" instruction in `DEEP_REASONING_PROMPT`.
+  const complexity = analyzeTaskComplexity(payload.userMessage).complexity
+  if (shouldRunIterativeRefine({ kind, model: payload.model, flagEnabled: refineEnabled, complexity })) {
+    try {
+      const refinedRaw = await callReasonerWithTimeout(payload, kind, buildCritiqueUserTurn(payload, kind, raw))
+      // Sanity check: refined output must at least be non-empty JSON-ish.
+      // If parsing fails downstream, we'll fall back to the draft.
+      raw = refinedRaw || raw
+      console.log(`[reasoning] iterative refine pass complete for trigger=${payload.trigger} pipeline=${kind}`)
+    } catch (err) {
+      console.warn(`[reasoning] iterative refine failed, keeping draft: ${(err as Error).message}`)
+    }
   }
 
   // Parse + validate. The repair pass runs BEFORE Zod validation and
@@ -187,7 +219,7 @@ function pickPipeline(payload: ReasoningPayload): PipelineKind | "simple" {
  * past graceful shutdown, and cleared on the success path so test runs
  * don't leak handles between cases.
  */
-async function callReasonerWithTimeout(payload: ReasoningPayload, kind: PipelineKind): Promise<string> {
+async function callReasonerWithTimeout(payload: ReasoningPayload, kind: PipelineKind, userTurnOverride?: string): Promise<string> {
   let timer: NodeJS.Timeout | undefined
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(
@@ -197,13 +229,13 @@ async function callReasonerWithTimeout(payload: ReasoningPayload, kind: Pipeline
     timer.unref?.()
   })
   try {
-    return await Promise.race([callReasoner(payload, kind), timeoutPromise])
+    return await Promise.race([callReasoner(payload, kind, userTurnOverride), timeoutPromise])
   } finally {
     if (timer) clearTimeout(timer)
   }
 }
 
-async function callReasoner(payload: ReasoningPayload, kind: PipelineKind): Promise<string> {
+async function callReasoner(payload: ReasoningPayload, kind: PipelineKind, userTurnOverride?: string): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY
   if (!apiKey) throw new Error("GEMINI_API_KEY is not set")
   const genAI = new GoogleGenerativeAI(apiKey)
@@ -213,6 +245,9 @@ async function callReasoner(payload: ReasoningPayload, kind: PipelineKind): Prom
   })()
 
   // Always run reasoning on Gemini Flash regardless of the main model — cheap + fast.
+  // (Stage D of model-lock-and-portable-reasoning will replace this with a pluggable
+  // backend dispatcher; Stage C keeps Gemini Flash so the iterative-refine wiring
+  // can land in isolation.)
   const reasonerModelName = "gemini-2.5-flash"
   const model = genAI.getGenerativeModel({
     model: reasonerModelName,
@@ -224,7 +259,10 @@ async function callReasoner(payload: ReasoningPayload, kind: PipelineKind): Prom
     },
   })
 
-  const userTurn = buildUserTurn(payload, kind)
+  // Stage C: `userTurnOverride` lets the iterative-refine pass send a
+  // critique-and-revise user turn instead of the standard initial one.
+  // First-pass calls leave it undefined and get `buildUserTurn`.
+  const userTurn = userTurnOverride ?? buildUserTurn(payload, kind)
   const result = await model.generateContent(userTurn)
   return result.response.text()
 }
@@ -244,6 +282,42 @@ function buildUserTurn(payload: ReasoningPayload, kind: PipelineKind): string {
   }
   parts.push("")
   parts.push("Output ONLY the JSON envelope. Nothing else.")
+  return parts.join("\n")
+}
+
+/**
+ * Stage C of model-lock-and-portable-reasoning: build the user turn for
+ * the iterative-refine second pass. The reasoner sees its own first
+ * draft and a critique-and-revise instruction. The revised envelope
+ * replaces the draft before Zod validation downstream.
+ *
+ * Truncates the draft to ~6KB so the critique turn stays well under the
+ * reasoner's context budget even on the longest preflight briefs.
+ */
+function buildCritiqueUserTurn(payload: ReasoningPayload, kind: PipelineKind, draftRaw: string): string {
+  const parts: string[] = []
+  parts.push(`PIPELINE: ${kind}`)
+  parts.push(`TRIGGER: ${payload.trigger} (refinement pass)`)
+  if (payload.cwd) parts.push(`CWD: ${payload.cwd}`)
+  parts.push("")
+  parts.push("USER PROMPT:")
+  parts.push(payload.userMessage)
+  if (payload.context && Object.keys(payload.context).length > 0) {
+    parts.push("")
+    parts.push("CONTEXT:")
+    parts.push(JSON.stringify(payload.context).slice(0, 3500))
+  }
+  parts.push("")
+  parts.push("YOUR FIRST DRAFT (the envelope you produced on the first pass):")
+  parts.push(draftRaw.slice(0, 6000))
+  parts.push("")
+  parts.push("CRITIQUE AND REVISE.")
+  parts.push("1. Find 2-3 specific weaknesses in your `reasoningChain`. Look for: shallow steps, missed alternatives, unstated assumptions, weak self-critique, root causes you stopped chasing too early.")
+  parts.push("2. Strengthen those steps. Add a paragraph where the chain was thin. Rewrite paragraphs that were generic.")
+  parts.push("3. Update structured fields IF the deeper thinking changes them (e.g. you realised an alternative is actually better).")
+  parts.push("4. Output the REVISED full envelope. Same schema, same pipeline. Same JSON shape — just better content.")
+  parts.push("")
+  parts.push("Output ONLY the revised JSON envelope. Nothing else.")
   return parts.join("\n")
 }
 

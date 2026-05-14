@@ -25,6 +25,30 @@ export function getReasoningBriefSection(ctx: ReasoningBriefCtx): string | null 
   lines.push(`pipeline: ${brief.pipeline}  ·  confidence: ${brief.confidence}  ·  decision: ${brief.decision}`)
   lines.push("")
 
+  // Stage C: render the reasoner's plain-prose deliberation BEFORE the
+  // structured brief fields. Each entry is rendered as its own paragraph
+  // separated by a blank line — NO numbering. User feedback after seeing
+  // the first numbered render: *"it shouldn't have numbers like 1. 2. 3.
+  // reasoning — it should be plain"*. Numbered lists read as forms or
+  // checklists, which is the exact "too structured" feel Stage C is
+  // supposed to fight.
+  //
+  // This block remains a one-shot preflight delivery in the system prompt
+  // — the deeper "one-thought-per-LLM-call" pattern (so the main model
+  // reasons iteratively rather than reading a pre-baked brief) is the
+  // 2026-05-13-command-first-investigation plan's Stage 1.5 territory:
+  // per-turn `reasoningChain[]` on the main model's own response envelope.
+  const chain = (brief.reasoningChain ?? []).filter((s) => typeof s === "string" && s.trim().length > 0)
+  if (chain.length > 0) {
+    lines.push("═══ THINKING ═══")
+    chain.forEach((step, i) => {
+      if (i > 0) lines.push("")
+      lines.push(step)
+    })
+    lines.push("═══")
+    lines.push("")
+  }
+
   if (brief.missingContext.length > 0) {
     lines.push("ASSUMED (not yet provided by user — proceed only if you can derive these from project context):")
     for (const m of brief.missingContext) {
@@ -123,6 +147,48 @@ export function getReasoningBriefSection(ctx: ReasoningBriefCtx): string | null 
   }
 
   lines.push("")
-  lines.push("Trust this brief unless tool results contradict it. Ask the user when ASSUMED items can't be derived.")
+  // Stage C: confidence-aware framing. HIGH-confidence briefs bind the
+  // model strongly; MEDIUM gives a deviation escape hatch; LOW stays
+  // advisory but the THINKING block above still renders so the model
+  // benefits from the reasoner's deliberation even when the structured
+  // recommendation is tentative.
+  lines.push(getDirectiveTrailer(brief.confidence))
   return lines.join("\n")
+}
+
+/**
+ * Stage C: confidence-keyed trailer. Replaces the old soft *"Trust this
+ * brief unless tool results contradict it"* with a strength gradient.
+ *
+ * - HIGH  → directive: model must follow unless a tool result proves
+ *   a step impossible. Deviation requires surfacing the conflict.
+ * - MEDIUM → directive but with a tool-result escape hatch.
+ * - LOW   → advisory only — the THINKING block (rendered above) is
+ *   what the model should lean on; the structured fields are tentative.
+ *
+ * Exported for unit tests.
+ */
+export function getDirectiveTrailer(confidence: "HIGH" | "MEDIUM" | "LOW"): string {
+  if (confidence === "HIGH") {
+    return [
+      "═══ DIRECTIVE (HIGH confidence) ═══",
+      "YOU MUST FOLLOW THIS PLAN. The reasoner classified this at HIGH confidence after deliberating across the THINKING chain above.",
+      "Deviate ONLY when a concrete tool result proves a step is impossible. When deviating, surface the conflict in `reasoning` before acting — do not silently substitute.",
+      "Ask the user when ASSUMED items cannot be derived from project context.",
+    ].join("\n")
+  }
+  if (confidence === "MEDIUM") {
+    return [
+      "═══ DIRECTIVE (MEDIUM confidence) ═══",
+      "FOLLOW THIS PLAN. The reasoner deliberated through the THINKING chain above and arrived here.",
+      "Deviate only if tool results contradict a step. When unsure between the brief and your instinct, prefer the brief — it has had more deliberation than your in-the-moment judgement.",
+      "Ask the user when ASSUMED items cannot be derived from project context.",
+    ].join("\n")
+  }
+  // LOW
+  return [
+    "═══ ADVISORY (LOW confidence) ═══",
+    "This brief is TENTATIVE — the reasoner's confidence is LOW. Lean on the THINKING block above for guidance, not the structured fields.",
+    "Verify each step with a tool call (read, list, run_command) before committing. Ask the user for the missing context first if the ambiguity is load-bearing.",
+  ].join("\n")
 }

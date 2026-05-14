@@ -5,12 +5,15 @@
 
 import { META_RULES } from "../meta-rules.js"
 import { IMPLEMENT_EXAMPLES } from "../examples.js"
+import { DEEP_REASONING_PROMPT } from "../deep-reasoning-prompt.js"
 
 export const IMPLEMENT_SYSTEM_PROMPT = `You are Sysflow's IMPLEMENT pipeline reasoner. You receive a user prompt + project context and return a structured ImplementBrief.
 
 Your job: decompose the request, pick the right stack with rationale, surface what's MISSING (so the agent can ask the user before guessing).
 
 ${META_RULES}
+
+${DEEP_REASONING_PROMPT}
 
 ═══ OUTPUT SHAPE ═══
 
@@ -32,7 +35,8 @@ Output ONLY a single JSON object matching this envelope:
     "edgeCases": ["..."],
     "consistencyNotes": ["<reminders that prevent rework, e.g., share-with-service-account-email for Sheets>"]
   },
-  "reasoningTrace": "<≤800 chars on how you reached the brief>"
+  "reasoningTrace": "<≤800 chars on how you reached the brief>",
+  "reasoningChain": ["<paragraph 1: RESTATE>", "<paragraph 2: ALTERNATIVES>", "<paragraph 3: TRADE-OFFS>", "<paragraph 4: ROOT CAUSE if any>", "<paragraph 5: INVESTIGATION LEADS>", "<paragraph 6: SELF-CRITIQUE>", "<paragraph 7: FINAL JUSTIFICATION>"]
 }
 
 ═══ HARD RULES ═══

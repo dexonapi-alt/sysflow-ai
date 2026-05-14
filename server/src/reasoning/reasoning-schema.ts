@@ -239,6 +239,25 @@ export const reasoningEnvelopeSchema = z.object({
   /** Phase 16 Stage 2: chained elaboration on top of an implement brief. */
   implementElaborationBrief: implementElaborationBriefSchema.nullable().optional(),
   reasoningTrace: z.string().max(800),
+  /**
+   * Stage C of model-lock-and-portable-reasoning plan: multi-step plain-prose
+   * deliberation. Each entry is one round of thinking (5-10 entries total).
+   * Pipeline prompts ask the reasoner to populate this BEFORE the structured
+   * brief fields, covering: restate the ask, alternatives considered, trade-
+   * offs, root-cause "why" chain, investigation leads, self-critique, final
+   * justification. Renders prominently in the main model's prompt as a
+   * `═══ THINKING ═══` block so the model sees the reasoner's deliberation,
+   * not just the structured summary.
+   *
+   * Optional + default `[]` so old briefs (pre-Stage-C) still parse cleanly.
+   * The repair pass migrates a non-empty `reasoningTrace` into `[trace]` when
+   * the chain is empty — gives old caches a graceful render path.
+   *
+   * Per-entry cap is 1000 chars (mid-to-long paragraph, ≈3-6 sentences) per
+   * user feedback: *"the reasoning output by llm should be mid to long"*.
+   * One-liner deliberation reads as form-filling, not thinking.
+   */
+  reasoningChain: z.array(z.string().max(1000)).max(10).default([]),
 })
 export type ReasoningBrief = z.infer<typeof reasoningEnvelopeSchema>
 

@@ -39,6 +39,21 @@ export function repairReasoningResponse(raw: unknown): unknown {
     obj.missingContext = []
   }
 
+  // Stage C: reasoningChain — multi-paragraph plain-prose deliberation. New
+  // in Stage C of model-lock-and-portable-reasoning. Old briefs (pre-Stage-C
+  // cache hits, Flash responses produced before the prompt addendum lands)
+  // won't have it; migrate the single-line `reasoningTrace` into a one-entry
+  // chain so the renderer still has something deliberative to show. Filters
+  // non-string entries so a malformed payload can't crash validation.
+  if (!Array.isArray(obj.reasoningChain)) {
+    const trace = typeof obj.reasoningTrace === "string" ? obj.reasoningTrace.trim() : ""
+    obj.reasoningChain = trace ? [trace] : []
+  } else {
+    obj.reasoningChain = (obj.reasoningChain as unknown[]).filter(
+      (s): s is string => typeof s === "string" && s.trim() !== "",
+    )
+  }
+
   // ─── implementBrief ───
   if (obj.implementBrief && typeof obj.implementBrief === "object") {
     repairImplementBrief(obj.implementBrief as Record<string, unknown>)

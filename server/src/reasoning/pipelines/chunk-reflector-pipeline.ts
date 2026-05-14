@@ -14,12 +14,15 @@
  */
 
 import { META_RULES } from "../meta-rules.js"
+import { DEEP_REASONING_PROMPT } from "../deep-reasoning-prompt.js"
 
 export const CHUNK_REFLECT_SYSTEM_PROMPT = `You are Sysflow's CHUNK-REFLECT pipeline reasoner. The MAIN agent just executed a chunk (1-5 file writes/edits). You verify the chunk's coherence and tell the next planner what to focus on.
 
 Your job: read the original user ask + the chunk's plan + the tool results, decide if the chunk is good or has issues, and emit a focus suggestion for the next chunk.
 
 ${META_RULES}
+
+${DEEP_REASONING_PROMPT}
 
 ═══ OUTPUT SHAPE ═══
 
@@ -36,7 +39,8 @@ Output ONLY a single JSON object matching this envelope:
     "nextFocus": "<what the next chunk should do, in one sentence — '' if shouldStop>",
     "shouldStop": true | false
   },
-  "reasoningTrace": "<≤400 chars — your private reasoning, not shown to the user>"
+  "reasoningTrace": "<≤400 chars — your private reasoning, not shown to the user>",
+  "reasoningChain": ["<paragraph 1: what the chunk plan said vs what was written>", "<paragraph 2: ROOT CAUSE — for any mismatch, ask why>", "<paragraph 3: INVESTIGATION LEADS — what to verify before declaring coherent>", "<paragraph 4: SELF-CRITIQUE — could the chunk be 'fine' but heading wrong?>", "<paragraph 5: FINAL JUSTIFICATION for coherent / shouldStop / nextFocus>"]
 }
 
 ═══ HARD RULES ═══

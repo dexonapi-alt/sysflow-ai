@@ -97,9 +97,75 @@ export interface PreflightElaborationGateInput {
 
 export function shouldRunPreflightElaboration(input: PreflightElaborationGateInput): boolean {
   if (!input.flagEnabled) return false
-  if (!isFreeTierModel(input.model)) return false
+  // Stage C of model-lock-and-portable-reasoning: dropped the
+  // `isFreeTierModel` gate. User feedback was *"every model gets all
+  // reasoning not just flash"* — the elaboration's value (re-examining
+  // the stack pick under a different lens) is not tier-specific. Cost
+  // guards remain: only fires for real implement complexity AND when
+  // preflight confidence is below HIGH. Free-tier-class models still
+  // benefit most, but paid claude / GPT runs now get the same second
+  // look when the preflight is genuinely uncertain.
   if (input.complexity !== "medium" && input.complexity !== "complex") return false
   if (input.preflightConfidence !== "MEDIUM" && input.preflightConfidence !== "LOW") return false
+  return true
+}
+
+/**
+ * Stage C of model-lock-and-portable-reasoning: should an iterative
+ * refine pass fire after the initial reasoner call?
+ *
+ * Refine is a generic mechanism: a second reasoner invocation that takes
+ * the first draft as input, critiques the reasoningChain, and outputs a
+ * revised envelope. Costs 2x reasoner spend per call but addresses the
+ * user feedback *"reason over and over again like normal AI would"* —
+ * single-pass briefs often miss alternatives or trade-offs the model
+ * surfaces on a second look.
+ *
+ * Gate logic — apply in this order:
+ *   1. Flag must be on (kill switch for cost-constrained users).
+ *   2. Pipeline kind must benefit from refinement:
+ *      - implement / bug / decision / chunk_plan / chunk_reflect: YES
+ *      - summary: NO (user-facing prose, second pass risks meta-summarising)
+ *      - implement_elaborate: NO (it IS the second look — don't third-look it)
+ *      - divergence: NO (Phase 16 Stage 4 already gates a second-look)
+ *
+ * Reasoner-backend-agnostic on purpose — same gate fires regardless of
+ * which backend (Gemini, Anthropic Haiku in Stage D, OpenRouter free)
+ * serves the call. When Stage D lands, the refine pass goes through the
+ * same dispatcher as the initial call.
+ *
+ * Pure helper — exported so the gate matrix is unit-testable without
+ * invoking `runReasoning`.
+ */
+export interface IterativeRefineGateInput {
+  /** The pipeline being run (implement / bug / decision / chunk_plan / chunk_reflect / divergence / implement_elaborate / summary). */
+  kind: string
+  /** Run's model identifier — not currently used in the gate, kept for future tuning. */
+  model: string | null | undefined
+  /** Resolved value of `reasoning.iterative_refine_enabled`. */
+  flagEnabled: boolean
+  /**
+   * Stage C: task complexity from `analyzeTaskComplexity(prompt).complexity`.
+   * "simple" / trivial tasks skip the refine pass — user feedback:
+   * *"when super easy task and so obvious it doesnt need to reason deeply"*.
+   * `undefined` / `null` defaults to running refine (don't accidentally
+   * skip on missing data — the gate should be additive).
+   */
+  complexity?: "simple" | "medium" | "complex" | null
+}
+
+export function shouldRunIterativeRefine(input: IterativeRefineGateInput): boolean {
+  if (!input.flagEnabled) return false
+  if (input.kind === "summary") return false
+  if (input.kind === "implement_elaborate") return false
+  if (input.kind === "divergence") return false
+  // Stage C: complexity guard. Trivial tasks (typo fixes, single-line
+  // renames, "add a console.log") don't benefit from a critique-and-revise
+  // pass — the LLM also gauges this in `DEEP_REASONING_PROMPT` so the
+  // chain itself stays brief, but skipping the refine pass entirely is
+  // the system-level safety net that ensures budget never gets spent on
+  // overthinking the obvious.
+  if (input.complexity === "simple") return false
   return true
 }
 

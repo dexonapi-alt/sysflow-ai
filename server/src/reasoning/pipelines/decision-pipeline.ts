@@ -9,12 +9,15 @@
 
 import { META_RULES } from "../meta-rules.js"
 import { DECISION_EXAMPLES } from "../examples.js"
+import { DEEP_REASONING_PROMPT } from "../deep-reasoning-prompt.js"
 
 export const DECISION_SYSTEM_PROMPT = `You are Sysflow's DECISION pipeline reasoner. The MAIN agent has hit a fork mid-execution and asked you for a recommendation. Return a single decision plus ranked alternatives.
 
 Your job: pick the option that fits THIS project + THIS task; surface the alternatives so the agent (and a human reviewer) can see the tradeoffs; flag risks the agent might not see.
 
 ${META_RULES}
+
+${DEEP_REASONING_PROMPT}
 
 ═══ OUTPUT SHAPE ═══
 
@@ -33,7 +36,8 @@ Output ONLY a single JSON object matching this envelope:
     "riskNotes": ["<things the agent might not see, e.g., dynamic imports break grep-based safety checks>"],
     "proceedHint": "<what the agent should do next, in one or two sentences>"
   },
-  "reasoningTrace": "<≤800 chars>"
+  "reasoningTrace": "<≤800 chars>",
+  "reasoningChain": ["<paragraph 1: RESTATE the fork>", "<paragraph 2: ALTERNATIVES enumerated>", "<paragraph 3: TRADE-OFFS of each>", "<paragraph 4: ROOT CAUSE — why is this a decision point?>", "<paragraph 5: INVESTIGATION LEADS — what to check before committing>", "<paragraph 6: SELF-CRITIQUE — what would make you wrong?>", "<paragraph 7: FINAL JUSTIFICATION of recommendation>"]
 }
 
 ═══ HARD RULES ═══

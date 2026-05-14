@@ -1,12 +1,31 @@
-# Command-first investigation: shell as the primary context-gathering interface
+# Command-first investigation: shell as the primary context-gathering interface, reasoning interleaved with every command
 
 - **Created:** 2026-05-13
 - **Status:** draft
-- **Scope:** Shift the agent's default mode of context-gathering from `read_file` to `run_command`. Mirror Claude Code's behaviour: investigate the system end-to-end with shell commands first, reason about each result before the next command, and only read files when about to edit them. Add a safe-command allowlist so read-only investigation doesn't drown the user in permission prompts. Extend reasoning briefs with an `investigationPlan` so the preflight Flash call decides which commands to run. Add a divergence heuristic that catches "wrote files without exploring first." Compose cleanly with the model-lock-and-portable-reasoning plan that lands first.
+- **Scope:** Shift the agent's default mode of context-gathering from `read_file` to `run_command`. Mirror Claude Code's behaviour: investigate the system end-to-end with shell commands first, **reason naturally and deeply after each command's output before deciding the next command**, and only read files when about to edit them. Add a safe-command allowlist so read-only investigation doesn't drown the user in permission prompts. Extend reasoning briefs with an `investigationPlan` so the preflight reasoner decides which commands to run. Add a divergence heuristic that catches "wrote files without exploring first." **Complexity-aware throughout — trivial / obvious tasks skip the heavy investigation loop; the LLM gauges depth, mirroring Stage C's `DEEP_REASONING_PROMPT` pattern.** Compose cleanly on top of the model-lock-and-portable-reasoning plan (Stages A-C already merged when this plan lands).
 
 ## Goal
 
 The user's symptom: *"our AI only reads when asked to read the file, it doesn't have a free exploration on its own"* — and the contrast with Claude Code: *"claude code doesn't just read files, it uses command line heavily with reasoning thats why claude code is accurate because it not just uses read to get context it get context heavily by running commands to investigate thoroughly with heavy strong reasoning, commands are necessary not just read files."*
+
+Refined vision (post-Stage-C feedback, 2026-05-15):
+
+> *"reason after iteration of the command → understand the context from the commands → reason heavily based on the command output → reason effectively and naturally, no super-structured reasoning, just natural → think the problems, whys, trade-offs, end-to-end, and more reasoning → reason deeply before iterating what command to run next → repeat and until it starts implementing it should still reason. **BUT make sure when super easy task and so obvious it doesn't need to reason deeply — be smart to distinguish.**"*
+
+The loop the agent must run on non-trivial tasks:
+
+```
+command(t) → output(t) → reason naturally about output(t) → decide command(t+1)
+       ↑                                                            │
+       └──────────────── repeat until ready to implement ────────────┘
+                                  │
+                                  ▼
+                       implementation phase (still reasoning per write)
+```
+
+The reasoning between commands is **plain prose** — the same `reasoningChain[]` shape Stage C introduced, populated per turn rather than only at preflight. The agent doesn't fill in a form between commands; it thinks naturally about what the output reveals, what alternatives are now visible, what assumption just got invalidated, and what cheap next command would disambiguate further.
+
+For trivial tasks (typo fix, single-line rename, "add a console.log"), this loop collapses to zero or one command. The LLM gauges this via the same depth-awareness instruction Stage C wired into `DEEP_REASONING_PROMPT` — *be smart, don't manufacture investigation where none is needed*.
 
 Today's behaviour, confirmed in code:
 - `tools.ts` (prompt section) tells the model `run_command` is for *"scaffolders, npm install, build commands, test commands, git, one-shot scripts"* — implicitly framing commands as side-effectful, not investigative.
@@ -25,20 +44,33 @@ After this plan: each iteration in `implement` / `bug` runs has command + reason
 - `gotchas.md: ## run_command on Windows uses PowerShell, not bash` — already captured in code (`tools.ts:749,879` branches on `process.platform === "win32"`), but the model's prompt is platform-agnostic today. This plan threads platform-aware command examples into the system prompt's investigation section.
 - `applied/2026-05-06-phase-11-awareness-and-recovery.md` — Phase 11's verification-gate pattern: ground-truth checks parallel to LLM-backed checks. This plan reuses that pattern — the safe-command allowlist is a ground-truth gate (regex match against a whitelist), the divergence heuristic is the LLM-adjacent layer.
 - `applied/2026-05-07-phase-16-deep-reasoning-on-free-models.md` — `free-tier-policy.ts` is the central module for tier-aware caps. This plan adds `getInvestigationBudget(model, intent, complexity)` to the same module.
-- Composes with **`2026-05-07-model-lock-and-portable-reasoning.md` (draft, not yet applied)** — that plan strengthens brief framing and adds the pluggable reasoner backend. This plan extends the brief *content* (new `investigationPlan` field) under that strengthened framing. **Apply the model-lock plan FIRST, then this one** — otherwise the new investigation directive lands with the soft-framing trailer and the model glances at it.
+- Composes with **`2026-05-07-model-lock-and-portable-reasoning.md`** — Stages A (PR #63 merged), B (#64 merged), C (#65 open) already strengthened brief framing + added `reasoningChain[]` + iterative refine + confidence-aware directives. This plan extends the same `reasoningChain[]` field PER-TURN (not just preflight) and adds an `investigationPlan` field that the reasoner populates with concrete commands to run. The depth-awareness instruction in `DEEP_REASONING_PROMPT` (Stage C) already tells the reasoner to be brief on trivial tasks — this plan inherits that pattern for the per-turn reasoning between commands. Stages D + E of the model-lock plan (pluggable backend + telemetry) are independent and can land before, after, or interleaved with this plan.
 
 ## Affected files
 
-**Stage 1 — System prompt: investigation-first directive**
+**Stage 1 — System prompt: investigation-first directive WITH per-turn reasoning**
 
 - `server/src/providers/prompt/sections/tools.ts` — rewrite the `run_command` description (currently lines ~30–32) from "use for scaffolders / install / build" to *"PRIMARY context-gathering tool. Use to investigate the system end-to-end before reading or writing anything. Read-only commands (`git status`, `ls`, `grep`, `find`, `npm list`, `which`) require no approval and are your default first move on any non-trivial task. Use `read_file` ONLY when you have identified a specific file you need to edit."*
-- `server/src/providers/prompt/sections/task-guidelines.ts` — replace the current "batched `read_file` for exploration" guidance with **investigate-then-read**: *"On any non-trivial task, your FIRST turn must be a `run_command` (investigation), not a `read_file`. Build your mental model from command output. After 2–4 investigation commands, you may switch to targeted `read_file` for files you've identified as relevant. Each command's `reasoning` field MUST state (a) what hypothesis it tests, (b) what you'll do with the result."*
+- `server/src/providers/prompt/sections/task-guidelines.ts` — replace the current "batched `read_file` for exploration" guidance with **investigate-then-read AND reason-between-commands**:
+  > *"On any non-trivial task, your FIRST turn must be a `run_command` (investigation), not a `read_file`. **After every command's output, reason naturally in prose about what the result reveals before deciding the next command — same `reasoningChain[]` shape the preflight reasoner uses. Cover: what assumption just got confirmed/invalidated, what alternatives are newly visible, what cheap next command would disambiguate further.** Build your mental model from command output. After 2–4 investigation commands you may switch to targeted `read_file` for files you've identified as relevant. **Continue reasoning per turn even during implementation** — write to a file, then reason about whether the write resolved what the investigation surfaced."*
+  > 
+  > *"BE SMART ABOUT DEPTH (same pattern as the preflight reasoner): trivial / obvious tasks (typo fix, single-line rename, 'add a console.log') skip the investigation loop entirely OR do at most one command. Real engineering work runs the full command-reason-command-reason loop until you have ground-truth understanding."*
 - New section file: `server/src/providers/prompt/sections/investigation.ts` — concrete platform-aware investigation patterns. Three sub-blocks:
   - **Bug investigation** — start with `git log -10 --oneline`, `git status`, then `grep -r <symptom>` or platform PowerShell equivalent.
   - **Implement (unknown codebase)** — start with `ls`, `cat package.json` (or `Get-Content`), `git remote -v`, `find . -name "*.config.*"`.
   - **Explore / explain** — chain `find` + `grep` to map the topic; only `read_file` once you've narrowed to ≤ 3 candidates.
+  - **Trivial task short-circuit** — explicit guidance: *"If the user asked for a one-line change to a named file, skip investigation. Reason in 1-2 sentences about what the change is, then `read_file` and `write_file`. Do NOT manufacture a `git status` for a 'fix the typo on line 12' request."*
 - `server/src/providers/prompt/build.ts` — register the new section. Priority slightly above `task-guidelines.ts` so investigation rules bind before task patterns.
 - `server/src/providers/prompt/sections/env-info.ts` — already emits OS/shell; add a `PREFERRED_INVESTIGATION_COMMANDS` line that adapts: bash list on Unix, PowerShell list on Windows. So the model sees concrete platform-correct examples.
+
+**Stage 1.5 — Per-turn reasoning (the loop closure)**
+
+Stage C added `reasoningChain[]` at the *reasoner's brief* level — the preflight Flash call writes a multi-paragraph deliberation that the main model sees in its system prompt. Stage 1.5 of this plan extends the same idea to the **main model's per-turn output**:
+
+- `server/src/providers/base-provider.ts` — extend the `NormalizedResponse` shape (`types.ts`) with `reasoningChain?: string[]` so the main model can return its own per-turn deliberation, not just the legacy single-line `reasoning` field.
+- Pipeline output schema additions: every `needs_tool` envelope now accepts an optional `reasoningChain: string[]` (up to 6 entries per turn — shorter than the reasoner's 10 because per-turn is lighter). Renderer surfaces it in `<ReasoningPeek>` so the user sees the model thinking between commands.
+- `server/src/providers/prompt/sections/tools.ts` — add a NEW field to the JSON envelope spec: *"For non-trivial turns, populate `reasoningChain[]` with 1-4 short paragraphs reasoning about: (a) what the last tool result revealed; (b) what your next move tests; (c) any alternative you considered and rejected. Keep it natural, not form-like. Skip the field entirely on trivial turns."*
+- Update existing tests to assert the field round-trips through `parseJsonResponse`.
 
 **Stage 2 — Safe-command allowlist**
 
@@ -81,7 +113,7 @@ After this plan: each iteration in `implement` / `bug` runs has command + reason
 
 **Stage 5 — Free-tier policy + telemetry + knowledge entries**
 
-- `server/src/services/free-tier-policy.ts` — new pure helper `getInvestigationBudget(model, intent, complexity)` returning a per-turn cap on `run_command` calls. Free tier: 4 / turn for `implement` medium-complexity, 6 / turn for `bug`. Paid: 10 / turn. Beyond budget: handler injects a `[BUDGET]` reminder in the tool-result asking the model to switch from investigation to action.
+- `server/src/services/free-tier-policy.ts` — new pure helper `getInvestigationBudget(model, intent, complexity)` returning a per-turn cap on `run_command` calls. Free tier: 4 / turn for `implement` medium-complexity, 6 / turn for `bug`. Paid: 10 / turn. **Trivial tasks (complexity === "simple") cap at 1 command — matches the LLM-side "skip the loop for obvious work" instruction; the system cap is the safety net.** Beyond budget: handler injects a `[BUDGET]` reminder in the tool-result asking the model to switch from investigation to action.
 - `cli-client/src/agent/usage-log.ts` — extend `RunSummary` with `investigationCommandsCount` so telemetry shows the new behaviour at a glance.
 - `.claude/knowledge/architecture.md` — append `## Command-first investigation` under the existing Phase-11 awareness section. Distill the loop: command → reasoning → result → next command → ... → first write.
 - `.claude/knowledge/decisions.md` — append `## Why investigate via commands, not file reads` (the rationale: commands return short factual output the model can reason about; reads return long files the model skims and hallucinates against).
@@ -118,13 +150,13 @@ N/A — no schema migrations, no persistent state changes. The `investigationCom
 
 ## Implementation order
 
-1. **Stage 1 — System prompt directive shift.** Highest impact, smallest blast radius (prompt-only). Land first so the model starts running commands; the rest of the stages strengthen + measure the behaviour.
+1. **Stage 1 — System prompt directive shift + per-turn `reasoningChain[]` field on `NormalizedResponse`.** Highest impact, smallest blast radius (prompt + envelope). Land first so the model starts running commands AND reasoning between them. The rest of the stages strengthen + measure the behaviour.
 2. **Stage 2 — Safe-command allowlist.** Without this, Stage 1 floods the user with permission prompts. Lands right after to make the new behaviour usable.
-3. **Stage 3 — Reasoning brief: `investigationPlan`.** Now that the model runs commands, give it a Flash-suggested starting list. The reasoner already knows the user's intent; surfacing a 3–5 command plan reduces "what should I run first?" hesitation.
+3. **Stage 3 — Reasoning brief: `investigationPlan`.** Now that the model runs commands, give it a reasoner-suggested starting list. The preflight already knows the user's intent; surfacing a 3–5 command plan reduces "what should I run first?" hesitation.
 4. **Stage 4 — Handler tracking + divergence heuristic.** Now we can observe whether the new behaviour is sticking. The heuristic catches regressions; the tracking feeds telemetry.
 5. **Stage 5 — Free-tier policy + telemetry + knowledge entries.** Budget caps land last (so we have telemetry to tune them); knowledge entries last (distill what shipped).
 
-Each stage = one PR off `main`. Stage labels: `feat(prompts): Stage 1 — investigate-first directive`, etc.
+Each stage = one PR off `main`. Stage labels: `feat(prompts): Stage 1 — investigate-first directive + per-turn reasoning`, etc.
 
 ## Verification
 

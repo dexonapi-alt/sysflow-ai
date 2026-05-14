@@ -17,6 +17,7 @@ const baseImplementBrief: ReasoningBrief = {
     consistencyNotes: [],
   },
   reasoningTrace: "ok",
+  reasoningChain: [],
 }
 
 const baseElaborationBrief: ReasoningBrief = {
@@ -34,6 +35,7 @@ const baseElaborationBrief: ReasoningBrief = {
     confidence: "HIGH",
   },
   reasoningTrace: "elaboration",
+  reasoningChain: [],
 }
 
 describe("getReasoningBriefSection — implement brief", () => {
@@ -102,6 +104,7 @@ describe("getReasoningBriefSection — DEEPER REASONING sub-block", () => {
         verificationSteps: [],
       },
       reasoningTrace: "x",
+      reasoningChain: [],
     }
     const out = getReasoningBriefSection({
       reasoningBrief: bugBrief,

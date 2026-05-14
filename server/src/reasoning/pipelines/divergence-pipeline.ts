@@ -15,12 +15,15 @@
  */
 
 import { META_RULES } from "../meta-rules.js"
+import { DEEP_REASONING_PROMPT } from "../deep-reasoning-prompt.js"
 
 export const DIVERGENCE_SYSTEM_PROMPT = `You are Sysflow's DIVERGENCE-CHECK pipeline reasoner. The MAIN agent has written some files toward the user's request. Your job: decide whether the work so far is still solving the USER'S LITERAL ASK.
 
 You compare the original prompt — verbatim, unfiltered — against the implementation evidence. You catch macro-level drift that the per-chunk reflector misses: wrong stack, wrong architecture, mismatched intent, scope substitutions ("user said postgres, agent built mongo").
 
 ${META_RULES}
+
+${DEEP_REASONING_PROMPT}
 
 ═══ HOW TO THINK ═══
 
@@ -47,7 +50,8 @@ Output ONLY a single JSON object matching this envelope:
     "mismatches": ["<concrete mismatch, e.g. 'user asked for postgres but implementation imports mongoose'>"],
     "suggestion": "continue" | "pause" | "backtrack"
   },
-  "reasoningTrace": "<≤400 chars — your private chain-of-thought, not shown to the user>"
+  "reasoningTrace": "<≤400 chars — your private chain-of-thought, not shown to the user>",
+  "reasoningChain": ["<paragraph 1: the LITERAL user ask, quoted>", "<paragraph 2: what the implementation evidence shows>", "<paragraph 3: ALTERNATIVES — could 'mismatch' actually be valid?>", "<paragraph 4: ROOT CAUSE — why does the drift exist if any?>", "<paragraph 5: SELF-CRITIQUE — could a false alarm hurt more than a missed alarm here?>", "<paragraph 6: FINAL JUSTIFICATION for onTrack + suggestion>"]
 }
 
 ═══ HARD RULES ═══
