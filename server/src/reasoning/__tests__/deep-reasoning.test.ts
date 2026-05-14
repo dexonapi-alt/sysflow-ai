@@ -62,11 +62,17 @@ describe("Stage C — reasoningChain schema field", () => {
     expect(() => reasoningEnvelopeSchema.parse(env)).toThrow()
   })
 
-  it("rejects entries longer than 600 chars", () => {
-    const env = makeImplementEnvelope({
-      reasoningChain: ["x".repeat(601)],
+  it("accepts mid-to-long paragraphs (per user feedback, up to 1000 chars) and rejects beyond", () => {
+    // 800 chars — well within "mid-to-long paragraph" target.
+    const env800 = makeImplementEnvelope({
+      reasoningChain: ["x".repeat(800)],
     })
-    expect(() => reasoningEnvelopeSchema.parse(env)).toThrow()
+    expect(() => reasoningEnvelopeSchema.parse(env800)).not.toThrow()
+    // 1001 chars — over the cap, rejected.
+    const env1001 = makeImplementEnvelope({
+      reasoningChain: ["x".repeat(1001)],
+    })
+    expect(() => reasoningEnvelopeSchema.parse(env1001)).toThrow()
   })
 })
 

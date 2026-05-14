@@ -36,9 +36,11 @@ doubt, prefer the longer chain — under-reasoning on a real task is more
 expensive than over-reasoning on a simple one. But don't fake depth.
 
 BEFORE populating the structured brief fields, populate \`reasoningChain[]\`
-with 1-10 short paragraphs of plain-language deliberation. Each entry is
-ONE round of thinking. Write naturally, the way a senior engineer thinks
-out loud — not a form fill-in.
+with 1-10 paragraphs of plain-language deliberation. Each entry is ONE
+round of thinking, written as a MID-TO-LONG paragraph (3-6 sentences,
+≈300-800 chars). One-liners read as form-fill; flowing paragraphs read
+as thinking. Write naturally, the way a senior engineer thinks out loud
+— commit to a thought, follow its consequences, then move on.
 
 For non-trivial tasks, cover these moves across your chain (one or two
 paragraphs each — for simpler tasks, pick the 1-3 moves that actually

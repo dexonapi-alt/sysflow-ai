@@ -252,8 +252,12 @@ export const reasoningEnvelopeSchema = z.object({
    * Optional + default `[]` so old briefs (pre-Stage-C) still parse cleanly.
    * The repair pass migrates a non-empty `reasoningTrace` into `[trace]` when
    * the chain is empty — gives old caches a graceful render path.
+   *
+   * Per-entry cap is 1000 chars (mid-to-long paragraph, ≈3-6 sentences) per
+   * user feedback: *"the reasoning output by llm should be mid to long"*.
+   * One-liner deliberation reads as form-filling, not thinking.
    */
-  reasoningChain: z.array(z.string().max(600)).max(10).default([]),
+  reasoningChain: z.array(z.string().max(1000)).max(10).default([]),
 })
 export type ReasoningBrief = z.infer<typeof reasoningEnvelopeSchema>
 
