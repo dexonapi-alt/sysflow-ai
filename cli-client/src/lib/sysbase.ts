@@ -103,6 +103,34 @@ export async function setReasoningEnabled(enabled: boolean): Promise<void> {
   await fs.writeFile(MODELS_META_FILE, JSON.stringify(data, null, 2), "utf8")
 }
 
+// ─── Stage 2 of command-first-investigation: safe-command auto-approve ───
+
+/**
+ * When true (default), `run_command` calls matching `isSafeReadOnlyCommand`
+ * (git status / ls / grep / etc.) auto-approve without firing the
+ * permission prompt. Lets investigation flow without per-command spam.
+ * Set false to restore pre-Stage-2 ask-on-every-command behaviour.
+ */
+export async function getSafeCommandsAutoApprove(): Promise<boolean> {
+  await ensureSysbase()
+  try {
+    const raw = await fs.readFile(MODELS_META_FILE, "utf8")
+    const data = JSON.parse(raw)
+    // Default true: undefined / missing key → auto-approve is on.
+    return data.commandsAutoApproveSafe !== false
+  } catch {
+    return true
+  }
+}
+
+export async function setSafeCommandsAutoApprove(enabled: boolean): Promise<void> {
+  await ensureSysbase()
+  const raw = await fs.readFile(MODELS_META_FILE, "utf8")
+  const data = JSON.parse(raw)
+  data.commandsAutoApproveSafe = enabled === true
+  await fs.writeFile(MODELS_META_FILE, JSON.stringify(data, null, 2), "utf8")
+}
+
 // ─── Permission mode persistence ───
 
 import type { PermissionMode } from "../agent/permissions.js"

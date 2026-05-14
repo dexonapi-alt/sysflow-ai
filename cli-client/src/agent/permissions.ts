@@ -16,6 +16,7 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { getToolMeta } from "./tool-meta.js"
+import { isSafeReadOnlyCommand } from "./safe-commands.js"
 
 export type PermissionMode = "default" | "auto" | "plan" | "bypass"
 export type PermissionDecision = "allow" | "deny" | "ask"
@@ -32,6 +33,15 @@ export interface CheckArgs {
   args: Record<string, unknown>
   mode: PermissionMode
   rules: Rule[]
+  /**
+   * Stage 2 of command-first-investigation plan: when true (default), a
+   * `run_command` call whose command matches `isSafeReadOnlyCommand`
+   * auto-approves without prompting. Lets `git status` / `ls` / `grep`
+   * etc. flow through investigation without per-call permission spam.
+   * Set false (via the `commands.auto_approve_safe` sysbase setting) to
+   * restore the pre-Stage-2 ask-on-every-command behaviour.
+   */
+  autoApproveSafeCommands?: boolean
 }
 
 export interface CheckResult {
@@ -42,13 +52,25 @@ export interface CheckResult {
   matchedRule?: Rule
 }
 
-export function checkPermissions({ tool, args, mode, rules }: CheckArgs): CheckResult {
+export function checkPermissions({ tool, args, mode, rules, autoApproveSafeCommands = true }: CheckArgs): CheckResult {
   // Mode-level overrides first.
   if (mode === "bypass") return { decision: "allow", source: "mode" }
+
+  // Stage 2 of command-first-investigation: pre-check for safe read-only
+  // commands. Computed once here so plan mode AND default/auto modes can
+  // both consult it. The investigation set (git status, ls, grep, etc.)
+  // is read-only by signature — plan mode legitimately allows these even
+  // though run_command itself isn't marked isReadOnly.
+  const isSafeRoCommand =
+    autoApproveSafeCommands
+    && tool === "run_command"
+    && typeof args.command === "string"
+    && isSafeReadOnlyCommand(args.command)
+
   if (mode === "plan") {
-    return getToolMeta(tool).isReadOnly
-      ? { decision: "allow", source: "mode" }
-      : { decision: "deny", source: "mode" }
+    if (getToolMeta(tool).isReadOnly) return { decision: "allow", source: "mode" }
+    if (isSafeRoCommand) return { decision: "allow", source: "mode" }
+    return { decision: "deny", source: "mode" }
   }
 
   // Persistent rules — longest-pattern-wins.
@@ -59,6 +81,14 @@ export function checkPermissions({ tool, args, mode, rules }: CheckArgs): CheckR
     .sort((a, b) => (b.pattern?.length ?? 0) - (a.pattern?.length ?? 0))
   if (matching.length > 0) {
     return { decision: matching[0].decision, source: "rule", matchedRule: matching[0] }
+  }
+
+  // Stage 2 auto-approve: a safe read-only run_command flows through
+  // without buying the per-call ask prompt. Applies in default AND auto
+  // modes (plan was already handled above). Persistent rules above can
+  // still deny if the user explicitly set one.
+  if (isSafeRoCommand) {
+    return { decision: "allow", source: "tool_default" }
   }
 
   // Per-tool default. 'auto' mode flips read-only ask defaults to allow but

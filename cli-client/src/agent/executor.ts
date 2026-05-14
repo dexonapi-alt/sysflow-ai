@@ -28,7 +28,7 @@ import { lintFile, lintFiles, displayLintErrors, resetTscCache } from "./lint.js
 import { partitionToolCalls, getToolMeta, groupForParallelExecution } from "./tool-meta.js"
 import { validateToolInput } from "./validate-tool-input.js"
 import { checkPermissions, loadRules, saveRule, lookupAnswer, rememberAnswer, primaryPath, type Rule } from "./permissions.js"
-import { getSysbasePath, getPermissionMode } from "../lib/sysbase.js"
+import { getSysbasePath, getPermissionMode, getSafeCommandsAutoApprove } from "../lib/sysbase.js"
 import { askPermission } from "../cli/permission-prompt.js"
 import { runHooks } from "./hooks.js"
 import { registerBuiltinHooks } from "./builtin-hooks.js"
@@ -95,7 +95,14 @@ async function resolvePermission(tool: string, args: Record<string, unknown>, ru
   if (cached === "allow") return "allow"
   if (cached === "deny") return "deny"
 
-  const decision = checkPermissions({ tool, args, mode, rules })
+  // Stage 2 of command-first-investigation: read the sysbase setting so
+  // checkPermissions knows whether to auto-approve safe read-only
+  // commands. Defaults to true when the setting is missing.
+  const autoApproveSafeCommands = await getSafeCommandsAutoApprove()
+  const decision = checkPermissions({ tool, args, mode, rules, autoApproveSafeCommands })
+  if (decision.source === "tool_default" && decision.decision === "allow" && tool === "run_command") {
+    console.log(`[permissions] safe-command auto-approved: ${(args.command as string | undefined)?.slice(0, 80) ?? "?"}`)
+  }
   if (decision.decision === "allow") return "allow"
   if (decision.decision === "deny") return "deny"
 
