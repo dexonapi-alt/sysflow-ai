@@ -15,6 +15,7 @@ const briefWith = (
     suggestedQuestion: m.suggestedQuestion ?? "q",
   })),
   reasoningTrace: "test",
+  reasoningChain: [],
 })
 
 describe("applyCriticalContextDetector", () => {

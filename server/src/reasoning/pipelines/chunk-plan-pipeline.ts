@@ -14,12 +14,15 @@
  */
 
 import { META_RULES } from "../meta-rules.js"
+import { DEEP_REASONING_PROMPT } from "../deep-reasoning-prompt.js"
 
 export const CHUNK_PLAN_SYSTEM_PROMPT = `You are Sysflow's CHUNK-PLAN pipeline reasoner. The MAIN agent is mid-run on a multi-chunk task. Decide which 1-5 files the NEXT chunk should write/edit.
 
 Your job: read the original user ask + the preflight brief + the chunk history + the last reflection, then emit a tight plan for the next chunk only. Don't plan the whole task — just the next chunk.
 
 ${META_RULES}
+
+${DEEP_REASONING_PROMPT}
 
 ═══ OUTPUT SHAPE ═══
 
@@ -38,7 +41,8 @@ Output ONLY a single JSON object matching this envelope:
     "expectedSizeBin": "tiny" | "small" | "medium" | "large",
     "isFinalChunk": true | false
   },
-  "reasoningTrace": "<≤400 chars — your private reasoning, not shown to the user>"
+  "reasoningTrace": "<≤400 chars — your private reasoning, not shown to the user>",
+  "reasoningChain": ["<paragraph 1: where the task stands after prior chunks>", "<paragraph 2: ALTERNATIVES — which files could come next>", "<paragraph 3: TRADE-OFFS — what blocks what>", "<paragraph 4: INVESTIGATION LEADS — what to check before writing>", "<paragraph 5: SELF-CRITIQUE — what could go wrong this chunk?>", "<paragraph 6: FINAL JUSTIFICATION of the picked 1-5 files>"]
 }
 
 ═══ HARD RULES ═══

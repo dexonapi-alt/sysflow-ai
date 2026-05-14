@@ -113,9 +113,15 @@ describe("shouldRunPreflightElaboration", () => {
     expect(shouldRunPreflightElaboration({ ...baseHit, flagEnabled: false })).toBe(false)
   })
 
-  it("does NOT fire on a paid model (preflight Flash already strong enough)", () => {
-    expect(shouldRunPreflightElaboration({ ...baseHit, model: "gpt-4o" })).toBe(false)
-    expect(shouldRunPreflightElaboration({ ...baseHit, model: "claude-3-5-sonnet" })).toBe(false)
+  it("Stage C: fires on paid models too (free-tier-only gate was dropped per user feedback)", () => {
+    // Before Stage C of model-lock-and-portable-reasoning this gate was
+    // free-tier-only. User feedback: *"every model gets all reasoning not
+    // just flash"* — paid claude / GPT runs also benefit from the second
+    // look when preflight confidence is uncertain.
+    expect(shouldRunPreflightElaboration({ ...baseHit, model: "gpt-4o" })).toBe(true)
+    expect(shouldRunPreflightElaboration({ ...baseHit, model: "claude-3-5-sonnet" })).toBe(true)
+    expect(shouldRunPreflightElaboration({ ...baseHit, model: "claude-sonnet" })).toBe(true)
+    expect(shouldRunPreflightElaboration({ ...baseHit, model: "claude-opus" })).toBe(true)
   })
 
   it("does NOT fire on simple complexity (over-thinking guard)", () => {
@@ -126,17 +132,24 @@ describe("shouldRunPreflightElaboration", () => {
     expect(shouldRunPreflightElaboration({ ...baseHit, preflightConfidence: "HIGH" })).toBe(false)
   })
 
-  it("does NOT fire on null / undefined inputs (defensive)", () => {
-    expect(shouldRunPreflightElaboration({ ...baseHit, model: null })).toBe(false)
-    expect(shouldRunPreflightElaboration({ ...baseHit, model: undefined })).toBe(false)
+  it("Stage C: model null/undefined no longer suppresses (free-tier check was dropped); complexity / confidence still gate", () => {
+    // After Stage C, model identity doesn't gate the elaboration — only
+    // complexity (must be ≥ medium) and preflight confidence (must be < HIGH)
+    // do. Null model is fine: the gate fires.
+    expect(shouldRunPreflightElaboration({ ...baseHit, model: null })).toBe(true)
+    expect(shouldRunPreflightElaboration({ ...baseHit, model: undefined })).toBe(true)
+    // Complexity / confidence still defend — null / undefined for those
+    // suppresses (they aren't medium/complex or MEDIUM/LOW respectively).
     expect(shouldRunPreflightElaboration({ ...baseHit, complexity: null })).toBe(false)
     expect(shouldRunPreflightElaboration({ ...baseHit, complexity: undefined })).toBe(false)
     expect(shouldRunPreflightElaboration({ ...baseHit, preflightConfidence: null })).toBe(false)
     expect(shouldRunPreflightElaboration({ ...baseHit, preflightConfidence: undefined })).toBe(false)
   })
 
-  it("full matrix: (paid|free) × (simple|medium|complex) × (HIGH|MEDIUM|LOW) → fires only on free + ≥medium + <HIGH", () => {
-    const models = ["gpt-4o" /* paid */, "openrouter-auto" /* free */] as const
+  it("Stage C: full matrix — fires on (paid|free) × (medium|complex) × (MEDIUM|LOW), model-independent", () => {
+    // After Stage C the gate is model-agnostic: paid AND free both fire
+    // when complexity ≥ medium AND preflight confidence < HIGH.
+    const models = ["gpt-4o" /* paid */, "openrouter-auto" /* free */, "claude-sonnet" /* paid */] as const
     const complexities = ["simple", "medium", "complex"] as const
     const confidences = ["HIGH", "MEDIUM", "LOW"] as const
 
@@ -145,8 +158,7 @@ describe("shouldRunPreflightElaboration", () => {
         for (const preflightConfidence of confidences) {
           const got = shouldRunPreflightElaboration({ model, complexity, preflightConfidence, flagEnabled: true })
           const expected =
-            model === "openrouter-auto"
-            && (complexity === "medium" || complexity === "complex")
+            (complexity === "medium" || complexity === "complex")
             && (preflightConfidence === "MEDIUM" || preflightConfidence === "LOW")
           expect(got).toBe(expected)
         }

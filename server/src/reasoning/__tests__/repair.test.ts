@@ -281,6 +281,9 @@ describe("repairReasoningResponse — pre-validation cleanup", () => {
         consistencyNotes: ["use drizzle-kit for migrations"],
       },
       reasoningTrace: "implement plan",
+      // Stage C: reasoningChain is now a recognised envelope field. A well-
+      // formed envelope includes it explicitly; repair preserves it as-is.
+      reasoningChain: ["the user wants a postgres-backed user API", "alternatives considered: prisma vs drizzle — picking drizzle for the ergonomics"],
     }
     const repaired = repairReasoningResponse(JSON.parse(JSON.stringify(valid))) as typeof valid
     expect(repaired).toEqual(valid)

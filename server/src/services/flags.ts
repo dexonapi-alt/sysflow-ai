@@ -125,6 +125,19 @@ defineFlag("awareness.threshold_blocked", 30, parseNumber)
 // Set to false to restore pre-Stage-A cross-provider fallback.
 defineFlag("providers.lock_to_chosen_model", true, parseBool)
 
+// ─── Stage C of model-lock-and-portable-reasoning plan ───
+// When true (default), every reasoner call gets a critique-and-revise
+// second pass — the reasoner is invoked with its own draft + "find
+// weaknesses and rewrite" instructions, and the revised envelope is what
+// the main model sees. Doubles reasoner spend per call when on;
+// addresses user feedback *"reason over and over again like normal AI
+// would"* — single-pass briefs often miss alternatives or trade-offs the
+// model surfaces on the second look. Skip pipelines (summary /
+// implement_elaborate / divergence) defined in `free-tier-policy.ts`'s
+// `shouldRunIterativeRefine`. Free-tier users can flip this off via
+// flags.json / env override if quota becomes tight.
+defineFlag("reasoning.iterative_refine_enabled", true, parseBool)
+
 export function getFlag<T = unknown>(name: string, sysbasePath?: string | null): T {
   const memoKey = `${name}::${sysbasePath ?? ""}`
   if (memo.has(memoKey)) return memo.get(memoKey) as T

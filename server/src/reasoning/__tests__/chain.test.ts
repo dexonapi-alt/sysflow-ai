@@ -10,6 +10,7 @@ const makeBrief = (over: Partial<ReasoningBrief> = {}): ReasoningBrief => ({
   decision: "proceed",
   missingContext: [],
   reasoningTrace: "",
+  reasoningChain: [],
   ...over,
 })
 
