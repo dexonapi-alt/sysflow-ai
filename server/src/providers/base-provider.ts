@@ -231,15 +231,27 @@ export function isProviderRateLimited(providerName: string): boolean {
   return !!state && state.hitCount >= RATE_LIMIT_MAX_RETRIES
 }
 
-/** Model fallback chains — when primary is exhausted, try these in order */
+/**
+ * Model fallback chains — when primary is exhausted, try these in order.
+ *
+ * Stage A of model-lock-and-portable-reasoning plan: explicit single-provider
+ * picks (claude-*, gemini-*, llama-70b, mistral-small) have empty chains so a
+ * rate-limited or failed call surfaces a clear error instead of silently
+ * swapping providers. Only `openrouter-auto` retains a cross-provider chain
+ * because the "auto" suffix is the user's signal that they expect cycling.
+ *
+ * The adapter ALSO gates chain-walking behind `providers.lock_to_chosen_model`
+ * (see `shouldFallback()` in adapter.ts) so even if these chains are extended
+ * in the future, explicit picks stay locked in by default.
+ */
 export const MODEL_FALLBACK_CHAINS: Record<string, string[]> = {
-  "gemini-pro":       ["gemini-flash", "mistral-small"],
-  "gemini-flash":     ["mistral-small", "llama-70b"],
-  "claude-sonnet":    ["gemini-pro", "gemini-flash"],
-  "claude-opus":      ["claude-sonnet", "gemini-pro"],
+  "gemini-pro":       [],
+  "gemini-flash":     [],
+  "claude-sonnet":    [],
+  "claude-opus":      [],
   "openrouter-auto":  ["gemini-flash", "mistral-small"],
-  "llama-70b":        ["mistral-small", "gemini-flash"],
-  "mistral-small":    ["llama-70b", "gemini-flash"],
+  "llama-70b":        [],
+  "mistral-small":    [],
   "swe":              ["gemini-pro", "gemini-flash"],
 }
 
