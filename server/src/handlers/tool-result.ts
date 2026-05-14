@@ -35,6 +35,7 @@ import {
 import type { ChunkPlanBrief, ChunkReflectionBrief } from "../reasoning/reasoning-schema.js"
 import { getFlag } from "../services/flags.js"
 import { detectDivergence, pickDivergenceAnchor, type DetectorInput } from "../services/divergence-detector.js"
+import { isSafeReadOnlyCommand } from "../services/safe-commands.js"
 import { shouldRunDivergenceSecondLook, resolveMaxChunksPerRun, resolveMaxFilesPerChunk } from "../services/free-tier-policy.js"
 import { recordSignals as recordConfidenceSignals, clearConfidence, getConfidence, getConfidenceState, getThresholdState } from "../services/confidence-tracker.js"
 import { runVerificationGate, gateSignals } from "../services/verification-gate.js"
@@ -598,7 +599,18 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
           }
 
           const input = buildDetectorInput(body.runId, anchorPrompt)
-          const heuristicSignals = detectDivergence(input)
+          let heuristicSignals = detectDivergence(input)
+          // Stage 4 of command-first-investigation: allow per-heuristic
+          // kill switch for the new `no_investigation_before_write` signal
+          // in case it over-fires on a legitimate prompt pattern. Detector
+          // stays pure; caller filters.
+          const noInvestigationFlagOn = (() => {
+            try { return getFlag<boolean>("awareness.no_investigation_heuristic_enabled", run.sysbasePath as string | undefined) }
+            catch { return true }
+          })()
+          if (!noInvestigationFlagOn) {
+            heuristicSignals = heuristicSignals.filter((s) => s.category !== "no_investigation_before_write")
+          }
           const gateOutcomes = await runVerificationGate({
             cwd: run.cwd as string,
             filesModified: input.filesModified,
@@ -1369,6 +1381,27 @@ function buildDetectorInput(runId: string, originalPrompt: string): DetectorInpu
     if (a.tool === "create_directory" && typeof a.path === "string") createdDirs.push(a.path)
   }
 
+  // Stage 4 of command-first-investigation: derive investigation count +
+  // first write/edit index from the existing actions log. No separate
+  // tracker needed — runLog.actions already records every tool call with
+  // its primary args (tool name + command + path).
+  let investigationCommandCount = 0
+  let firstWriteOrEditIndex = -1
+  for (let i = 0; i < runLog.actions.length; i++) {
+    const a = runLog.actions[i]
+    if (a.tool === "run_command" && typeof a.command === "string" && isSafeReadOnlyCommand(a.command)) {
+      investigationCommandCount += 1
+    }
+    if (firstWriteOrEditIndex < 0 && (a.tool === "write_file" || a.tool === "edit_file" || a.tool === "batch_write")) {
+      firstWriteOrEditIndex = i
+    }
+  }
+
+  // Stage 4: complexity gates the no_investigation_before_write heuristic
+  // (trivial tasks legitimately skip investigation). analyzeTaskComplexity
+  // is a cheap pure helper.
+  const complexity = analyzeTaskComplexity(originalPrompt).complexity
+
   return {
     originalPrompt,
     chunkHistory,
@@ -1377,6 +1410,9 @@ function buildDetectorInput(runId: string, originalPrompt: string): DetectorInpu
     createdDirs,
     completionMessage: null,
     plannedChunkCount: null,
+    investigationCommandCount,
+    firstWriteOrEditIndex,
+    complexity,
   }
 }
 

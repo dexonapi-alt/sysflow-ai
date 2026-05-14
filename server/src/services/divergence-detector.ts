@@ -22,6 +22,11 @@ export type DivergenceCategory =
   // Phase 11 Stage 3: emitted by the LLM divergence pipeline when its
   // verdict is onTrack=false. Detail is the joined mismatches list.
   | "llm_off_track"
+  // Stage 4 of command-first-investigation plan: the agent wrote a file
+  // before running any investigation commands. Mild signal — investigation
+  // is preferred, not required for every task; trivial tasks legitimately
+  // skip it. Suppressed when complexity === "simple".
+  | "no_investigation_before_write"
 
 export interface DivergenceSignal {
   category: DivergenceCategory
@@ -53,6 +58,26 @@ export interface DetectorInput {
    * used for scope-creep detection. Null when no plan was produced.
    */
   plannedChunkCount?: number | null
+  /**
+   * Stage 4 of command-first-investigation: count of read-only
+   * investigation commands the agent has run this run (derived from
+   * `runLog.actions` filtered through `isSafeReadOnlyCommand`). Used
+   * by the `no_investigation_before_write` heuristic.
+   */
+  investigationCommandCount?: number
+  /**
+   * Stage 4: index of the FIRST write_file / edit_file / batch_write
+   * action in the run log. -1 (or undefined) when nothing has been
+   * written yet. The heuristic fires when this is set AND
+   * `investigationCommandCount` at that turn was 0.
+   */
+  firstWriteOrEditIndex?: number
+  /**
+   * Stage 4: task complexity from `analyzeTaskComplexity`. Trivial
+   * tasks (typo fixes, single-line renames) legitimately skip
+   * investigation — the heuristic suppresses when this is "simple".
+   */
+  complexity?: "simple" | "medium" | "complex" | null
 }
 
 // ─── Tuning constants ───
@@ -152,6 +177,30 @@ export function detectDivergence(input: DetectorInput): DivergenceSignal[] {
         severity: "major",
       })
     }
+  }
+
+  // ─── Heuristic 7 (Stage 4 of command-first-investigation): wrote
+  // ─── files without running any investigation commands first ───
+  // Fires when:
+  //   - the agent has emitted at least one write/edit (firstWriteOrEditIndex set), AND
+  //   - investigationCommandCount at that point was 0, AND
+  //   - complexity isn't "simple" (trivial tasks legitimately skip)
+  // Mild signal (severity: minor). The agent may have skipped investigation
+  // for a legitimate reason (e.g. user gave specific instructions). The
+  // off-course modal won't fire on this alone — it needs the cumulative
+  // decay to drop below `awareness.threshold_off_course`.
+  const investigationCount = input.investigationCommandCount ?? 0
+  const firstWriteIdx = input.firstWriteOrEditIndex ?? -1
+  if (
+    firstWriteIdx >= 0
+    && investigationCount === 0
+    && input.complexity !== "simple"
+  ) {
+    signals.push({
+      category: "no_investigation_before_write",
+      detail: `agent wrote files without running any investigation commands first — may be hallucinating against unread file state`,
+      severity: "minor",
+    })
   }
 
   return signals

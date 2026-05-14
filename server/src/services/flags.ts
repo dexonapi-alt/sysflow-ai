@@ -114,6 +114,14 @@ defineFlag("awareness.enabled", true, parseBool)
 defineFlag("awareness.threshold_off_course", 60, parseNumber)
 defineFlag("awareness.threshold_blocked", 30, parseNumber)
 
+// ─── Stage 4 of command-first-investigation plan ───
+// When true (default), the divergence detector emits a
+// `no_investigation_before_write` signal when the agent writes a file
+// before running any read-only investigation commands. Mild signal
+// (−15 confidence). Suppressed for trivial-complexity tasks. Set to
+// false if it over-fires on a legitimate one-shot prompt pattern.
+defineFlag("awareness.no_investigation_heuristic_enabled", true, parseBool)
+
 // ─── Stage A of model-lock-and-portable-reasoning plan ───
 // When true (default), the adapter does NOT walk MODEL_FALLBACK_CHAINS
 // for explicit single-provider picks (claude-*, gemini-*, llama-70b,
