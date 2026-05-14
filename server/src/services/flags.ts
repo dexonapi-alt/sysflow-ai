@@ -138,6 +138,19 @@ defineFlag("providers.lock_to_chosen_model", true, parseBool)
 // flags.json / env override if quota becomes tight.
 defineFlag("reasoning.iterative_refine_enabled", true, parseBool)
 
+// ─── Iterative paragraph chain (follow-up to Stage C model-lock) ───
+// When true (default), the preflight reasoner builds its reasoningChain
+// paragraph-by-paragraph across N sequential Flash calls — each call
+// sees prior paragraphs and may revise/supersede them. User feedback
+// after Stage C shipped: the bulk THINKING block is correct but the
+// model "doesn't remember" the individual steps; iterative one-thought-
+// per-LLM-call solves this at the cost of N+1 Flash calls per preflight
+// (vs 1 today). Gated by kind (implement / bug / decision only — not
+// chunk pipelines) + complexity (skip simple) in free-tier-policy.ts's
+// `shouldRunIterativeChain`. Set to false to restore the single-shot
+// pre-iterative behaviour.
+defineFlag("reasoning.iterative_paragraph_chain_enabled", true, parseBool)
+
 export function getFlag<T = unknown>(name: string, sysbasePath?: string | null): T {
   const memoKey = `${name}::${sysbasePath ?? ""}`
   if (memo.has(memoKey)) return memo.get(memoKey) as T

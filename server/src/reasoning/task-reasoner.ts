@@ -21,7 +21,7 @@ import { applyCriticalContextDetector } from "./critical-context-detector.js"
 import { repairReasoningResponse } from "./repair.js"
 import { getPipelineSystemPrompt, type PipelineKind } from "./pipelines/index.js"
 import { getFlag } from "../services/flags.js"
-import { shouldRunIterativeRefine } from "../services/free-tier-policy.js"
+import { shouldRunIterativeRefine, shouldRunIterativeChain } from "../services/free-tier-policy.js"
 import { analyzeTaskComplexity } from "../services/completion-guard.js"
 
 /**
@@ -122,43 +122,75 @@ async function runReasoningInner(payload: ReasoningPayload): Promise<ReasoningBr
     return cached
   }
 
-  // Model call. Guarded with a hard timeout so a stuck SDK retry can't
-  // hold the whole agent flow — `runReasoningInner` returns null on
-  // timeout and the handler keeps going in legacy / no-brief mode.
-  let raw: string
-  try {
-    raw = await callReasonerWithTimeout(payload, kind)
-  } catch (err) {
-    console.warn(`[reasoning] model call failed: ${(err as Error).message}`)
-    return null
-  }
-
-  // Stage C of model-lock-and-portable-reasoning: iterative refine pass.
-  // A second reasoner invocation takes the first draft as input, finds
-  // 2-3 weaknesses in the reasoningChain, and produces a revised
-  // envelope. The revised raw replaces the draft for parsing; if the
-  // refine call fails (network / timeout) we fall back to the draft.
-  // Gate via `shouldRunIterativeRefine` — skips summary /
-  // implement_elaborate / divergence (see free-tier-policy.ts for why).
-  const refineEnabled = (() => {
-    try { return getFlag<boolean>("reasoning.iterative_refine_enabled", payload.sysbasePath) } catch { return true }
-  })()
-  // Stage C: complexity-aware gating. `analyzeTaskComplexity` is a cheap pure
-  // helper (keyword + length heuristics) — running it inline costs nothing
-  // and gives us a "skip refine on trivial work" signal. User feedback was
-  // explicit: *"when super easy task and so obvious it doesnt need to reason
-  // deeply"*. The system-level skip complements the prompt-level "be smart
-  // about depth" instruction in `DEEP_REASONING_PROMPT`.
+  // Pre-compute task complexity once — both gates below consult it, and
+  // the helper is a cheap pure function (keyword + length heuristics).
   const complexity = analyzeTaskComplexity(payload.userMessage).complexity
-  if (shouldRunIterativeRefine({ kind, model: payload.model, flagEnabled: refineEnabled, complexity })) {
+
+  // Iterative paragraph chain mode (paragraph-by-paragraph reasoning).
+  // User feedback after seeing Stage C's bulk THINKING block: *"reason it
+  // one by one → call llm → reason 2nd → reason 3rd time → repeat until
+  // done"*. When this mode is on, the reasoner produces the chain ACROSS
+  // N Flash calls (one paragraph per call, each seeing prior paragraphs
+  // + allowed to revise/supersede them). Then one final synthesis call
+  // produces the structured brief fields. Replaces the single-shot path
+  // — these are alternative deliveries of the same envelope shape.
+  const iterativeChainEnabled = (() => {
+    try { return getFlag<boolean>("reasoning.iterative_paragraph_chain_enabled", payload.sysbasePath) } catch { return true }
+  })()
+
+  let raw: string
+  // When iterative chain mode runs successfully, we keep the assembled
+  // chain here and override it onto the parsed envelope post-validation.
+  // Defensive against the synthesis call dropping or rewriting paragraphs.
+  let assembledChain: string[] | null = null
+  if (shouldRunIterativeChain({ kind, model: payload.model, flagEnabled: iterativeChainEnabled, complexity })) {
     try {
-      const refinedRaw = await callReasonerWithTimeout(payload, kind, buildCritiqueUserTurn(payload, kind, raw))
-      // Sanity check: refined output must at least be non-empty JSON-ish.
-      // If parsing fails downstream, we'll fall back to the draft.
-      raw = refinedRaw || raw
-      console.log(`[reasoning] iterative refine pass complete for trigger=${payload.trigger} pipeline=${kind}`)
+      const chain = await runIterativeChain(payload, kind)
+      if (chain.length === 0) {
+        // No paragraphs produced — fall through to legacy one-shot.
+        console.warn(`[reasoning] iterative chain produced zero paragraphs, falling back to one-shot`)
+        raw = await callReasonerWithTimeout(payload, kind)
+      } else {
+        console.log(`[reasoning] iterative chain assembled ${chain.length} paragraph(s) for trigger=${payload.trigger} pipeline=${kind}`)
+        assembledChain = chain
+        raw = await synthesizeStructuredBrief(payload, kind, chain)
+      }
     } catch (err) {
-      console.warn(`[reasoning] iterative refine failed, keeping draft: ${(err as Error).message}`)
+      console.warn(`[reasoning] iterative chain failed (${(err as Error).message}); falling back to one-shot`)
+      try {
+        raw = await callReasonerWithTimeout(payload, kind)
+      } catch (err2) {
+        console.warn(`[reasoning] one-shot fallback also failed: ${(err2 as Error).message}`)
+        return null
+      }
+    }
+  } else {
+    // Legacy one-shot Flash call. Guarded with a hard timeout so a stuck
+    // SDK retry can't hold the whole agent flow — `runReasoningInner`
+    // returns null on timeout and the handler keeps going in legacy /
+    // no-brief mode.
+    try {
+      raw = await callReasonerWithTimeout(payload, kind)
+    } catch (err) {
+      console.warn(`[reasoning] model call failed: ${(err as Error).message}`)
+      return null
+    }
+
+    // Stage C of model-lock-and-portable-reasoning: iterative refine
+    // pass. ONLY runs in the one-shot path — when iterative paragraph
+    // chain mode is on, the chain itself IS the iteration and stacking
+    // refine on top would mean 8+ Flash calls per preflight (too much).
+    const refineEnabled = (() => {
+      try { return getFlag<boolean>("reasoning.iterative_refine_enabled", payload.sysbasePath) } catch { return true }
+    })()
+    if (shouldRunIterativeRefine({ kind, model: payload.model, flagEnabled: refineEnabled, complexity })) {
+      try {
+        const refinedRaw = await callReasonerWithTimeout(payload, kind, buildCritiqueUserTurn(payload, kind, raw))
+        raw = refinedRaw || raw
+        console.log(`[reasoning] iterative refine pass complete for trigger=${payload.trigger} pipeline=${kind}`)
+      } catch (err) {
+        console.warn(`[reasoning] iterative refine failed, keeping draft: ${(err as Error).message}`)
+      }
     }
   }
 
@@ -171,7 +203,15 @@ async function runReasoningInner(payload: ReasoningPayload): Promise<ReasoningBr
   try {
     const json = stripFences(raw)
     const obj = JSON.parse(json)
-    const repaired = repairReasoningResponse(obj)
+    const repaired = repairReasoningResponse(obj) as Record<string, unknown>
+    // Iterative chain override: if we assembled the chain ourselves,
+    // ENFORCE it on the parsed envelope. The synthesis call sometimes
+    // drops the chain or rewrites paragraphs — overriding here
+    // preserves what we actually deliberated through. The chain values
+    // come from our own per-step parsing so they're already string-safe.
+    if (assembledChain) {
+      repaired.reasoningChain = assembledChain.slice(0, 10)
+    }
     parsed = reasoningEnvelopeSchema.parse(repaired)
     parsed = assertEnvelopeShape(parsed)
   } catch (err) {
@@ -280,6 +320,165 @@ function buildUserTurn(payload: ReasoningPayload, kind: PipelineKind): string {
     parts.push("CONTEXT:")
     parts.push(JSON.stringify(payload.context).slice(0, 4000))
   }
+  parts.push("")
+  parts.push("Output ONLY the JSON envelope. Nothing else.")
+  return parts.join("\n")
+}
+
+/**
+ * Iterative paragraph chain (paragraph-by-paragraph deliberation).
+ *
+ * Each iteration is its own Flash call that produces ONE paragraph,
+ * seeing all prior paragraphs as context. Anti-staleness: the reasoner
+ * can REVISE a prior paragraph instead of appending — sets supersedes
+ * to the paragraph's index and writes the corrected paragraph.
+ *
+ * Hard cap of `MAX_ITERATIVE_STEPS` iterations to prevent runaway. The
+ * reasoner can also set `done: true` to end the chain early when
+ * everything important has been said.
+ *
+ * Returns the assembled chain (may be shorter than the max if `done`
+ * was set or a step failed). Empty array on total failure — caller
+ * falls back to the one-shot path.
+ */
+const MAX_ITERATIVE_STEPS = 6
+
+interface IterativeStepResponse {
+  paragraph: string
+  done: boolean
+  supersedes: number | null
+}
+
+async function runIterativeChain(payload: ReasoningPayload, kind: PipelineKind): Promise<string[]> {
+  const paragraphs: string[] = []
+  for (let i = 0; i < MAX_ITERATIVE_STEPS; i++) {
+    const userTurn = buildIterativeChainUserTurn(payload, kind, paragraphs, i, MAX_ITERATIVE_STEPS)
+    let raw: string
+    try {
+      raw = await callReasonerWithTimeout(payload, kind, userTurn)
+    } catch (err) {
+      console.warn(`[reasoning] iterative chain step ${i + 1} failed: ${(err as Error).message}; stopping with ${paragraphs.length} paragraph(s)`)
+      break
+    }
+    const step = parseIterativeStep(raw)
+    if (!step) {
+      console.warn(`[reasoning] iterative chain step ${i + 1} unparseable; stopping with ${paragraphs.length} paragraph(s)`)
+      break
+    }
+    if (typeof step.supersedes === "number" && step.supersedes >= 0 && step.supersedes < paragraphs.length) {
+      console.log(`[reasoning] iterative chain step ${i + 1} supersedes paragraph ${step.supersedes}`)
+      paragraphs[step.supersedes] = step.paragraph
+    } else {
+      paragraphs.push(step.paragraph)
+    }
+    if (step.done) {
+      console.log(`[reasoning] iterative chain marked done at step ${i + 1} (${paragraphs.length} paragraph(s))`)
+      break
+    }
+  }
+  return paragraphs
+}
+
+function parseIterativeStep(raw: string): IterativeStepResponse | null {
+  try {
+    const obj = JSON.parse(stripFences(raw)) as Record<string, unknown>
+    const paragraph = typeof obj.paragraph === "string" ? obj.paragraph.trim() : ""
+    if (!paragraph) return null
+    return {
+      paragraph,
+      done: obj.done === true,
+      supersedes: typeof obj.supersedes === "number" && Number.isFinite(obj.supersedes) ? obj.supersedes : null,
+    }
+  } catch {
+    return null
+  }
+}
+
+function buildIterativeChainUserTurn(
+  payload: ReasoningPayload,
+  kind: PipelineKind,
+  paragraphs: string[],
+  index: number,
+  total: number,
+): string {
+  const parts: string[] = []
+  parts.push(`PIPELINE: ${kind}`)
+  parts.push(`TRIGGER: ${payload.trigger} (iterative chain step ${index + 1} of up to ${total})`)
+  if (payload.cwd) parts.push(`CWD: ${payload.cwd}`)
+  parts.push("")
+  parts.push("USER PROMPT:")
+  parts.push(payload.userMessage)
+  if (payload.context && Object.keys(payload.context).length > 0) {
+    parts.push("")
+    parts.push("CONTEXT:")
+    parts.push(JSON.stringify(payload.context).slice(0, 3500))
+  }
+  parts.push("")
+  parts.push("You are building a reasoning chain ONE paragraph at a time. Each step you produce ONE plain-prose mid-to-long paragraph (3-6 sentences) that BUILDS ON or REVISES the prior paragraphs.")
+
+  if (paragraphs.length === 0) {
+    parts.push("")
+    parts.push("This is the FIRST paragraph. Restate what the user is asking in your own words. Identify what's ambiguous, under-specified, or hidden behind defaults. Don't list — write naturally, the way a senior engineer thinks out loud at the start of a problem.")
+  } else {
+    parts.push("")
+    parts.push(`PRIOR PARAGRAPHS (${paragraphs.length} so far, indexed 0-${paragraphs.length - 1}):`)
+    paragraphs.forEach((p, i) => {
+      parts.push("")
+      parts.push(`[${i}] ${p}`)
+    })
+    parts.push("")
+    parts.push(`Now produce paragraph ${index + 1}. Build on or extend the prior paragraphs — reference them, deepen their analysis, address something they missed. Continue the deliberation: alternatives, trade-offs, root causes, investigation leads, self-critique, final justification — pick whichever move comes next in the engineer's natural thinking.`)
+    parts.push("")
+    parts.push("ANTI-STALENESS: if a prior paragraph's reasoning has become WRONG given your current thinking, REVISE it. Set \"supersedes\": <its index 0-based> and write the corrected paragraph in its place. Use this when new thinking invalidates a prior assumption — don't leave stale claims in the chain.")
+    parts.push("")
+    parts.push(`BE SMART ABOUT DEPTH: if you've already covered everything that matters about THIS task, set "done": true with a brief closing paragraph. Don't pad to ${total} when ${paragraphs.length} is enough.`)
+  }
+
+  parts.push("")
+  parts.push("Output a JSON object exactly:")
+  parts.push(`{"paragraph": "<one mid-to-long paragraph, 3-6 sentences, plain prose>", "done": <boolean — true if chain is complete>, "supersedes": <integer 0-${Math.max(paragraphs.length - 1, 0)} if revising, null if appending>}`)
+  parts.push("")
+  parts.push("Output ONLY that JSON object. Nothing else.")
+  return parts.join("\n")
+}
+
+/**
+ * Final synthesis call: after the iterative chain has been assembled,
+ * one Flash call takes the full chain + the original task and produces
+ * the structured brief fields (implementBrief / bugBrief / etc).
+ *
+ * The pipeline system prompt instructs Flash on the full envelope
+ * shape; we ask it to use the chain as-is and fill in the structured
+ * fields. Post-parse the caller overrides reasoningChain with our
+ * assembled chain — defensive against Flash dropping or re-writing it
+ * during synthesis.
+ */
+async function synthesizeStructuredBrief(payload: ReasoningPayload, kind: PipelineKind, chain: string[]): Promise<string> {
+  const userTurn = buildSynthesisUserTurn(payload, kind, chain)
+  return await callReasonerWithTimeout(payload, kind, userTurn)
+}
+
+function buildSynthesisUserTurn(payload: ReasoningPayload, kind: PipelineKind, chain: string[]): string {
+  const parts: string[] = []
+  parts.push(`PIPELINE: ${kind}`)
+  parts.push(`TRIGGER: ${payload.trigger} (chain synthesis)`)
+  if (payload.cwd) parts.push(`CWD: ${payload.cwd}`)
+  parts.push("")
+  parts.push("USER PROMPT:")
+  parts.push(payload.userMessage)
+  if (payload.context && Object.keys(payload.context).length > 0) {
+    parts.push("")
+    parts.push("CONTEXT:")
+    parts.push(JSON.stringify(payload.context).slice(0, 3500))
+  }
+  parts.push("")
+  parts.push("REASONING CHAIN (built paragraph-by-paragraph across prior iterations):")
+  chain.forEach((p) => {
+    parts.push("")
+    parts.push(p)
+  })
+  parts.push("")
+  parts.push("Now produce the FULL JSON envelope for this pipeline. The envelope's `reasoningChain` field MUST be the paragraphs above, verbatim and in order. The structured fields (implementBrief / bugBrief / decisionBrief / etc — whichever matches the pipeline) reflect the conclusions reached in the chain.")
   parts.push("")
   parts.push("Output ONLY the JSON envelope. Nothing else.")
   return parts.join("\n")

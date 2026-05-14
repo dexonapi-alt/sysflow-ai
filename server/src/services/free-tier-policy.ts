@@ -170,6 +170,60 @@ export function shouldRunIterativeRefine(input: IterativeRefineGateInput): boole
 }
 
 /**
+ * Iterative paragraph chain mode (paragraph-by-paragraph reasoning).
+ *
+ * User feedback that drove this: *"reason it one by one → call llm →
+ * reason 2nd → reason 3rd time → repeat until done. what i say deep
+ * reasoning is for the ai agent reason → call llm to reason → repeat
+ * until done."*
+ *
+ * When this gate fires, the reasoner produces its chain across N
+ * sequential Flash calls (one paragraph per call, each seeing prior
+ * paragraphs + allowed to revise them for anti-staleness). Total cost
+ * is N+1 Flash calls per preflight versus 1 today, so the gate is
+ * conservative about WHEN to fire:
+ *
+ *   1. Flag must be on (kill switch for cost-constrained users).
+ *   2. Pipeline kind benefits from full paragraph deliberation:
+ *      - implement / bug / decision: YES (the deep cases)
+ *      - chunk_plan / chunk_reflect: NO (fire per chunk — too expensive
+ *        for a 10-chunk run; chunked-loop pipelines stay one-shot)
+ *      - summary / implement_elaborate / divergence: NO (existing skip)
+ *   3. Complexity must be medium or complex. Simple tasks already use
+ *      a brief 1-2 paragraph chain in one shot; iterating them would
+ *      cost more than they're worth.
+ *
+ * Pure helper — exported so the gate matrix is unit-testable.
+ */
+export interface IterativeChainGateInput {
+  /** The pipeline being run. */
+  kind: string
+  /** Run's model identifier — not currently consulted, kept for future tuning. */
+  model: string | null | undefined
+  /** Resolved value of `reasoning.iterative_paragraph_chain_enabled`. */
+  flagEnabled: boolean
+  /** Task complexity from `analyzeTaskComplexity(prompt).complexity`. */
+  complexity?: "simple" | "medium" | "complex" | null
+}
+
+export function shouldRunIterativeChain(input: IterativeChainGateInput): boolean {
+  if (!input.flagEnabled) return false
+  // Skip pipelines where N+1 Flash calls is wasteful or doesn't fit.
+  if (input.kind === "summary") return false
+  if (input.kind === "implement_elaborate") return false
+  if (input.kind === "divergence") return false
+  if (input.kind === "chunk_plan") return false
+  if (input.kind === "chunk_reflect") return false
+  // Trivial-task guard: simple tasks get a brief chain anyway via the
+  // depth-awareness instruction in DEEP_REASONING_PROMPT; iterating
+  // them N times is wasted budget.
+  if (input.complexity === "simple") return false
+  // Reasoner-backend-agnostic: paragraph-by-paragraph works the same
+  // on Gemini Flash, Anthropic Haiku (Stage D), or OpenRouter free.
+  return true
+}
+
+/**
  * Phase 16 Stage 4: should the chained divergence second-look fire after
  * a borderline first verdict? All four conditions must hold:
  *
