@@ -306,6 +306,37 @@ export abstract class BaseProvider {
     return this.modelMap[modelId] || this.modelMap[keys[0]] || modelId
   }
 
+  /**
+   * Stage B of model-lock-and-portable-reasoning: build the per-request
+   * system prompt with the reasoning briefs threaded in.
+   *
+   * Anthropic and OpenRouter previously used the static `SHARED_SYSTEM_PROMPT`
+   * (`this.systemPrompt`) which meant `payload.reasoningBrief` and
+   * `payload.reasoningElaborationBrief` were computed by the reasoner,
+   * cached, and then discarded — Anthropic / OpenRouter never saw them.
+   * Calling this in place of `this.systemPrompt` routes the briefs through
+   * `getSystemPrompt(ctx)` the same way Gemini's `buildPrompt(payload)` does.
+   *
+   * Project/learned memory still flows via `buildInitialUserMessage` on
+   * these providers (unchanged from before this stage). Full memory parity
+   * with Gemini's async discovery (`discoverProjectMemory` +
+   * `recallForReasoning`) is intentionally out of scope for Stage B — the
+   * load-bearing fix here is the BRIEF reaching the model, not a refactor
+   * of memory flow. Future work can centralise the async-discovery path.
+   */
+  getSystemPromptForRequest(payload: ProviderPayload): string {
+    return getSystemPrompt({
+      model: payload.model,
+      cwd: payload.cwd,
+      planMode: payload.planMode,
+      // payload.reasoningBrief / reasoningElaborationBrief are typed
+      // `unknown` on ProviderPayload to avoid an import cycle into the
+      // reasoning module; cast at the seam (same pattern Gemini uses).
+      reasoningBrief: payload.reasoningBrief as never,
+      reasoningElaborationBrief: payload.reasoningElaborationBrief as never,
+    })
+  }
+
   clearRunState(runId: string): void {
     this.runState.delete(runId)
     this.runTasks.delete(runId)

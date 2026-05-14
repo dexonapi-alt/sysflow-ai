@@ -97,8 +97,12 @@ export class AnthropicProvider extends BaseProvider {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
+              // Stage B: `system` is rebuilt per request so reasoning briefs
+              // (preflight implement/bug/decision/summary, elaboration) reach
+              // the model. Before this change Anthropic used the static
+              // SHARED_SYSTEM_PROMPT and never saw any brief content.
               model: modelName,
-              system: this.systemPrompt,
+              system: this.getSystemPromptForRequest(payload),
               messages: history,
               max_tokens: maxTokensCap,
               temperature: 0.1,

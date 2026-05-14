@@ -31,10 +31,16 @@ export class OpenRouterProvider extends BaseProvider {
     try {
       let history = this.runState.get(payload.runId) as ChatMessage[] | undefined
 
+      // Stage B: rebuild the system prompt per request so reasoning briefs
+      // (preflight implement/bug/decision/summary, elaboration) reach the
+      // model. Before this change OpenRouter used the static
+      // SHARED_SYSTEM_PROMPT and never saw any brief content.
+      const systemPromptForRequest = this.getSystemPromptForRequest(payload)
+
       if (!payload.toolResult && !payload.toolResults) {
         // First call — new conversation
         history = [
-          { role: "system", content: this.systemPrompt },
+          { role: "system", content: systemPromptForRequest },
           { role: "user", content: this.buildInitialUserMessage(payload) }
         ]
         this.runState.set(payload.runId, history)
@@ -49,11 +55,18 @@ export class OpenRouterProvider extends BaseProvider {
 
         if (!history) {
           history = [
-            { role: "system", content: this.systemPrompt },
+            { role: "system", content: systemPromptForRequest },
             { role: "user", content: `Previous ${toolMsg}` }
           ]
           this.runState.set(payload.runId, history)
         } else {
+          // Stage B: refresh history[0] so mid-run brief updates (on-error /
+          // on-completion / freshly-cached chunk reflections) propagate to
+          // the model. For runs where the brief is stable (preflight only
+          // fires once) this is a no-op replacement.
+          if (history[0]?.role === "system") {
+            history[0] = { role: "system", content: systemPromptForRequest }
+          }
           history.push({ role: "user", content: toolMsg })
         }
       }
