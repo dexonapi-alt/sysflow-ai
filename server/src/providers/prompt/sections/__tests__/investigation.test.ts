@@ -99,6 +99,7 @@ describe("buildSystemPrompt — investigation section is wired in", () => {
           buildPlan: [],
           edgeCases: [],
           consistencyNotes: [],
+          investigationPlan: [],
         },
       },
     })
