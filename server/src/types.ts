@@ -99,6 +99,21 @@ export interface NormalizedResponse {
    *  this via `applyMemoryFeedback`, which cross-validates each id
    *  against the response text before mutating the store. */
   memoryFeedback?: { confirmed?: string[]; contradicted?: string[] } | null
+  /**
+   * Stage 1.5 of command-first-investigation plan: per-turn plain-prose
+   * deliberation produced by the MAIN model on each `needs_tool` /
+   * `completed` response. Mirrors the preflight reasoner's
+   * `reasoningChain[]` from Stage C of model-lock-and-portable-reasoning,
+   * but populated turn-by-turn so the agent's deliberation streams as
+   * one-thought-per-LLM-call. Each entry is a mid-to-long paragraph
+   * (3-6 sentences). Cap of 6 entries per turn — per-turn deliberation
+   * is lighter than preflight's 10-entry chain.
+   *
+   * Surfaces in the CLI as `log` events so the user sees the agent
+   * reasoning between commands. Omitted on trivial turns where there's
+   * nothing meaningful to deliberate about.
+   */
+  reasoningChain?: string[]
 }
 
 // ─── Task ───

@@ -1,7 +1,7 @@
 # Command-first investigation: shell as the primary context-gathering interface, reasoning interleaved with every command
 
 - **Created:** 2026-05-13
-- **Status:** draft
+- **Status:** in-progress
 - **Scope:** Shift the agent's default mode of context-gathering from `read_file` to `run_command`. Mirror Claude Code's behaviour: investigate the system end-to-end with shell commands first, **reason naturally and deeply after each command's output before deciding the next command**, and only read files when about to edit them. Add a safe-command allowlist so read-only investigation doesn't drown the user in permission prompts. Extend reasoning briefs with an `investigationPlan` so the preflight reasoner decides which commands to run. Add a divergence heuristic that catches "wrote files without exploring first." **Complexity-aware throughout — trivial / obvious tasks skip the heavy investigation loop; the LLM gauges depth, mirroring Stage C's `DEEP_REASONING_PROMPT` pattern.** Compose cleanly on top of the model-lock-and-portable-reasoning plan (Stages A-C already merged when this plan lands).
 
 ## Goal
