@@ -28,7 +28,9 @@ export function getToolsSection(): string {
 6. create_directory — args: { "path": "src/utils" }
 7. search_code — args: { "directory": ".", "pattern": "function auth" }
 8. run_command — args: { "command": "...", "cwd": ".", "background"?: true }
-   Use for: scaffolders (npm create vite, npx create-next-app, npx @nestjs/cli new, etc.), npm install / pnpm install / yarn install, build commands, test commands, git, one-shot scripts.
+   PRIMARY CONTEXT-GATHERING TOOL. On any non-trivial task, your FIRST move should be a read-only investigation command, NOT a read_file. Commands return short factual output you can reason about; reads return long files you'd skim and hallucinate against.
+   Use for INVESTIGATION (default): \`git status\`, \`git log -10 --oneline\`, \`git diff\`, \`ls\`, \`find . -name "*.ts" -maxdepth 3\`, \`grep -r <symbol> src/\`, \`cat package.json\`, \`npm list <pkg>\`, \`which <bin>\`, \`tree -L 2\`, PowerShell equivalents on Windows (\`Get-ChildItem\`, \`Select-String\`, \`Get-Content\`, \`Get-Command\`).
+   Use for ACTION: scaffolders (npm create vite, npx create-next-app, npx @nestjs/cli new, etc.), npm install / pnpm install / yarn install, build commands, test commands, git commit/push, one-shot scripts.
    Never use for: long-running servers (npm run dev, node server.js), interactive REPLs, or anything that doesn't terminate.
    BACKGROUND MODE (Phase 7):
    - INSTALL commands run in the BACKGROUND by default — npm install, pnpm install, yarn install, bun install, pip install -r, bundle install, cargo build, go mod download. The tool returns { startedBackground: true, jobId, status: "running" } IMMEDIATELY so you can keep working.
@@ -51,5 +53,29 @@ export function getToolsSection(): string {
    - Without jobId: lists all jobs for this run, running first, with status / exitCode / durationMs / stdoutTail / stderrTail / label.
    - With jobId: returns just that one job's current state.
    Cheap. Call AFTER you've done a few unrelated steps. DO NOT loop on it — that wastes turns.
-   Returns "done" with exitCode=0 on success; "running" if still in progress; "failed" with exitCode + stderrTail on failure.`
+   Returns "done" with exitCode=0 on success; "running" if still in progress; "failed" with exitCode + stderrTail on failure.
+
+═══ JSON ENVELOPE (every response) ═══
+
+Every response is a JSON envelope with a "kind" discriminator:
+
+{
+  "kind": "needs_tool" | "completed" | "failed" | "waiting_for_user",
+  "content": "<short user-facing text — what just happened or what's next>",
+  "reasoning": "<legacy 1-line summary, optional>",
+  "reasoningChain": ["<paragraph 1>", "<paragraph 2>", ...],
+  "tool": "<tool name>" | "tools": [{ "id": "...", "tool": "...", "args": {...} }, ...],
+  "args": { ... }    // when using "tool" form
+}
+
+The \`reasoningChain\` field (Stage 1.5 of command-first-investigation) is
+where you reason naturally between commands. Each entry is a MID-TO-LONG
+paragraph (3-6 sentences, ≈300-800 chars) — NOT a one-liner. Cap of 6
+entries per turn. Write in plain prose, the way a senior engineer thinks
+out loud after seeing a command's output. Cover what the last tool result
+revealed, what alternative you considered and rejected, what your next
+move tests. Skip the field entirely on trivial turns where there's
+nothing meaningful to deliberate about — gauge depth, don't manufacture
+deliberation. The CLI surfaces these paragraphs so the user sees you
+reasoning before each command.`
 }

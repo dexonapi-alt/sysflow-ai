@@ -42,9 +42,20 @@ CHUNKING (Phase 10 — when a CHUNK PLAN appears in your context):
 - When NO chunk plan is present (chunked loop disabled, free Gemini quota out, or trivial-task short-circuit), self-manage: ≤ 5 write_file per turn, highest-priority files first, return needs_tool to yield, the agent loop comes back.
 - The persistent memory store records each chunk's summary so /continue across sessions Just Works.
 
+INVESTIGATION-FIRST (Stage 1 of command-first-investigation plan):
+- On any non-trivial task your FIRST turn MUST be a \`run_command\` for read-only investigation (\`git status\`, \`ls\`, \`grep\`, \`find\`, \`cat package.json\`), NOT a \`read_file\`. Commands return short factual output you can reason about; reads return long files you'd skim and hallucinate against.
+- After every command's output, populate \`reasoningChain[]\` with 1-3 mid-to-long paragraphs of plain prose deliberation: what the result revealed, what assumption just got confirmed/invalidated, what alternative is now visible, what your next move tests. Each paragraph is 3-6 sentences — one-liners read as form-fill, not thinking. The reasoner-side \`DEEP_REASONING_PROMPT\` pattern from Stage C is now active per-turn: think out loud, commit to a thought, follow its consequences, then move on.
+- Build your mental model from 2-4 investigation commands. ONLY THEN switch to \`read_file\` for files you've identified as relevant. Use \`read_file\` for files you're about to EDIT — never as a primary context-gathering move.
+- Continue reasoning per turn even during implementation. Write to a file, then reason about whether the write resolved what investigation surfaced; that prose feeds the divergence detector and the user's trust.
+
+BE SMART ABOUT DEPTH:
+- If the task is genuinely trivial / obvious / one-line (e.g. "add a console.log here", "rename this variable", "fix the typo on line 12 of foo.ts"): skip the investigation loop. Reason in 1 brief \`reasoningChain\` entry about what the change is, then \`read_file\` and \`edit_file\`. Do NOT manufacture a \`git status\` for a 5-line fix.
+- If the task is real engineering work — choosing a stack, locating a bug's root cause, planning multi-file scope, deciding architecture — run the full command-reason-command-reason loop until you have ground-truth understanding.
+- The line is your judgement call. Under-investigating on a real task wastes more time than over-investigating on a simple one — when in doubt, run the command. But don't fake deliberation.
+
 EXPLORATION (when answering "what's on this repo", "tell me about X", "explain how Y works"):
-- DO NOT read files one at a time. On your FIRST turn, send a single tools[] batch with the obvious entry points (3-8 of: package.json, README, tsconfig.json, the main entry file, key source files near the topic). Then a SECOND batch for whatever the first batch revealed.
-- Aim for ≤3 turns total before answering: 1 broad batch, optionally 1 narrowing batch, then "completed" with the summary.
+- Start with INVESTIGATION commands first (\`ls\`, \`tree -L 2\`, \`cat package.json\`, \`find . -name "README*"\`), then batched \`read_file\` once you've narrowed to ≤ 3 candidates.
+- Aim for ≤3 turns total before answering: 1 investigation batch, optionally 1 narrowing read batch, then "completed" with the summary.
 - Skip files you can predict the contents of (lockfiles, .gitignore, generated dist/).
 
 COMMANDS:

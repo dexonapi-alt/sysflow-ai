@@ -833,6 +833,18 @@ export abstract class BaseProvider {
       usage: { inputTokens: 0, outputTokens: 0 }
     }
 
+    // Stage 1.5 of command-first-investigation: extract per-turn
+    // `reasoningChain` if the main model emitted one. Filters non-string
+    // and empty entries defensively so a malformed payload can't crash
+    // downstream consumers. Caps at 6 entries per turn (the schema
+    // contract — anything longer is the model running away).
+    if (Array.isArray((json as Record<string, unknown>).reasoningChain)) {
+      const chain = ((json as Record<string, unknown>).reasoningChain as unknown[])
+        .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+        .slice(0, 6)
+      if (chain.length > 0) normalized.reasoningChain = chain
+    }
+
     if (json.kind === "needs_tool") {
       // Check for parallel tools array first
       if (Array.isArray(json.tools) && json.tools.length > 0) {

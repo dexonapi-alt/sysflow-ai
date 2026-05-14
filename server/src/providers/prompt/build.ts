@@ -19,6 +19,7 @@ import { getProjectMemorySection, type ProjectMemoryCtx } from "./sections/proje
 import { getPlanModeSection, type PlanModeCtx } from "./sections/plan-mode.js"
 import { getReasoningBriefSection, type ReasoningBriefCtx } from "./sections/reasoning-brief.js"
 import { getLearnedMemorySection, type LearnedMemoryCtx } from "./sections/learned-memory.js"
+import { getInvestigationSection } from "./sections/investigation.js"
 
 export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "═══ SYSTEM_PROMPT_DYNAMIC_BOUNDARY ═══"
 
@@ -49,6 +50,13 @@ export function buildSystemPrompt(ctx: PromptCtx = {}): BuiltPrompt {
     { id: "tools", priority: 20, cacheable: true, content: getToolsSection() },
     { id: "task_guidelines", priority: 30, cacheable: true, content: getTaskGuidelinesSection() },
     { id: "output_efficiency", priority: 40, cacheable: true, content: getOutputEfficiencySection() },
+    // Stage 1 of command-first-investigation: investigation patterns
+    // section. Non-cacheable because it reads ctx.platform to render
+    // bash vs PowerShell forms. Sits BETWEEN env_info (which surfaces
+    // the platform identifier) and the reasoning_brief (which renders
+    // the THINKING block) so the model sees the platform, the patterns,
+    // then the preflight deliberation in that order.
+    { id: "investigation", priority: 102, cacheable: false, content: getInvestigationSection(ctx) },
     { id: "env_info", priority: 100, cacheable: false, content: getEnvInfoSection(ctx) },
     { id: "project_memory", priority: 105, cacheable: false, content: getProjectMemorySection(ctx) },
     { id: "learned_memory", priority: 106, cacheable: false, content: getLearnedMemorySection(ctx) },
