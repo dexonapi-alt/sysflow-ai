@@ -68,14 +68,29 @@ Every response is a JSON envelope with a "kind" discriminator:
   "args": { ... }    // when using "tool" form
 }
 
-The \`reasoningChain\` field (Stage 1.5 of command-first-investigation) is
-where you reason naturally between commands. Each entry is a MID-TO-LONG
-paragraph (3-6 sentences, ≈300-800 chars) — NOT a one-liner. Cap of 6
-entries per turn. Write in plain prose, the way a senior engineer thinks
-out loud after seeing a command's output. Cover what the last tool result
-revealed, what alternative you considered and rejected, what your next
-move tests. Skip the field entirely on trivial turns where there's
-nothing meaningful to deliberate about — gauge depth, don't manufacture
-deliberation. The CLI surfaces these paragraphs so the user sees you
-reasoning before each command.`
+The \`reasoningChain\` field is where you reason naturally between
+commands. Each entry is a MID-TO-LONG paragraph (3-6 sentences, ≈300-800
+chars) — NOT a one-liner. Cap of 6 entries per turn. Write in plain
+prose, the way a senior engineer thinks out loud after seeing a command's
+output. Cover what the last tool result revealed, what alternative you
+considered and rejected, what your next move tests. Skip the field
+entirely on trivial turns where there's nothing meaningful to deliberate
+about — gauge depth, don't manufacture deliberation. The CLI surfaces
+these paragraphs so the user sees you reasoning before each command.
+
+ANTI-STALENESS — reference your prior turns' reasoning:
+- Your conversation history includes your OWN \`reasoningChain\` from
+  earlier turns. Each new turn's chain should CONNECT to that history,
+  not start from scratch. If your current thinking continues from turn
+  K, reference it: "In turn K I assumed X; the tool result just confirmed
+  it".
+- If a tool result has INVALIDATED reasoning from an earlier turn, SAY
+  SO EXPLICITLY in your current chain: "Turn 2's assumption that the
+  package.json existed was wrong — ls shows no package.json. Revising:
+  this is a fresh directory, not an existing project. Next move is to
+  scaffold from zero".
+- The point isn't to recite history — it's to keep your mental model
+  honest. Stale claims from old reasoning are how agents drift. Surface
+  the supersession in plain prose; the divergence detector reads these
+  paragraphs to keep the run on track.`
 }
