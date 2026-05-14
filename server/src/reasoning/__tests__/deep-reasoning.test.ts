@@ -126,7 +126,7 @@ describe("Stage C — repair pass defaults reasoningChain", () => {
 })
 
 describe("Stage C — getReasoningBriefSection renders THINKING block", () => {
-  it("renders the THINKING block when reasoningChain has entries", () => {
+  it("renders the THINKING block as plain prose paragraphs (no numbering — user feedback)", () => {
     const brief = reasoningEnvelopeSchema.parse(makeImplementEnvelope({
       reasoningChain: [
         "The user is asking for a tic-tac-toe game.",
@@ -137,10 +137,16 @@ describe("Stage C — getReasoningBriefSection renders THINKING block", () => {
     const out = getReasoningBriefSection({ reasoningBrief: brief })
     expect(out).not.toBeNull()
     expect(out!).toContain("═══ THINKING")
-    expect(out!).toContain("1. The user is asking for a tic-tac-toe game.")
-    expect(out!).toContain("2. Alternative stacks:")
-    expect(out!).toContain("3. Self-critique:")
-    expect(out!).toContain("═══ END THINKING ═══")
+    // Plain prose — the entries appear verbatim, no leading "1.", "2.", "3."
+    expect(out!).toContain("The user is asking for a tic-tac-toe game.")
+    expect(out!).toContain("Alternative stacks:")
+    expect(out!).toContain("Self-critique:")
+    expect(out!).not.toMatch(/^\s*1\.\s/m)
+    expect(out!).not.toMatch(/^\s*2\.\s/m)
+    expect(out!).not.toMatch(/^\s*3\.\s/m)
+    // Paragraphs separated by blank lines so the model reads them as prose,
+    // not a checklist.
+    expect(out!).toContain("The user is asking for a tic-tac-toe game.\n\nAlternative stacks:")
   })
 
   it("omits the THINKING block when reasoningChain is empty", () => {

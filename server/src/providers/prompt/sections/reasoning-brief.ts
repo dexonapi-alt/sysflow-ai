@@ -26,17 +26,26 @@ export function getReasoningBriefSection(ctx: ReasoningBriefCtx): string | null 
   lines.push("")
 
   // Stage C: render the reasoner's plain-prose deliberation BEFORE the
-  // structured brief fields. User feedback was that the structured fields
-  // alone read like a form — the THINKING block surfaces the deliberation
-  // (alternatives, trade-offs, root causes, self-critique) the reasoner
-  // produced so the main model sees the WHY, not just the WHAT.
+  // structured brief fields. Each entry is rendered as its own paragraph
+  // separated by a blank line — NO numbering. User feedback after seeing
+  // the first numbered render: *"it shouldn't have numbers like 1. 2. 3.
+  // reasoning — it should be plain"*. Numbered lists read as forms or
+  // checklists, which is the exact "too structured" feel Stage C is
+  // supposed to fight.
+  //
+  // This block remains a one-shot preflight delivery in the system prompt
+  // — the deeper "one-thought-per-LLM-call" pattern (so the main model
+  // reasons iteratively rather than reading a pre-baked brief) is the
+  // 2026-05-13-command-first-investigation plan's Stage 1.5 territory:
+  // per-turn `reasoningChain[]` on the main model's own response envelope.
   const chain = (brief.reasoningChain ?? []).filter((s) => typeof s === "string" && s.trim().length > 0)
   if (chain.length > 0) {
-    lines.push("═══ THINKING (reasoner's plain-prose deliberation) ═══")
+    lines.push("═══ THINKING ═══")
     chain.forEach((step, i) => {
-      lines.push(`${i + 1}. ${step}`)
+      if (i > 0) lines.push("")
+      lines.push(step)
     })
-    lines.push("═══ END THINKING ═══")
+    lines.push("═══")
     lines.push("")
   }
 
