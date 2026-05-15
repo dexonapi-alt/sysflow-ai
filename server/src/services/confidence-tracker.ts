@@ -49,6 +49,7 @@ const CATEGORY_WEIGHT: Record<DivergenceCategory, number> = {
   llm_off_track: 25,                     // Phase 11 Stage 3: Flash second-opinion verdict — same heft as keyword-absent
   no_investigation_before_write: 15,    // Stage 4 of command-first-investigation: mild signal — investigation is preferred, not required
   same_action_repeated_in_session: 18,   // Stage 4 of free-tier-quality-enforcement: stuck-loop catcher; fires per-step on free-tier
+  reasoning_action_mismatch: 10,         // Stage 5 of free-tier-quality-enforcement: said-X-did-Y; conservative weight (false-positives possible)
 }
 
 function severityMultiplier(sev: DivergenceSignal["severity"]): number {

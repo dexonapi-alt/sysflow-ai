@@ -38,6 +38,8 @@ import { detectDivergence, pickDivergenceAnchor, type DetectorInput } from "../s
 import { isSafeReadOnlyCommand } from "../services/safe-commands.js"
 import { applyLedgerUpdates, clearLedger } from "../services/task-ledger.js"
 import { clearReviewState } from "../services/self-review-scheduler.js"
+import { getLastReasoning, setLastReasoning, clearLastReasoning } from "../services/last-reasoning-store.js"
+import { pickLastReasoning } from "../services/reasoner-action-checker.js"
 import { shouldRunDivergenceSecondLook, resolveMaxChunksPerRun, resolveMaxFilesPerChunk, shouldRunPerStepDivergence } from "../services/free-tier-policy.js"
 import { recordSignals as recordConfidenceSignals, clearConfidence, getConfidence, getConfidenceState, getThresholdState } from "../services/confidence-tracker.js"
 import { runVerificationGate, gateSignals } from "../services/verification-gate.js"
@@ -258,7 +260,16 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
       && shouldRunPerStepDivergence(run.model as string | null | undefined)
     ) {
       const input = buildDetectorInput(body.runId, run.content)
-      const signals = detectDivergence(input)
+      let signals = detectDivergence(input)
+      // Stage 5: per-heuristic kill switch for reasoning_action_mismatch.
+      // Detector stays pure; caller filters.
+      const crossCheckOn = (() => {
+        try { return getFlag<boolean>("quality.reasoning_action_cross_check_enabled", run.sysbasePath as string | null | undefined) }
+        catch { return true }
+      })()
+      if (!crossCheckOn) {
+        signals = signals.filter((s) => s.category !== "reasoning_action_mismatch")
+      }
       if (signals.length > 0) {
         recordConfidenceSignals(body.runId, signals)
         const score = getConfidence(body.runId)
@@ -657,6 +668,14 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
           })()
           if (!noInvestigationFlagOn) {
             heuristicSignals = heuristicSignals.filter((s) => s.category !== "no_investigation_before_write")
+          }
+          // Stage 5: respect the cross-check flag at chunk boundary too.
+          const crossCheckFlagOn = (() => {
+            try { return getFlag<boolean>("quality.reasoning_action_cross_check_enabled", run.sysbasePath as string | undefined) }
+            catch { return true }
+          })()
+          if (!crossCheckFlagOn) {
+            heuristicSignals = heuristicSignals.filter((s) => s.category !== "reasoning_action_mismatch")
           }
           const gateOutcomes = await runVerificationGate({
             cwd: run.cwd as string,
@@ -1138,6 +1157,13 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
       .catch(() => { /* best-effort */ })
   }
 
+  // Stage 5 of free-tier-quality-enforcement: cache the per-turn
+  // reasoningChain so the NEXT tool-result can run the reasoner-vs-action
+  // cross-check against whatever action the agent emits.
+  if (Array.isArray(normalized.reasoningChain)) {
+    setLastReasoning(body.runId, normalized.reasoningChain)
+  }
+
   const response = mapNormalizedResponseToClient(body.runId, normalized)
   if (onErrorBrief) response.reasoningBrief = onErrorBrief
   if (onCompletionBrief) response.reasoningBrief = onCompletionBrief
@@ -1214,6 +1240,9 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     // prior run would persist and the first review of the next run
     // would fire at the wrong cadence.
     clearReviewState(body.runId)
+    // Stage 5 of free-tier quality enforcement: drop the cached per-turn
+    // reasoningChain so the next run starts clean.
+    clearLastReasoning(body.runId)
     lastLlmDivergenceCheckedChunk.delete(body.runId)
     awarenessCooldownChunks.delete(body.runId)
     lastDivergenceVerdict.delete(body.runId)
@@ -1469,6 +1498,25 @@ function buildDetectorInput(runId: string, originalPrompt: string): DetectorInpu
     command: typeof a.command === "string" ? a.command : undefined,
   }))
 
+  // Stage 5 of free-tier-quality-enforcement: pair the model's last
+  // reasoningChain paragraph with the most-recent action so the
+  // reasoner-vs-action checker can flag "said-X-did-Y" mismatches.
+  // Both fields must be present for the heuristic to fire; missing
+  // either is a no-op.
+  const cachedChain = getLastReasoning(runId)
+  const lastReasoning = cachedChain ? pickLastReasoning(cachedChain) : null
+  const latestRaw = runLog.actions[runLog.actions.length - 1]
+  let latestAction: { tool: string; path?: string | null; command?: string | null; commandIsSafeReadOnly?: boolean } | null = null
+  if (latestRaw && typeof latestRaw.tool === "string") {
+    const cmd = typeof latestRaw.command === "string" ? latestRaw.command : null
+    latestAction = {
+      tool: latestRaw.tool,
+      path: typeof latestRaw.path === "string" ? latestRaw.path : null,
+      command: cmd,
+      commandIsSafeReadOnly: cmd ? isSafeReadOnlyCommand(cmd) : undefined,
+    }
+  }
+
   return {
     originalPrompt,
     chunkHistory,
@@ -1481,6 +1529,8 @@ function buildDetectorInput(runId: string, originalPrompt: string): DetectorInpu
     firstWriteOrEditIndex,
     complexity,
     recentActions,
+    lastReasoning,
+    latestAction,
   }
 }
 

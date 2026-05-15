@@ -27,6 +27,7 @@ import { seedLedgerFromBuildPlan } from "../services/task-ledger.js"
 import type { ChunkPlanBrief } from "../reasoning/reasoning-schema.js"
 import { getFlag } from "../services/flags.js"
 import { getConfidence, getThresholdState } from "../services/confidence-tracker.js"
+import { setLastReasoning } from "../services/last-reasoning-store.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
 interface UserMessageBody {
@@ -610,6 +611,13 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
         }
       })
       .catch(() => { /* best-effort */ })
+  }
+
+  // Stage 5 of free-tier-quality-enforcement: cache the per-turn
+  // reasoningChain so the next tool-result handler can run the
+  // reasoner-vs-action cross-check against the action the agent emits.
+  if (Array.isArray(normalized.reasoningChain)) {
+    setLastReasoning(runId, normalized.reasoningChain)
   }
 
   const clientResp = mapNormalizedResponseToClient(runId, normalized)
