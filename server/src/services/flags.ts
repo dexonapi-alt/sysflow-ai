@@ -264,6 +264,18 @@ defineFlag("quality.force_error_reasoning_enabled", true, parseBool)
 // the reasoner often iterating past 2.
 defineFlag("reasoning.error_reasoning_max_iterations", 4, parseNumber)
 
+// Stage 4: when true (default), the next response after a tool
+// error gets validated for acknowledgement. If the validator says
+// the model ignored the error (no overlap with the error vocab AND
+// didn't pivot to a different action / OR retried the exact same
+// broken command), the handler rejects + retries with a stronger
+// prompt. Hard cap at 3 rejections per run to prevent infinite
+// loops; after the cap the system gives up and lets the run
+// proceed (the Phase 11 awareness loop will catch sustained drift).
+// Off-switch in case the validator over-fires on edge cases that
+// surface in real telemetry.
+defineFlag("quality.error_acknowledgement_rejection_enabled", true, parseBool)
+
 // ─── Iterative paragraph chain (follow-up to Stage C model-lock) ───
 // When true (default), the preflight reasoner builds its reasoningChain
 // paragraph-by-paragraph across N sequential Flash calls — each call
