@@ -44,6 +44,14 @@ export interface RunSummary {
    *  Target ≤ 0.1/run on aggregate; spikes mean the thresholds need tuning
    *  or the model genuinely went off the rails. */
   autoPauseEvents?: number
+  /** Stage E of model-lock-and-portable-reasoning: which reasoner
+   *  backend served the run's Flash calls (`"gemini"` / `"anthropic"`
+   *  / `"openrouter"`). Captured from the server's first response that
+   *  carries `reasonerBackend`. Null on runs where no brief was
+   *  produced (legacy fallback, or no API keys configured). Lets
+   *  telemetry analysis split metrics by backend so the cost +
+   *  reliability of each path can be tracked separately. */
+  reasonerBackend?: "gemini" | "anthropic" | "openrouter" | null
 }
 
 const PROMPT_PREVIEW_CHARS = 200
@@ -74,6 +82,11 @@ export async function recordRunSummary(sysbasePath: string | undefined | null, s
       ? Math.round(summary.divergenceConfidenceAvg * 10) / 10
       : null,
     autoPauseEvents: summary.autoPauseEvents ?? 0,
+    // Stage E of model-lock-and-portable-reasoning. Null sentinel when
+    // no brief landed during the run (legacy fallback path) so jq /
+    // analysis tools can distinguish "no reasoning happened" from "no
+    // such field was logged".
+    reasonerBackend: summary.reasonerBackend ?? null,
   }
   try {
     await fs.appendFile(file, JSON.stringify(entry) + "\n", "utf8")

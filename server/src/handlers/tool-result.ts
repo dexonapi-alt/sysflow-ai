@@ -22,7 +22,7 @@ import { getPendingError, clearPendingError, setPendingError, buildFixInstructio
 import { applyToolResultBudget, estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import { classifyToolError, classifyToolErrorFromResult } from "../services/tool-error-classifier.js"
 import { persistLargeToolResult } from "../store/tool-result-persistence.js"
-import { runReasoning } from "../reasoning/task-reasoner.js"
+import { runReasoning, getReasonerBackendForRun, clearReasonerBackendForRun } from "../reasoning/task-reasoner.js"
 import { recordImplementSummary, recordBugPattern, recordChunkSummary, recordUserCorrection, applyMemoryFeedback, recallForReasoning } from "../memory-store/index.js"
 import {
   attachReflection,
@@ -490,6 +490,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
           model: run.model,
           cwd: run.cwd as string | undefined,
           sysbasePath: run.sysbasePath as string | undefined,
+          runId: body.runId,
           context: { tool: lastError.tool, result: lastError.result, recentErrors: incomingErrors.length },
         })
         onErrorBrief = briefResult
@@ -578,6 +579,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
         model: run.model,
         cwd: run.cwd as string | undefined,
         sysbasePath: run.sysbasePath as string | null | undefined,
+        runId: body.runId,
         context: {
           originalUserPrompt: run.content,
           chunkPlan: latestChunk.plan,
@@ -700,6 +702,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
                 model: run.model,
                 cwd: run.cwd as string | undefined,
                 sysbasePath: run.sysbasePath as string | null | undefined,
+                runId: body.runId,
                 context: {
                   originalUserPrompt: anchorPrompt,
                   filesModified: input.filesModified.slice(0, 30),
@@ -738,6 +741,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
                     model: run.model,
                     cwd: run.cwd as string | undefined,
                     sysbasePath: run.sysbasePath as string | null | undefined,
+                    runId: body.runId,
                     context: {
                       originalUserPrompt: anchorPrompt,
                       filesModified: input.filesModified.slice(0, 30),
@@ -872,6 +876,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
         model: run.model,
         cwd: run.cwd as string | undefined,
         sysbasePath: run.sysbasePath as string | null | undefined,
+        runId: body.runId,
         context: {
           originalUserPrompt: run.content,
           chunkHistory: getChunkHistory(body.runId).map((c) => ({
@@ -1051,6 +1056,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
           model: run.model,
           cwd: run.cwd as string | undefined,
           sysbasePath: run.sysbasePath as string | undefined,
+          runId: body.runId,
           context: {
             originalTask: run.content,
             filesModified: runLog.filesModified.slice(0, 30),
@@ -1167,6 +1173,12 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
   const response = mapNormalizedResponseToClient(body.runId, normalized)
   if (onErrorBrief) response.reasoningBrief = onErrorBrief
   if (onCompletionBrief) response.reasoningBrief = onCompletionBrief
+  // Stage E of model-lock-and-portable-reasoning: surface the run's
+  // reasoner backend so the CLI can record it in `RunSummary`. Constant
+  // for the run; absent until at least one runReasoning call has
+  // resolved a backend.
+  const reasonerBackend = getReasonerBackendForRun(body.runId)
+  if (reasonerBackend) response.reasonerBackend = reasonerBackend
   // Phase 10: surface the chunk briefs so the CLI can render the boundary.
   if (chunkPlanBrief) (response as unknown as Record<string, unknown>).chunkPlanBrief = chunkPlanBrief
   if (chunkReflectionBrief) (response as unknown as Record<string, unknown>).chunkReflectionBrief = chunkReflectionBrief
@@ -1243,6 +1255,9 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     // Stage 5 of free-tier quality enforcement: drop the cached per-turn
     // reasoningChain so the next run starts clean.
     clearLastReasoning(body.runId)
+    // Stage E of model-lock-and-portable-reasoning: drop the per-run
+    // reasoner backend telemetry entry.
+    clearReasonerBackendForRun(body.runId)
     lastLlmDivergenceCheckedChunk.delete(body.runId)
     awarenessCooldownChunks.delete(body.runId)
     lastDivergenceVerdict.delete(body.runId)

@@ -1,7 +1,7 @@
 # Model lock-in, portable reasoner, and brief enforcement
 
 - **Created:** 2026-05-07
-- **Status:** in-progress
+- **Status:** implemented (2026-05-15)
 - **Scope:** Three user-flagged issues that must land before Phase 17. Lock the user's chosen model so it never silently swaps to a different provider. Wire the reasoning briefs into Anthropic + OpenRouter system prompts so the briefs aren't Gemini-only. Make the reasoner backend pluggable so non-Gemini main models stay reasoning-capable when Gemini is unavailable. Strengthen brief framing so the main model honours it instead of glancing at it.
 
 ## Goal
@@ -134,3 +134,31 @@ Each stage = one PR off `main`. Stage labels: `feat(providers): Stage A — lock
 - **Updating `MODEL_FALLBACK_CHAINS` for the swe model.** Out of scope; `swe` is a placeholder provider with non-production semantics.
 - **Removing the legacy single-turn fallback** when `pickReasonerBackend` returns null. Today the handlers gracefully degrade without reasoning; that path stays untouched.
 - **Migrating to Anthropic Haiku 4.5 (the current latest) for the reasoner explicitly.** The plan picks `claude-haiku-4-5` because it's currently the latest cost-effective reasoner; future Haiku versions can be swapped in `anthropic-backend.ts` without re-planning.
+
+## Completion notes
+
+All five stages shipped as separate PRs off `main`, merged in order:
+
+- **PR #63** — Stage A: provider lock-in (`MODEL_FALLBACK_CHAINS` trimmed for explicit picks; `providers.lock_to_chosen_model` flag default-on)
+- **PR #64** — Stage B: brief consumption in Anthropic + OpenRouter (`getSystemPromptForRequest` replaces static `SHARED_SYSTEM_PROMPT` in both providers)
+- **PR #65** — Stage C: brief framing strength (confidence-aware HIGH / MEDIUM / LOW wording; "surface conflict in reasoning before deviating" escape hatch; iterative-refine pass via `runReasoningChain`; iterative paragraph chain mode)
+- **PR #77** — Stage D: pluggable reasoner backend (`reasoning/backends/` directory + 3 backend modules + dispatcher; `pickReasonerBackend` in `free-tier-policy.ts`; `reasoning.backend` flag)
+- **PR #78** — Stage E: telemetry + knowledge entries (`ClientResponse.reasonerBackend` field + per-run map in `task-reasoner.ts`; `RunSummary.reasonerBackend` → `usage.jsonl`; three knowledge entries: architecture for the model-aware reasoner shape, decisions for the same-vendor selection rationale, gotchas for the pre-Stage-B Anthropic/OpenRouter brief-injection bug)
+
+**Deviations from the original plan:**
+
+- Stage C grew a follow-up *"iterative paragraph chain"* mode (paragraph-by-paragraph reasoning across N Flash calls) that wasn't in the original plan. Surfaced as a separate kill switch (`reasoning.iterative_paragraph_chain_enabled`) so it can be toggled independently of the iterative-refine pass.
+- Stage D's OpenRouter reasoner uses `google/gemini-2.0-flash-exp:free` (a free Google route on OpenRouter) rather than a paid OpenRouter reasoning model. The plan was non-specific; this choice keeps OpenRouter-routed runs free even when the reasoner path is exercised.
+- Stage E's CLI capture is *first-observation-wins* rather than *latest-overwrite*. Since the backend is run-constant, the difference is moot in practice; *first-observation* is cheaper to reason about (set-once invariant).
+- The plan listed `cli-client/src/agent/usage-log.ts` Stage E test additions inline with the field addition — they shipped as part of the same Stage E PR rather than separated.
+
+**Telemetry / next-look items (NOT in this plan's scope but worth flagging):**
+
+- Watch `usage.jsonl` for `reasonerBackend` distribution. If `anthropic` rate-limits start showing up as null-brief runs (= legacy fallback fired), revisit cross-backend reasoner fallback as a follow-up plan.
+- The Stage B fix (briefs reach Anthropic + OpenRouter) is also what made Stage C's stronger framing actually useful for non-Gemini models. Future framing experiments should A/B against the new directive variants, not the pre-Stage-C advisory text.
+
+**Knowledge entries captured:**
+
+- `architecture.md: ## Reasoner backends (model-aware)` — the full backend shape + selection matrix + telemetry surface
+- `decisions.md: ## Reasoner backend follows the main model, not the user's preference flag` — three rejected alternatives + the rule
+- `gotchas.md: ## Anthropic + OpenRouter providers used to skip the ctx-aware system prompt` — the pre-Stage-B bug so future contributors don't re-introduce it

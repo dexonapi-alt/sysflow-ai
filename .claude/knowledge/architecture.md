@@ -509,3 +509,70 @@ The Phase 12 event union grew with two slots and one extension:
 - InteractiveHints: `cli-client/src/ui/components/InteractiveHints.tsx` (+ pure `deriveHintState`)
 - Hints table: `cli-client/src/ui/state/hints.ts` (`pickHints`, `formatHints`, `HINT_TABLE`)
 - Legacy gating predicate: `cli-client/src/agent/events.ts: shouldRenderInlineForLegacy()`
+
+## Reasoner backends (model-aware)
+
+- **Source:** plan `applied/2026-05-07-model-lock-and-portable-reasoning.md` (Stages D + E)
+
+Before Stage D, every Phase 5/10/11/15/16 reasoning call hit Gemini Flash directly. After Stage D, the reasoner is pluggable: each run's main model maps to a same-vendor reasoner when available, falling back through other configured backends only as a last resort. The selection is pure-deterministic (no LLM judgement), and the resolved backend is constant for the run.
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│  runReasoning(payload)                                                    │
+│       │                                                                   │
+│       ▼                                                                   │
+│  pickReasonerBackend({ model, flagOverride, env })                       │
+│       │   walks (1) explicit flag override                                │
+│       │         (2) main-model family                                     │
+│       │         (3) which API keys are configured                         │
+│       │                                                                   │
+│       │  null → no backend available → legacy single-turn fallback        │
+│       │                                                                   │
+│       ▼                                                                   │
+│   ┌───────────┐    ┌──────────────┐    ┌──────────────────┐               │
+│   │ gemini    │    │ anthropic    │    │ openrouter       │               │
+│   │ 2.5-flash │    │ haiku-4-5    │    │ gemini-2.0-flash │               │
+│   │ (SDK)     │    │ (/v1/messages)│   │ -exp:free (REST) │               │
+│   └─────┬─────┘    └──────┬───────┘    └────────┬─────────┘               │
+│         │                 │                     │                         │
+│         └─────────────────┴─────────────────────┘                         │
+│                           │  raw JSON envelope string                     │
+│                           ▼                                               │
+│             callReasoner returns to runReasoning →                        │
+│             parse + repair + cache + return brief                         │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### Selection matrix (auto mode)
+
+| Main model family                            | Preference (first available key wins)    |
+| -------------------------------------------- | ----------------------------------------- |
+| `claude-*`                                   | anthropic → gemini → openrouter           |
+| `gemini-*` / `swe`                           | gemini → openrouter → anthropic           |
+| `openrouter-auto` / `llama-*` / `mistral-*` / `gemini-flash-or` | gemini → openrouter → anthropic |
+| unknown / null                               | gemini → anthropic → openrouter           |
+
+Rationale lives in `decisions.md: ## Reasoner backend follows the main model, not the user's preference flag`.
+
+### Telemetry (Stage E)
+
+- Server: `task-reasoner.ts` maintains `reasonerBackendByRun: Map<string, ReasonerBackend>`, populated on the first `callReasoner` per run when `payload.runId` is provided.
+- `getReasonerBackendForRun(runId)` is read by `handlers/user-message.ts` + `handlers/tool-result.ts`; the value lands on `ClientResponse.reasonerBackend`.
+- CLI: `cli-client/src/agent/agent.ts` captures `reasonerBackend` from the first response that carries it; reasonable invariant since the value is run-constant.
+- Persisted: `cli-client/src/agent/usage-log.ts: RunSummary.reasonerBackend` → `usage.jsonl` per-run JSONL entry, null sentinel when no brief was produced.
+
+### Cross-backend fallback is OUT OF SCOPE (deliberate)
+
+If Anthropic Haiku rate-limits mid-run, sysflow does NOT silently fall over to Gemini Flash. The existing `callReasonerWithTimeout` wrapper catches transient hiccups; persistent failures surface so operators know their backend is degraded. The dispatcher's `null` return (no API key for the chosen backend) is the only place the reasoner gracefully degrades — and there the degrade is to legacy non-reasoning mode, not a different reasoner.
+
+Why: cross-backend fallback was rejected by the model-lock plan because it re-introduces the *exact* symptom Stage A was designed to fix — silent swap to a different provider. The same logic applies to reasoners as to main models. If `usage.jsonl` shows Haiku rate-limiting often enough to be a real pain, a future plan can revisit; until then, the unobservable swap is worse than the observable degradation.
+
+### Key files (one source of truth per concern)
+
+- Selection: `server/src/services/free-tier-policy.ts: pickReasonerBackend` (+ `ReasonerBackend` type)
+- Dispatcher: `server/src/reasoning/backends/index.ts: callReasonerBackend`
+- Backend modules: `server/src/reasoning/backends/{gemini,anthropic,openrouter}-backend.ts`
+- Per-run telemetry: `server/src/reasoning/task-reasoner.ts: reasonerBackendByRun` + `getReasonerBackendForRun` + `clearReasonerBackendForRun`
+- Flag: `server/src/services/flags.ts: reasoning.backend` (default `"auto"`)
+- Client surface: `server/src/types.ts: ClientResponse.reasonerBackend`
+- CLI summary: `cli-client/src/agent/usage-log.ts: RunSummary.reasonerBackend`

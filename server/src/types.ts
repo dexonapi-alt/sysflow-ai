@@ -177,6 +177,17 @@ export interface ClientResponse {
   errorCode?: ServerErrorCode
   /** Phase 5: optional reasoning brief produced by the pre-flight / on-error / on-completion / self-invoked triggers. */
   reasoningBrief?: unknown
+  /**
+   * Stage E of model-lock-and-portable-reasoning: which reasoner
+   * backend served the run's Flash calls (`"gemini"` / `"anthropic"` /
+   * `"openrouter"`). Attached by the user-message + tool-result
+   * handlers when a brief was produced for the run; absent otherwise.
+   * Telemetry-only — the CLI records it in `RunSummary` and writes the
+   * `usage.jsonl` line at terminal exit. Constant for the duration of
+   * a run (env doesn't shift mid-run), so observing it on any response
+   * is sufficient.
+   */
+  reasonerBackend?: "gemini" | "anthropic" | "openrouter" | null
 }
 
 // ─── Database ───

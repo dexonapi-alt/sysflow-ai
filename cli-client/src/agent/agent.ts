@@ -391,6 +391,15 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   // aren't counted (intentional — telemetry is best-effort, not auditable).
   let flashCallsCount = 0
   if ((response as Record<string, unknown>).reasoningBrief) flashCallsCount += 1
+  // Stage E of model-lock-and-portable-reasoning: capture the resolved
+  // reasoner backend the FIRST time it lands on a server response (it's
+  // constant for the rest of the run). Recorded into RunSummary on
+  // terminal exit so usage.jsonl gets the field.
+  let reasonerBackend: "gemini" | "anthropic" | "openrouter" | null = null
+  const initialBackend = (response as Record<string, unknown>).reasonerBackend
+  if (initialBackend === "gemini" || initialBackend === "anthropic" || initialBackend === "openrouter") {
+    reasonerBackend = initialBackend
+  }
   // Phase 11 Stage 5: track the last awareness state we've shown so we can
   // emit a one-line transition log when the badge flips
   // (on_track → off_course or off_course → blocked).
@@ -519,6 +528,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       divergenceDetections: divergenceDetectionsThisRun,
       divergenceConfidenceAvg: confidenceSampleCount > 0 ? confidenceSampleSum / confidenceSampleCount : undefined,
       autoPauseEvents: autoPauseEventsThisRun,
+      reasonerBackend,
     })
     unregisterSpinner()
   }
@@ -685,6 +695,16 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         tallyAwareness((response as Record<string, unknown>).awarenessSnapshot as { state: string; confidence: number } | undefined)
         if ((response as Record<string, unknown>).awarenessChoice === true) {
           autoPauseEventsThisRun += 1
+        }
+        // Stage E of model-lock-and-portable-reasoning: capture the
+        // backend if it wasn't surfaced on the very first response
+        // (preflight didn't run, or this is a /continue run where the
+        // initial response was a cache hit). Constant once set.
+        if (!reasonerBackend) {
+          const b = (response as Record<string, unknown>).reasonerBackend
+          if (b === "gemini" || b === "anthropic" || b === "openrouter") {
+            reasonerBackend = b
+          }
         }
         noteSuccess(budget)
         break
