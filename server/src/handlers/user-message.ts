@@ -12,7 +12,8 @@ import { actionPlanner } from "../services/action-planner.js"
 import { initRunContext, ingestDirectoryTree } from "../services/context-manager.js"
 import { isFrontendTask, detectFrontendStack, getFrontendPatterns } from "../knowledge/frontend-patterns.js"
 import { accumulateFrontendContent } from "../services/frontend-quality-guard.js"
-import { detectErrorForSearch, buildErrorSearchOverride } from "../services/setup-intelligence.js"
+import { detectErrorForSearch, buildErrorSearchOverride, setConfigSkipList } from "../services/setup-intelligence.js"
+import { runProjectInitChain } from "../reasoning/project-init-reasoner.js"
 import { detectErrorContext, setPendingError, detectAllErrors, setPendingErrorQueue } from "../services/error-autofix.js"
 import { createPipelineFromAiPlan, createFallbackPipeline, pipelineToTaskMeta } from "../services/task-pipeline.js"
 import { detectScaffoldingNeed, buildScaffoldConfirmationMessage } from "../scaffold/index.js"
@@ -164,6 +165,52 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
   initRunContext(runId, body.content)
   if (body.directoryTree && body.directoryTree.length > 0) {
     ingestDirectoryTree(runId, body.directoryTree)
+  }
+
+  // ─── Stage 1 of agent-runtime-fixes plan: project-init reasoning ───
+  // Fires BEFORE preflight. Classifies the working directory as
+  // empty / small / existing-small / existing-large and emits a
+  // tailored investigation plan + skip list for the action-planner.
+  // Closes the user-reported failure mode where the agent demanded
+  // tsconfig.json in an empty directory and hard-stopped on a 0-hit
+  // web search. Best-effort; failures degrade gracefully (chain
+  // returns null → action-planner's pre-Stage-1 behaviour stays).
+  let projectInitBrief: import("../reasoning/project-init-reasoner.js").ProjectInitBrief | null = null
+  const projectInitEnabled = (() => {
+    try { return getFlag<boolean>("quality.project_init_reasoning_enabled", body.sysbasePath as string | undefined) }
+    catch { return true }
+  })()
+  if (projectInitEnabled) {
+    try {
+      const maxIters = (() => {
+        try { return getFlag<number>("reasoning.project_init_max_iterations", body.sysbasePath as string | undefined) }
+        catch { return 3 }
+      })()
+      projectInitBrief = await runProjectInitChain({
+        directoryTree: (body.directoryTree ?? []) as Array<{ name: string; type: "file" | "directory" }>,
+        userMessage: body.content,
+        platform: process.platform,
+        model: body.model,
+        maxIterations: maxIters,
+      })
+      if (projectInitBrief) {
+        console.log(`[project-init] committed: repoState=${projectInitBrief.repoState} fileCount=${projectInitBrief.fileCount} confidence=${projectInitBrief.confidence} iterations=${projectInitBrief.iterations}`)
+        // Seed the action-planner skip list ONLY when the brief is
+        // confident enough to commit. LOW-confidence empty/small reads
+        // could be a misclassification on a monorepo root; let the
+        // hijack still fire as a safety net.
+        if (
+          (projectInitBrief.repoState === "empty" || projectInitBrief.repoState === "small") &&
+          projectInitBrief.confidence !== "LOW" &&
+          projectInitBrief.skipConfigVerificationFor.length > 0
+        ) {
+          setConfigSkipList(runId, projectInitBrief.skipConfigVerificationFor)
+          console.log(`[project-init] seeded action-planner skip list (${projectInitBrief.skipConfigVerificationFor.length} entries)`)
+        }
+      }
+    } catch (err) {
+      console.warn(`[project-init] chain threw:`, (err as Error).message)
+    }
   }
 
   // ─── Deprecate stale context entries (cheap, runs once per new prompt) ───
@@ -537,6 +584,7 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     reasoningBrief,
     reasoningElaborationBrief,
     chunkPlanBrief,
+    projectInitBrief,
     runIntent,
     taskComplexity: taskComplexity.complexity,
     userId: body.userId || null,
@@ -670,6 +718,15 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
   clientResp.intentClassificationSource = intentResult.source
   if (intentResult.paragraphs && intentResult.paragraphs.length > 0) {
     clientResp.intentClassificationParagraphs = intentResult.paragraphs
+  }
+  // Stage 1 of agent-runtime-fixes plan: surface the project-init brief
+  // so the cli renders the paragraphs in <ReasoningPeek> (PR #83's
+  // plain-prose path) and captures the classification for telemetry.
+  // Constant for the run — set ONLY on this initial response.
+  if (projectInitBrief) {
+    clientResp.projectInitParagraphs = projectInitBrief.paragraphs
+    clientResp.projectInitRepoState = projectInitBrief.repoState
+    clientResp.projectInitConfidence = projectInitBrief.confidence
   }
   // Phase 10: surface the chunk-plan brief on the response so the CLI (Stage 5)
   // can render the chunk progress badge. Stage 4 will also inject it into the

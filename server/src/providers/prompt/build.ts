@@ -21,10 +21,11 @@ import { getReasoningBriefSection, type ReasoningBriefCtx } from "./sections/rea
 import { getLearnedMemorySection, type LearnedMemoryCtx } from "./sections/learned-memory.js"
 import { getInvestigationSection } from "./sections/investigation.js"
 import { getTaskLedgerSection, type TaskLedgerCtx } from "./sections/task-ledger.js"
+import { getProjectStateSection, type ProjectStateCtx } from "./sections/project-state.js"
 
 export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "═══ SYSTEM_PROMPT_DYNAMIC_BOUNDARY ═══"
 
-export interface PromptCtx extends EnvInfoCtx, ProjectMemoryCtx, PlanModeCtx, ReasoningBriefCtx, LearnedMemoryCtx, TaskLedgerCtx, SystemRulesGate {
+export interface PromptCtx extends EnvInfoCtx, ProjectMemoryCtx, PlanModeCtx, ReasoningBriefCtx, LearnedMemoryCtx, TaskLedgerCtx, SystemRulesGate, ProjectStateCtx {
   model?: string
 }
 
@@ -73,6 +74,12 @@ export function buildSystemPrompt(ctx: PromptCtx = {}): BuiltPrompt {
     // last thing the model sees before the brief.
     { id: "task_ledger", priority: 103, cacheable: false, content: getTaskLedgerSection(ctx) },
     { id: "env_info", priority: 100, cacheable: false, content: getEnvInfoSection(ctx) },
+    // Stage 1 of agent-runtime-fixes plan: project-state block. Sits
+    // BEFORE the reasoning_brief so the brief reads against the
+    // classified repo shape ("EMPTY → scaffold from scratch" /
+    // "EXISTING LARGE → investigate before write"). Non-cacheable
+    // because the brief is per-run.
+    { id: "project_state", priority: 104, cacheable: false, content: getProjectStateSection(ctx) },
     { id: "project_memory", priority: 105, cacheable: false, content: getProjectMemorySection(ctx) },
     { id: "learned_memory", priority: 106, cacheable: false, content: getLearnedMemorySection(ctx) },
     { id: "reasoning_brief", priority: 107, cacheable: false, content: getReasoningBriefSection(ctx) },

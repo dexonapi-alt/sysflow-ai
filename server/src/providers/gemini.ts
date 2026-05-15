@@ -165,6 +165,8 @@ export class GeminiProvider extends BaseProvider {
         try { return getFlag<boolean>("quality.taskplan_emission_gating_enabled") }
         catch { return true }
       })(),
+      // Stage 1 of agent-runtime-fixes plan: project-state block.
+      projectInitBrief: payload.projectInitBrief,
     })
   }
 

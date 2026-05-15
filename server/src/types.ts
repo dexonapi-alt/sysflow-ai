@@ -64,6 +64,13 @@ export interface ProviderPayload {
   errorReasoningFailedTool?: string
   /** Phase 10 chunked-loop planner brief — when set, the prompt builder injects "files: [...]" so the model honours the chunk's file list exactly. Untyped to avoid an import cycle. */
   chunkPlanBrief?: unknown
+  /** Stage 1 of agent-runtime-fixes plan: project-init reasoner brief.
+   *  Set ONCE per run on the initial user_message turn. The prompt builder
+   *  reads `repoState` + `investigationPlan` + `keyMarkers` and renders the
+   *  `═══ PROJECT STATE ═══` block so the agent's first move knows whether
+   *  the repo is empty (scaffold) or large (investigate first). Untyped to
+   *  avoid an import cycle with the reasoning module. */
+  projectInitBrief?: unknown
   /** Phase 18 Stage 5: classified intent for the run, resolved by
    *  `classifyIntent(run.content)` at the handler entry. Threaded to
    *  the system-rules section so the taskPlan instruction is
@@ -288,6 +295,26 @@ export interface ClientResponse {
    * Absent on responses that don't touch the error-reasoning path.
    */
   errorAckRejectionCount?: number
+  /**
+   * Stage 1 of agent-runtime-fixes plan: project-init reasoner's
+   * paragraphs for `<ReasoningPeek>`. Surfaces on the first response
+   * of each run when the chain committed. Absent when no project-init
+   * brief was produced (flag off / no reasoner backend / chain
+   * returned null).
+   */
+  projectInitParagraphs?: string[]
+  /**
+   * Stage 1: the classifier's verdict, constant for the run. Used
+   * for telemetry (`RunSummary.projectInitRepoState`) and for the cli
+   * to render appropriate UI hints (e.g. "scaffolding from scratch"
+   * label when `empty`).
+   */
+  projectInitRepoState?: "empty" | "small" | "existing-small" | "existing-large" | null
+  /**
+   * Stage 1: confidence of the project-init brief. Useful for jq /
+   * analysis tools to slice telemetry by how sure the classifier was.
+   */
+  projectInitConfidence?: "HIGH" | "MEDIUM" | "LOW" | null
 }
 
 // ─── Database ───
