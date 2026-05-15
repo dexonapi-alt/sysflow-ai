@@ -13,7 +13,6 @@
  */
 
 import crypto from "node:crypto"
-import { GoogleGenerativeAI } from "@google/generative-ai"
 import { classifyIntent, type IntentHint } from "./intent-classifier.js"
 import { reasoningEnvelopeSchema, assertEnvelopeShape, type ReasoningBrief, type ReasoningTrigger } from "./reasoning-schema.js"
 import { getReasoningCache, setReasoningCache } from "./reasoning-cache.js"
@@ -21,8 +20,9 @@ import { applyCriticalContextDetector } from "./critical-context-detector.js"
 import { repairReasoningResponse } from "./repair.js"
 import { getPipelineSystemPrompt, type PipelineKind } from "./pipelines/index.js"
 import { getFlag } from "../services/flags.js"
-import { shouldRunIterativeRefine, shouldRunIterativeChain } from "../services/free-tier-policy.js"
+import { shouldRunIterativeRefine, shouldRunIterativeChain, pickReasonerBackend } from "../services/free-tier-policy.js"
 import { analyzeTaskComplexity } from "../services/completion-guard.js"
+import { callReasonerBackend } from "./backends/index.js"
 
 /**
  * Hard timeout on a single reasoner SDK call. The Google SDK does its own
@@ -276,35 +276,34 @@ async function callReasonerWithTimeout(payload: ReasoningPayload, kind: Pipeline
 }
 
 async function callReasoner(payload: ReasoningPayload, kind: PipelineKind, userTurnOverride?: string): Promise<string> {
-  const apiKey = process.env.GEMINI_API_KEY
-  if (!apiKey) throw new Error("GEMINI_API_KEY is not set")
-  const genAI = new GoogleGenerativeAI(apiKey)
-
   const maxOutputTokens = (() => {
     try { return getFlag<number>("reasoning.max_output_tokens", payload.sysbasePath) } catch { return 2_500 }
   })()
 
-  // Always run reasoning on Gemini Flash regardless of the main model — cheap + fast.
-  // (Stage D of model-lock-and-portable-reasoning will replace this with a pluggable
-  // backend dispatcher; Stage C keeps Gemini Flash so the iterative-refine wiring
-  // can land in isolation.)
-  const reasonerModelName = "gemini-2.5-flash"
-  const model = genAI.getGenerativeModel({
-    model: reasonerModelName,
-    systemInstruction: getPipelineSystemPrompt(kind),
-    generationConfig: {
-      responseMimeType: "application/json",
-      temperature: 0.0,
-      maxOutputTokens,
-    },
-  })
+  // Stage D of model-lock-and-portable-reasoning: pick the backend by
+  // the run's main model + which API keys are configured. The
+  // `reasoning.backend` flag lets operators pin one backend explicitly;
+  // `"auto"` (default) defers to the model-driven policy in
+  // free-tier-policy.ts.
+  const flagOverride = (() => {
+    try { return getFlag<string>("reasoning.backend", payload.sysbasePath) } catch { return "auto" }
+  })()
+  const backend = pickReasonerBackend({ model: payload.model ?? null, flagOverride })
+  if (!backend) {
+    // No backend can serve this run. Surface the same error shape the
+    // pre-Stage-D path used so the caller's existing handling (try/catch
+    // in runReasoning → null return → legacy mode) still works.
+    throw new Error("No reasoner backend available — set GEMINI_API_KEY, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY")
+  }
 
-  // Stage C: `userTurnOverride` lets the iterative-refine pass send a
-  // critique-and-revise user turn instead of the standard initial one.
-  // First-pass calls leave it undefined and get `buildUserTurn`.
-  const userTurn = userTurnOverride ?? buildUserTurn(payload, kind)
-  const result = await model.generateContent(userTurn)
-  return result.response.text()
+  return callReasonerBackend(backend, {
+    payload,
+    kind,
+    userTurnOverride,
+    defaultUserTurn: buildUserTurn(payload, kind),
+    maxOutputTokens,
+    systemInstruction: getPipelineSystemPrompt(kind),
+  })
 }
 
 function buildUserTurn(payload: ReasoningPayload, kind: PipelineKind): string {

@@ -193,6 +193,18 @@ defineFlag("quality.per_step_divergence_for_free_tier", true, parseBool)
 // pattern.
 defineFlag("quality.reasoning_action_cross_check_enabled", true, parseBool)
 
+// ─── Stage D of model-lock-and-portable-reasoning plan ───
+// Which reasoner backend to use. `"auto"` (default) lets
+// `pickReasonerBackend` decide based on the run's main-model identifier
+// + which API keys are configured. Operators who need to pin one
+// backend (testing a specific provider, working around an outage) can
+// set the flag to `"gemini"` / `"anthropic"` / `"openrouter"` directly.
+// If the pinned backend's key isn't set, the reasoner returns null and
+// the handlers degrade to legacy non-chunked behaviour (same path as
+// the pre-Stage-D missing-GEMINI_API_KEY case).
+const parseString: Parser<string> = (raw) => raw
+defineFlag("reasoning.backend", "auto", parseString)
+
 // ─── Iterative paragraph chain (follow-up to Stage C model-lock) ───
 // When true (default), the preflight reasoner builds its reasoningChain
 // paragraph-by-paragraph across N sequential Flash calls — each call
