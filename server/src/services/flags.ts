@@ -299,6 +299,17 @@ defineFlag("memory.error_pattern_recall_enabled", true, parseBool)
 defineFlag("quality.project_init_reasoning_enabled", true, parseBool)
 defineFlag("reasoning.project_init_max_iterations", 3, parseNumber)
 
+// Stage 2 of agent-runtime-fixes plan: web_search 0-hit recovery.
+// When true (default), the cli executor tags empty `results` arrays
+// with `_errorCategory: "web_search_empty"` + a recovery hint, the
+// server's tool-error-classifier surfaces the hint, and the existing
+// Stage 3/4 error-reasoning + ack-rejection loop catches the failure
+// like any other tool error. Closes the user-reported failure mode
+// where the agent halted on a 0-hit search instead of pivoting.
+// Off-switch restores pre-Stage-2 behaviour (0-hit treated as a
+// generic success; agent likely halts).
+defineFlag("quality.web_search_empty_recovery_enabled", true, parseBool)
+
 // ─── Iterative paragraph chain (follow-up to Stage C model-lock) ───
 // When true (default), the preflight reasoner builds its reasoningChain
 // paragraph-by-paragraph across N sequential Flash calls — each call

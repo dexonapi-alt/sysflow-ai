@@ -45,4 +45,36 @@ describe("classifyToolErrorFromResult", () => {
     const r = classifyToolErrorFromResult("read_file", { error: "ENOENT: no such file" })
     expect(r.category).toBe("file_not_found")
   })
+
+  // ─── Stage 2 of agent-runtime-fixes plan: web_search_empty ───
+
+  it("trusts a preset _errorCategory: web_search_empty", () => {
+    const r = classifyToolErrorFromResult("web_search", {
+      _errorCategory: "web_search_empty",
+      error: "Web search returned 0 hits for \"x\". Do NOT retry.",
+    })
+    expect(r.category).toBe("web_search_empty")
+    expect(r.hint).toContain("Do NOT retry")
+  })
+
+  it("web_search_empty preset uses default hint when error is missing", () => {
+    const r = classifyToolErrorFromResult("web_search", {
+      _errorCategory: "web_search_empty",
+    })
+    expect(r.category).toBe("web_search_empty")
+    expect(r.hint).toContain("0 HITS")
+    expect(r.hint).toContain("best-practice defaults")
+    expect(r.hint).toContain("NEVER halt")
+  })
+
+  it("hint explains the three common causes of 0-hit searches", () => {
+    const r = classifyToolErrorFromResult("web_search", { _errorCategory: "web_search_empty" })
+    expect(r.hint).toContain("too specific")
+    expect(r.hint).toContain("misspelled")
+  })
+
+  it("non-empty preset on web_search still falls through to classifyToolError", () => {
+    const r = classifyToolErrorFromResult("web_search", { error: "ECONNREFUSED on api.search" })
+    expect(r.category).toBe("network")
+  })
 })

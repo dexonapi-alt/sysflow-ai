@@ -20,6 +20,7 @@ export type ToolErrorCategory =
   | "command_not_found"
   | "network"
   | "auth"
+  | "web_search_empty"
   | "unknown"
 
 export interface ClassifiedToolError {
@@ -39,6 +40,14 @@ export function classifyToolErrorFromResult(tool: string, result: Record<string,
   }
   if (preset === "permission") {
     return { category: "permission", hint: (result.error as string) || hintForPermission(tool) }
+  }
+  // Stage 2 of agent-runtime-fixes plan: 0-hit web search is a
+  // recovery situation, not a success. The cli executor tags the
+  // result with `_errorCategory: "web_search_empty"` when the
+  // `results` array is empty; we surface a concrete pivot hint here
+  // so the agent doesn't halt on "no information found".
+  if (preset === "web_search_empty") {
+    return { category: "web_search_empty", hint: (result.error as string) || hintForWebSearchEmpty() }
   }
   return classifyToolError(tool, (result?.error as string) || "")
 }
@@ -115,4 +124,12 @@ function hintForValidation(tool: string): string {
 
 function hintForCommandFailed(): string {
   return "⚠️ COMMAND FAILED: The shell command exited non-zero. Read the stderr to understand why. Common causes: missing dependency (run npm install? — defer to user), wrong cwd (check it matches the scaffold dir), syntax error in args (double-check escaping)."
+}
+
+function hintForWebSearchEmpty(): string {
+  return "⚠️ WEB SEARCH RETURNED 0 HITS: Your query found no documentation. This usually means:\n" +
+    "  1. The query is too specific (e.g. \"tsconfig.json configuration 2026\" — no such guide exists at that specificity).\n" +
+    "  2. The information is well-known and doesn't need verification — use best-practice defaults.\n" +
+    "  3. The framework/library name was misspelled.\n" +
+    "Do NOT retry the same query. Either reformulate with a broader scope, or skip the search entirely and proceed with the best-practice default. NEVER halt with \"no information found\" — that is not a valid terminal state."
 }
