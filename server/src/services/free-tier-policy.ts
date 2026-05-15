@@ -373,3 +373,90 @@ export function resolveMaxChunksPerRun(model: string | null | undefined, baseMax
 export function resolveMaxFilesPerChunk(model: string | null | undefined): number {
   return isFreeTierModel(model) ? FREE_TIER_CHUNK_FILES_TIGHTEN : 5
 }
+
+/**
+ * Stage D of model-lock-and-portable-reasoning plan: which reasoner
+ * backend should serve this run?
+ *
+ * Returns `null` ONLY when no backend can serve the run (no API keys
+ * configured at all). The caller (`task-reasoner.ts`) treats `null` the
+ * same way it has always treated missing GEMINI_API_KEY — degrade to
+ * legacy non-chunked behaviour. This is the existing failure mode; no
+ * new error shape.
+ *
+ * Selection policy (in order):
+ *   1. If `reasoning.backend` flag is set to a concrete value
+ *      (`"gemini"` / `"anthropic"` / `"openrouter"`), honour it
+ *      directly — but still return `null` if that backend's key is
+ *      missing.
+ *   2. Otherwise (`"auto"`), pick by main model:
+ *      - claude-* → anthropic (Haiku is the cheapest claude reasoner)
+ *      - gemini-* / swe → gemini
+ *      - openrouter-routed (openrouter-auto, llama, mistral, gemini-flash-or)
+ *        → gemini if available (best parity with the historical path),
+ *          else openrouter
+ *      - unknown → gemini if available, else any other with a key
+ *
+ * Pure helper — exported so the routing matrix is unit-testable. The
+ * env-check side-effect is intentional (key presence drives selection),
+ * but it's read-only.
+ */
+export type ReasonerBackend = "gemini" | "anthropic" | "openrouter"
+
+export interface PickReasonerBackendInput {
+  /** Sysflow main-model identifier (e.g. "claude-sonnet", "openrouter-auto"). */
+  model: string | null | undefined
+  /** Resolved value of the `reasoning.backend` flag — `"auto"` or a concrete backend name. */
+  flagOverride: string
+  /** Environment snapshot. Defaults to `process.env`; tests inject. */
+  env?: NodeJS.ProcessEnv
+}
+
+export function pickReasonerBackend(input: PickReasonerBackendInput): ReasonerBackend | null {
+  const env = input.env ?? process.env
+  const hasGemini = !!env.GEMINI_API_KEY
+  const hasAnthropic = !!env.ANTHROPIC_API_KEY
+  const hasOpenRouter = !!env.OPENROUTER_API_KEY
+
+  // 1. Explicit flag override wins (when its key is present).
+  const flag = (input.flagOverride ?? "auto").toLowerCase()
+  if (flag === "gemini") return hasGemini ? "gemini" : null
+  if (flag === "anthropic") return hasAnthropic ? "anthropic" : null
+  if (flag === "openrouter") return hasOpenRouter ? "openrouter" : null
+  // "auto" or anything unrecognised falls through to model-driven pick.
+
+  const model = (input.model ?? "").toLowerCase()
+
+  // 2. Direct provider main models pick same-vendor reasoner first.
+  if (model.startsWith("claude-")) {
+    if (hasAnthropic) return "anthropic"
+    if (hasGemini) return "gemini"
+    if (hasOpenRouter) return "openrouter"
+    return null
+  }
+
+  // 3. Gemini / swe main models prefer direct Gemini.
+  if (model.startsWith("gemini-") || model === "swe") {
+    if (hasGemini) return "gemini"
+    if (hasOpenRouter) return "openrouter"
+    if (hasAnthropic) return "anthropic"
+    return null
+  }
+
+  // 4. OpenRouter-routed models (openrouter-auto, llama, mistral,
+  // gemini-flash-or) — prefer direct Gemini if available (cheapest +
+  // historically the path), else OpenRouter.
+  if (isFreeTierModel(model) || model.startsWith("openrouter-")) {
+    if (hasGemini) return "gemini"
+    if (hasOpenRouter) return "openrouter"
+    if (hasAnthropic) return "anthropic"
+    return null
+  }
+
+  // 5. Unknown model. Prefer Gemini as the historical default; any
+  // other configured backend is acceptable.
+  if (hasGemini) return "gemini"
+  if (hasAnthropic) return "anthropic"
+  if (hasOpenRouter) return "openrouter"
+  return null
+}
