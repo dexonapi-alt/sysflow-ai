@@ -181,6 +181,18 @@ defineFlag("quality.mandatory_self_review_enabled", true, parseBool)
 // per-step firing produces too much log noise.
 defineFlag("quality.per_step_divergence_for_free_tier", true, parseBool)
 
+// ─── Stage 5 of free-tier quality enforcement plan ───
+// When true (default), the divergence detector runs the conservative
+// reasoner-vs-action cross-check: if the model's last reasoningChain
+// paragraph stated a clear read-intent ("verify", "inspect", "check"
+// …) but the action it emitted was a write_file / edit_file /
+// batch_write / create_directory, fire a `reasoning_action_mismatch`
+// signal. Catches the "said-X-did-Y" failure mode where the per-turn
+// reasoning is decorative rather than load-bearing on the action.
+// Kill switch in case the heuristic over-fires on a specific phrasing
+// pattern.
+defineFlag("quality.reasoning_action_cross_check_enabled", true, parseBool)
+
 // ─── Iterative paragraph chain (follow-up to Stage C model-lock) ───
 // When true (default), the preflight reasoner builds its reasoningChain
 // paragraph-by-paragraph across N sequential Flash calls — each call

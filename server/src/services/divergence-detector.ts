@@ -11,6 +11,7 @@
  */
 
 import type { ChunkBoundary } from "./chunk-state.js"
+import { crossCheckReasoningAction, type ActionDescriptor } from "./reasoner-action-checker.js"
 
 export type DivergenceCategory =
   | "same_file_edited_repeatedly"
@@ -33,6 +34,13 @@ export type DivergenceCategory =
   // per-step on free-tier so the off-course modal can trip MID-chunk
   // instead of waiting for the chunk boundary.
   | "same_action_repeated_in_session"
+  // Stage 5 of free-tier-quality-enforcement: the agent's last
+  // `reasoningChain` paragraph said it was going to verify / inspect /
+  // check (read-intent) but the action it actually emitted was a
+  // write_file / edit_file / batch_write / create_directory. Conservative
+  // — only fires on UNAMBIGUOUS mismatches; mixed-intent or empty
+  // reasoning is treated as a non-event. Severity moderate (weight 10).
+  | "reasoning_action_mismatch"
 
 export interface DivergenceSignal {
   category: DivergenceCategory
@@ -91,6 +99,21 @@ export interface DetectorInput {
    * last. Empty / missing → heuristic skipped.
    */
   recentActions?: Array<{ tool: string; path?: string; command?: string }>
+  /**
+   * Stage 5 of free-tier-quality-enforcement: the most recent reasoning
+   * paragraph from the main model's per-turn `reasoningChain[]`. Paired
+   * with `latestAction` to run the reasoner-vs-action cross-check
+   * heuristic. Missing → heuristic skipped (no claim to contradict).
+   */
+  lastReasoning?: string | null
+  /**
+   * Stage 5: the most recent action the agent emitted, with enough
+   * context for the reasoner-action-checker to classify the tool
+   * category (incl. `commandIsSafeReadOnly` for run_command). When
+   * `lastReasoning` is missing or the action is also missing, the
+   * heuristic skips.
+   */
+  latestAction?: ActionDescriptor | null
 }
 
 // ─── Tuning constants ───
@@ -249,6 +272,23 @@ export function detectDivergence(input: DetectorInput): DivergenceSignal[] {
       detail: `agent wrote files without running any investigation commands first — may be hallucinating against unread file state`,
       severity: "minor",
     })
+  }
+
+  // ─── Heuristic 9 (Stage 5 of free-tier-quality-enforcement): the
+  // ─── most recent reasoningChain paragraph stated a read-intent
+  // ─── ("verify", "inspect", "check", …) but the action emitted was
+  // ─── a write tool (write_file / edit_file / batch_write / mkdir).
+  // The cross-checker is conservative — it only fires on UNAMBIGUOUS
+  // mismatches. Skip when either input is missing.
+  if (input.lastReasoning && input.latestAction) {
+    const verdict = crossCheckReasoningAction(input.lastReasoning, input.latestAction)
+    if (!verdict.matches && verdict.reason) {
+      signals.push({
+        category: "reasoning_action_mismatch",
+        detail: verdict.reason,
+        severity: "moderate",
+      })
+    }
   }
 
   return signals
