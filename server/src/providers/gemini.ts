@@ -13,6 +13,7 @@ import { discoverProjectMemory } from "../services/project-memory.js"
 import { recallForReasoning } from "../memory-store/index.js"
 import { renderEntryLine } from "./prompt/sections/learned-memory.js"
 import { getLedger } from "../services/task-ledger.js"
+import { getFlag } from "../services/flags.js"
 import type { ProviderPayload, NormalizedResponse, TokenUsage } from "../types.js"
 
 /** Threshold: once the chat history has more than this many user-turn tool-results, run microcompact. */
@@ -154,6 +155,16 @@ export class GeminiProvider extends BaseProvider {
       // Reads the current snapshot so the prompt's TASK LEDGER block
       // reflects which subtasks remain at this turn.
       taskLedger: getLedger(payload.runId),
+      // Phase 18 Stage 5: taskPlan emission gating. Same wiring as
+      // base-provider's getSystemPromptForRequest — the gate sees the
+      // run's classified intent + complexity so the system-rules
+      // section's taskPlan instruction conditional renders.
+      runIntent: payload.runIntent ?? null,
+      complexity: payload.taskComplexity ?? null,
+      gatingEnabled: (() => {
+        try { return getFlag<boolean>("quality.taskplan_emission_gating_enabled") }
+        catch { return true }
+      })(),
     })
   }
 
@@ -219,6 +230,9 @@ export class GeminiProvider extends BaseProvider {
   async call(payload: ProviderPayload): Promise<NormalizedResponse> {
     const genAI = this.getGenAI()
     const geminiModelName = this.getModelName(payload.model)
+    // Phase 18 Stage 5: stash the taskPlan gate so the normalizer's
+    // defensive drop can see the run's intent + complexity.
+    this.setRunTaskPlanGate(payload)
     // Assemble the prompt once per request (covers project-memory discovery I/O).
     const systemInstruction = await this.buildPrompt(payload)
 

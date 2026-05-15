@@ -9,7 +9,7 @@
  */
 
 import { getIdentitySection } from "./sections/identity.js"
-import { getSystemRulesSection } from "./sections/system-rules.js"
+import { getSystemRulesSection, type SystemRulesGate } from "./sections/system-rules.js"
 import { getToolsSection } from "./sections/tools.js"
 import { getTaskGuidelinesSection } from "./sections/task-guidelines.js"
 import { getOutputEfficiencySection } from "./sections/output-efficiency.js"
@@ -24,7 +24,7 @@ import { getTaskLedgerSection, type TaskLedgerCtx } from "./sections/task-ledger
 
 export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "═══ SYSTEM_PROMPT_DYNAMIC_BOUNDARY ═══"
 
-export interface PromptCtx extends EnvInfoCtx, ProjectMemoryCtx, PlanModeCtx, ReasoningBriefCtx, LearnedMemoryCtx, TaskLedgerCtx {
+export interface PromptCtx extends EnvInfoCtx, ProjectMemoryCtx, PlanModeCtx, ReasoningBriefCtx, LearnedMemoryCtx, TaskLedgerCtx, SystemRulesGate {
   model?: string
 }
 
@@ -47,7 +47,13 @@ export interface BuiltPrompt {
 export function buildSystemPrompt(ctx: PromptCtx = {}): BuiltPrompt {
   const sections: PromptSection[] = [
     { id: "identity", priority: 0, cacheable: true, content: getIdentitySection() },
-    { id: "system_rules", priority: 10, cacheable: true, content: getSystemRulesSection() },
+    // Phase 18 Stage 5: the system-rules section is now ctx-aware. The
+    // taskPlan instruction renders only when the gate matches (`implement`
+    // intent + complexity >= medium). `cacheable: true` still holds — for
+    // a given run the gate inputs are stable, so the prompt prefix is
+    // stable across turns of the same run; cache invalidation across runs
+    // is unchanged.
+    { id: "system_rules", priority: 10, cacheable: true, content: getSystemRulesSection({ runIntent: ctx.runIntent, complexity: ctx.complexity, gatingEnabled: ctx.gatingEnabled }) },
     { id: "tools", priority: 20, cacheable: true, content: getToolsSection() },
     { id: "task_guidelines", priority: 30, cacheable: true, content: getTaskGuidelinesSection() },
     { id: "output_efficiency", priority: 40, cacheable: true, content: getOutputEfficiencySection() },

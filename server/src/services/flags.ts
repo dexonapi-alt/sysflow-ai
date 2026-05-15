@@ -216,6 +216,19 @@ defineFlag("reasoning.backend", "auto", parseString)
 // via the confidence tracker if the reminder is ignored.
 defineFlag("quality.investigation_budget_reminder_enabled", true, parseBool)
 
+// ─── Stage 5 of phase-18-pre-task-deep-reasoning plan ───
+// When true (default), the system-rules section's "FIRST RESPONSE must
+// include taskPlan" rubric is gated on the run's classified intent +
+// complexity. Only `implement` runs with medium/complex complexity see
+// the include-taskPlan variant; simple Q&A, summary, bug-fix Q&A, and
+// trivial single-line implements see the no-taskPlan variant. Composes
+// with Phase 19's cli render gate as defense-in-depth. Defensively the
+// normalizer ALSO drops `taskPlan` from the response when the gate
+// said skip — so a free-tier model that ignores the system-prompt
+// instruction can't blow past the gate. Off-switch (`false`) restores
+// the pre-Phase-18 always-include behaviour.
+defineFlag("quality.taskplan_emission_gating_enabled", true, parseBool)
+
 // ─── Iterative paragraph chain (follow-up to Stage C model-lock) ───
 // When true (default), the preflight reasoner builds its reasoningChain
 // paragraph-by-paragraph across N sequential Flash calls — each call

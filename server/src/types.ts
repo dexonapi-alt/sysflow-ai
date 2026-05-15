@@ -50,6 +50,22 @@ export interface ProviderPayload {
   reasoningElaborationBrief?: unknown
   /** Phase 10 chunked-loop planner brief — when set, the prompt builder injects "files: [...]" so the model honours the chunk's file list exactly. Untyped to avoid an import cycle. */
   chunkPlanBrief?: unknown
+  /** Phase 18 Stage 5: classified intent for the run, resolved by
+   *  `classifyIntent(run.content)` at the handler entry. Threaded to
+   *  the system-rules section so the taskPlan instruction is
+   *  conditional (only `implement` runs ask for a taskPlan; other
+   *  pipelines instruct the model to OMIT it). Same classification
+   *  the cli's <AgentStream> uses to gate the task box (Phase 19) —
+   *  server emission gating + frontend render gating compose as
+   *  defense-in-depth. */
+  runIntent?: "simple" | "summary" | "bug" | "implement" | null
+  /** Phase 18 Stage 5: task complexity from `analyzeTaskComplexity`,
+   *  resolved at the handler entry. Threaded into the system-rules
+   *  section: even on `implement` runs, simple-complexity tasks
+   *  (typo fix, one-line rename, "add a console.log") omit the
+   *  taskPlan instruction. The model's per-turn output then doesn't
+   *  carry a taskPlan ceiling the conversation. */
+  taskComplexity?: "simple" | "medium" | "complex" | null
 }
 
 export interface ProviderContext {
