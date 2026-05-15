@@ -256,6 +256,29 @@ We chose (2). `confidence-tracker.ts` re-exports `isFreeTierModel` and `FREE_MOD
 
 The discipline: when a future stage wants to adapt for free-tier, it adds either a constant or a pure helper to `free-tier-policy.ts` and the call site reads from there. No raw `isFreeTierModel(...)` checks in handlers — they should always be inside a policy helper.
 
+## Reasoner backend follows the main model, not the user's preference flag
+
+- **Source:** plan `applied/2026-05-07-model-lock-and-portable-reasoning.md` (Stage D)
+
+`pickReasonerBackend` defaults to **same-vendor reasoner when available**: claude-sonnet runs use Claude Haiku to reason, gemini-flash runs use Gemini Flash, and so on. The plan considered three alternative selection strategies and rejected each:
+
+**1. User-pinned global preference** (e.g. `reasoning.preferred_backend = "gemini"` regardless of main model). Rejected because the dominant failure mode the plan was fixing — *"i used claude sonnet why it switches to gemini lol"* — applies to reasoners as much as main models. If a user picks claude-sonnet, the implicit contract is *"please use Anthropic for everything about this run."* Pinning the reasoner to Gemini globally violates that contract for users who explicitly switched away from Gemini.
+
+**2. Always-cheapest-available** (pick whichever backend has the lowest $/token of those configured). Rejected because the cost difference between Haiku ($0.80/M input) and Gemini Flash ($0.075/M input) is real, but the variance in any given run's output is dominated by the main-model spend, not the reasoner. A 10× reasoner cost difference on 500-token Flash calls is rounding-error against an 8000-token Sonnet response. Optimising for cents-per-run reasoner cost over coherence-with-main-model is the wrong rank order.
+
+**3. Round-robin across configured backends** (load-balance to avoid hammering one provider's rate limits). Rejected because reasoner calls are cached aggressively (sha256 over context); the throughput pressure is much lower than for main-model calls. Adding observability complexity ("which backend served this turn?") for marginal rate-limit headroom would obscure debugging without solving a real problem.
+
+**The rule (in order of override):**
+
+1. **Explicit `reasoning.backend` flag override.** Operators pinning a backend for testing / outage workaround. Honoured if its key is present; returns `null` (= legacy fallback) if not.
+2. **Same-vendor match.** claude-* → anthropic (Haiku); gemini-* / swe → gemini; openrouter-routed → openrouter (with gemini preferred when available, since direct Gemini is historically the path).
+3. **Walk other configured keys** as fallback in a sensible priority order (see the matrix in `architecture.md: ## Reasoner backends (model-aware)`).
+4. **Null** when no backend has a configured key. Caller drops to legacy non-reasoning mode — same path the missing-`GEMINI_API_KEY` case has used since Phase 5.
+
+The selection is **pure** (no LLM judgement, no probing, no fetch). Tests pass an explicit `env` snapshot so the matrix is unit-table-testable without env mutation. Pure helpers in `free-tier-policy.ts` are the canonical home for this kind of cross-cutting policy decision — see existing entry *Free-tier policy is a centralised module, not scattered checks*.
+
+**Why this matters going forward:** When a future plan adds a new reasoner-capable backend (a hypothetical `mistral-backend.ts`, or a Bedrock-hosted Claude variant), the change is (1) a new backend module, (2) a new branch in `pickReasonerBackend`, (3) tests for the new branch. No call-site refactoring; no flag-default changes. The same-vendor heuristic is the design contract that makes the addition safe — if a future Mistral main model lands, `mistral-*` → mistral-backend is the obvious mapping, not a flag-driven user surprise.
+
 ## System-level enforcement beats prompt-level guidance for free models
 
 - **Source:** plan `applied/2026-05-15-free-tier-quality-enforcement.md`

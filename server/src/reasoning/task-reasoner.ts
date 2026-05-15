@@ -20,9 +20,37 @@ import { applyCriticalContextDetector } from "./critical-context-detector.js"
 import { repairReasoningResponse } from "./repair.js"
 import { getPipelineSystemPrompt, type PipelineKind } from "./pipelines/index.js"
 import { getFlag } from "../services/flags.js"
-import { shouldRunIterativeRefine, shouldRunIterativeChain, pickReasonerBackend } from "../services/free-tier-policy.js"
+import { shouldRunIterativeRefine, shouldRunIterativeChain, pickReasonerBackend, type ReasonerBackend } from "../services/free-tier-policy.js"
 import { analyzeTaskComplexity } from "../services/completion-guard.js"
 import { callReasonerBackend } from "./backends/index.js"
+
+/**
+ * Stage E of model-lock-and-portable-reasoning: per-run telemetry of
+ * which reasoner backend served the run. Populated by `callReasoner`
+ * on each successful pick; read by the user-message / tool-result
+ * handlers and surfaced on `ClientResponse.reasonerBackend` so the CLI
+ * can record it in `RunSummary`.
+ *
+ * The backend is constant for the duration of a run (env doesn't shift
+ * mid-run), so this map is logically write-once-per-run. Re-writes are
+ * harmless — the value is the same. Cleared by `clearReasonerBackendForRun`
+ * from the terminal-cleanup path alongside the other per-run state
+ * stores (`clearConfidence`, `clearLedger`, `clearLastReasoning`, ...).
+ */
+const reasonerBackendByRun = new Map<string, ReasonerBackend>()
+
+export function getReasonerBackendForRun(runId: string): ReasonerBackend | null {
+  return reasonerBackendByRun.get(runId) ?? null
+}
+
+export function clearReasonerBackendForRun(runId: string): void {
+  reasonerBackendByRun.delete(runId)
+}
+
+/** Test-only helper. */
+export function _resetReasonerBackendForTests(): void {
+  reasonerBackendByRun.clear()
+}
 
 /**
  * Hard timeout on a single reasoner SDK call. The Google SDK does its own
@@ -44,6 +72,14 @@ export interface ReasoningPayload {
   /** Project memory mtime (for cache invalidation). */
   projectMemoryMtime?: number
   sysbasePath?: string | null
+  /**
+   * Stage E of model-lock-and-portable-reasoning: when set, the
+   * resolved reasoner backend is recorded against this runId so the
+   * response builder can surface `ClientResponse.reasonerBackend` for
+   * CLI telemetry. Optional — callers that don't care (e.g. the
+   * standalone `/reason` route) can omit it.
+   */
+  runId?: string
 }
 
 const inFlightSelfInvoked = new Set<string>()
@@ -294,6 +330,12 @@ async function callReasoner(payload: ReasoningPayload, kind: PipelineKind, userT
     // pre-Stage-D path used so the caller's existing handling (try/catch
     // in runReasoning → null return → legacy mode) still works.
     throw new Error("No reasoner backend available — set GEMINI_API_KEY, ANTHROPIC_API_KEY, or OPENROUTER_API_KEY")
+  }
+  // Stage E: stash the resolved backend so the response builder can
+  // surface it on ClientResponse for CLI telemetry. Write-once-per-run
+  // in practice (env doesn't shift mid-run); re-writes are no-ops.
+  if (payload.runId) {
+    reasonerBackendByRun.set(payload.runId, backend)
   }
 
   return callReasonerBackend(backend, {

@@ -119,6 +119,61 @@ describe("recordRunSummary", () => {
     expect(entry.autoPauseEvents).toBe(0)
   })
 
+  // ─── Stage E of model-lock-and-portable-reasoning: reasonerBackend telemetry ───
+
+  it("persists reasonerBackend when supplied", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-rb1",
+      prompt: "build a thing",
+      model: "claude-sonnet",
+      durationMs: 1_000,
+      stepCount: 3,
+      toolCount: 4,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      reasonerBackend: "anthropic",
+    })
+    const [entry] = await readEntries()
+    expect(entry.reasonerBackend).toBe("anthropic")
+  })
+
+  it("emits reasonerBackend=null on legacy runs (field omitted)", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-rb2",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+    })
+    const [entry] = await readEntries()
+    expect(entry.reasonerBackend).toBeNull()
+  })
+
+  it("preserves explicit reasonerBackend=null (no brief produced this run)", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-rb3",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      reasonerBackend: null,
+    })
+    const [entry] = await readEntries()
+    expect(entry.reasonerBackend).toBeNull()
+  })
+
   it("emits divergenceConfidenceAvg=null when no snapshots were observed but other counters are present", async () => {
     await recordRunSummary(tmp, {
       runId: "r-aw3",

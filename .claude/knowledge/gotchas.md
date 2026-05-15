@@ -109,6 +109,17 @@ Past bugs and non-obvious constraints worth preserving so the next contributor d
 - **Fix:** every raw cursor-up / clear-line write is gated behind `shouldRenderInlineForLegacy()` (`agent/events.ts`). In Ink mode the visible representation of "running tools" is the live `<ActionCard>` set in `<AgentStream>` — re-printing rows is unnecessary AND breaks layout.
 - **What to do:** never call `process.stdout.write` with VT100 cursor escapes from a code path that might run with Ink active. If the path needs both modes, use the `shouldRenderInlineForLegacy()` gate. If it's Ink-only, emit a structured event and let the reducer drive the visual transition.
 
+## Anthropic + OpenRouter providers used to skip the ctx-aware system prompt — briefs never reached the model
+
+- **Source:** plan `applied/2026-05-07-model-lock-and-portable-reasoning.md` (Stage B, PR #64)
+- **Symptom:** user picks `claude-sonnet`. The preflight reasoner runs, produces a brief, the brief is cached and sent to the CLI as `reasoningBrief`. The CLI renders `<ReasoningPeek>` showing the brief content. **And then Claude never sees it.** The agent's response shows no awareness of the architecture sketch the reasoner produced. User feedback: *"the model reasoning didn't applied or understood what he reason it just proceed to the task without understanding its own reason"*.
+- **Root cause:** `server/src/providers/anthropic.ts` and `server/src/providers/openrouter.ts` were calling `this.systemPrompt` (the static `SHARED_SYSTEM_PROMPT`) instead of `getSystemPrompt(ctx)` (the context-aware variant that includes the dynamic `reasoning-brief` section). Gemini already did the right thing. The bug pre-dated Phase 5 — the brief section had simply never been wired into the non-Gemini provider system-prompt builders.
+- **Fix:** both providers now call `getSystemPromptForRequest(payload)` per request, which threads `payload.reasoningBrief` (+ `reasoningElaborationBrief`, cwd, model, git-branch) through the same builder Gemini uses. Same casts at the seam pattern. Both fresh-conversation and continuation branches needed the swap.
+- **Test guards:**
+  - `server/src/providers/__tests__/brief-injection.test.ts` — asserts each provider's first request carries `═══ REASONING BRIEF` in the system prompt when `payload.reasoningBrief` is set
+  - `server/src/providers/prompt/sections/__tests__/reasoning-brief.test.ts` — covers the section's rendered output across HIGH/MEDIUM/LOW confidence variants
+- **What to do when adding a new provider:** start from `gemini.ts`'s shape — it's the reference for what a ctx-aware system prompt looks like. If the new provider needs a static prompt (e.g. for prompt-caching), the dynamic suffix (which includes the brief) should still be appended on every request. Static system prompt = brief is invisible to the model = unreachable contract.
+
 ## `spinner.text = "thinking..."` as default silently disabled the verb cycle
 
 - **Source:** PR #45 (post-Phase 14 Stage 3 follow-up)

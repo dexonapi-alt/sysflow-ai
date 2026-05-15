@@ -17,7 +17,7 @@ import { detectErrorContext, setPendingError, detectAllErrors, setPendingErrorQu
 import { createPipelineFromAiPlan, createFallbackPipeline, pipelineToTaskMeta } from "../services/task-pipeline.js"
 import { detectScaffoldingNeed, buildScaffoldConfirmationMessage } from "../scaffold/index.js"
 import { estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
-import { runReasoning } from "../reasoning/task-reasoner.js"
+import { runReasoning, getReasonerBackendForRun } from "../reasoning/task-reasoner.js"
 import { recommendScaffold, resolveCommand, getInstallCommand } from "../scaffold/index.js"
 import { recordImplementSummary, recordOriginalIntent, recordDecision, recordBugPattern, applyMemoryFeedback } from "../memory-store/index.js"
 import { runReasoningChain } from "../reasoning/chain.js"
@@ -240,6 +240,7 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
       model: body.model,
       cwd: body.cwd,
       sysbasePath: body.sysbasePath,
+      runId,
     })
     reasoningBrief = briefResult
     // Stage 2 of free-tier quality enforcement: seed the persistent task
@@ -409,6 +410,7 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
         model: body.model,
         cwd: body.cwd,
         sysbasePath: body.sysbasePath,
+        runId,
         context: {
           originalUserPrompt: body.content,
           implementBrief: implementBrief ?? null,
@@ -622,6 +624,11 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
 
   const clientResp = mapNormalizedResponseToClient(runId, normalized)
   if (reasoningBrief) clientResp.reasoningBrief = reasoningBrief
+  // Stage E of model-lock-and-portable-reasoning: surface the resolved
+  // reasoner backend for CLI telemetry. Absent until the first
+  // runReasoning call lands; constant for the rest of the run.
+  const reasonerBackend = getReasonerBackendForRun(runId)
+  if (reasonerBackend) clientResp.reasonerBackend = reasonerBackend
   // Phase 10: surface the chunk-plan brief on the response so the CLI (Stage 5)
   // can render the chunk progress badge. Stage 4 will also inject it into the
   // provider prompt so the model honours the planner's file list.
