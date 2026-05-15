@@ -8,6 +8,7 @@ import { buildSystemPrompt, type PromptCtx } from "./prompt/build.js"
 import { buildVerifyAfterWriteBlock, extractWritesFromToolResults } from "../services/post-write-verifier.js"
 import { shouldForceVerifyAfterWrite } from "../services/free-tier-policy.js"
 import { getFlag } from "../services/flags.js"
+import { getLedger } from "../services/task-ledger.js"
 export { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from "./prompt/build.js"
 
 /**
@@ -337,6 +338,11 @@ export abstract class BaseProvider {
       // reasoning module; cast at the seam (same pattern Gemini uses).
       reasoningBrief: payload.reasoningBrief as never,
       reasoningElaborationBrief: payload.reasoningElaborationBrief as never,
+      // Stage 2 of free-tier quality enforcement: persistent task ledger.
+      // Reads the current ledger snapshot for this run so the system
+      // prompt always reflects which subtasks remain. Empty array when
+      // the run had no implementBrief.buildPlan to seed from.
+      taskLedger: getLedger(payload.runId),
     })
   }
 

@@ -217,6 +217,23 @@ export type ChunkPlanBrief = z.infer<typeof chunkPlanBriefSchema>
 // The reflector runs after every chunk, on the just-executed tool results.
 // Verifies the chunk is coherent (imports resolve, files non-empty, plan was
 // honoured) and surfaces issues for the next planner call to address.
+
+/**
+ * Stage 2 of free-tier quality enforcement: single ledger update emitted
+ * by the reflector. The reflector watches each chunk's writes and bumps
+ * the high-level subtask statuses (pending → in_progress → done) so the
+ * always-visible TASK LEDGER section stays current across turns.
+ */
+export const ledgerUpdateSchema = z.object({
+  /** Target ledger entry id (matches `seedLedgerFromBuildPlan`'s id scheme). */
+  id: z.string().min(1).max(80),
+  /** New status. */
+  status: z.enum(["pending", "in_progress", "done"]),
+  /** Optional file-path evidence — what the reflector saw that justified the move. */
+  evidence: z.array(z.string().max(200)).max(6).optional(),
+})
+export type LedgerUpdate = z.infer<typeof ledgerUpdateSchema>
+
 export const chunkReflectionBriefSchema = z.object({
   /** Did the chunk produce a coherent set of files? */
   coherent: z.boolean(),
@@ -226,6 +243,13 @@ export const chunkReflectionBriefSchema = z.object({
   nextFocus: z.string().max(240),
   /** Reflector says we're done — caller should emit completed instead of continuing. */
   shouldStop: z.boolean(),
+  /**
+   * Stage 2 of free-tier quality enforcement: ledger updates the
+   * reflector is asserting about the high-level task subtasks. Empty
+   * list means the chunk's writes didn't advance any subtask state.
+   * Optional + default `[]` so old briefs (pre-Stage-2) still parse.
+   */
+  ledgerUpdates: z.array(ledgerUpdateSchema).max(8).default([]),
 })
 export type ChunkReflectionBrief = z.infer<typeof chunkReflectionBriefSchema>
 

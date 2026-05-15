@@ -20,10 +20,11 @@ import { getPlanModeSection, type PlanModeCtx } from "./sections/plan-mode.js"
 import { getReasoningBriefSection, type ReasoningBriefCtx } from "./sections/reasoning-brief.js"
 import { getLearnedMemorySection, type LearnedMemoryCtx } from "./sections/learned-memory.js"
 import { getInvestigationSection } from "./sections/investigation.js"
+import { getTaskLedgerSection, type TaskLedgerCtx } from "./sections/task-ledger.js"
 
 export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "═══ SYSTEM_PROMPT_DYNAMIC_BOUNDARY ═══"
 
-export interface PromptCtx extends EnvInfoCtx, ProjectMemoryCtx, PlanModeCtx, ReasoningBriefCtx, LearnedMemoryCtx {
+export interface PromptCtx extends EnvInfoCtx, ProjectMemoryCtx, PlanModeCtx, ReasoningBriefCtx, LearnedMemoryCtx, TaskLedgerCtx {
   model?: string
 }
 
@@ -57,6 +58,14 @@ export function buildSystemPrompt(ctx: PromptCtx = {}): BuiltPrompt {
     // the THINKING block) so the model sees the platform, the patterns,
     // then the preflight deliberation in that order.
     { id: "investigation", priority: 102, cacheable: false, content: getInvestigationSection(ctx) },
+    // Stage 2 of free-tier quality enforcement: persistent task ledger.
+    // Always-visible-when-non-empty so the agent has the full subtask
+    // list anchored every turn (closes the "AI forgot what to do"
+    // failure mode). Sits AFTER env_info + investigation patterns
+    // (which orient the model on the system), BEFORE reasoning_brief
+    // (which delivers per-turn instructions) so unfinished work is the
+    // last thing the model sees before the brief.
+    { id: "task_ledger", priority: 103, cacheable: false, content: getTaskLedgerSection(ctx) },
     { id: "env_info", priority: 100, cacheable: false, content: getEnvInfoSection(ctx) },
     { id: "project_memory", priority: 105, cacheable: false, content: getProjectMemorySection(ctx) },
     { id: "learned_memory", priority: 106, cacheable: false, content: getLearnedMemorySection(ctx) },

@@ -12,6 +12,7 @@ import {
 import { discoverProjectMemory } from "../services/project-memory.js"
 import { recallForReasoning } from "../memory-store/index.js"
 import { renderEntryLine } from "./prompt/sections/learned-memory.js"
+import { getLedger } from "../services/task-ledger.js"
 import type { ProviderPayload, NormalizedResponse, TokenUsage } from "../types.js"
 
 /** Threshold: once the chat history has more than this many user-turn tool-results, run microcompact. */
@@ -149,6 +150,10 @@ export class GeminiProvider extends BaseProvider {
       reasoningElaborationBrief: payload.reasoningElaborationBrief as never,
       learnedMemoryLines,
       learnedMemorySummary,
+      // Stage 2 of free-tier quality enforcement: persistent task ledger.
+      // Reads the current snapshot so the prompt's TASK LEDGER block
+      // reflects which subtasks remain at this turn.
+      taskLedger: getLedger(payload.runId),
     })
   }
 

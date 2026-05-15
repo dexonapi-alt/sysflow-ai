@@ -36,6 +36,7 @@ import type { ChunkPlanBrief, ChunkReflectionBrief } from "../reasoning/reasonin
 import { getFlag } from "../services/flags.js"
 import { detectDivergence, pickDivergenceAnchor, type DetectorInput } from "../services/divergence-detector.js"
 import { isSafeReadOnlyCommand } from "../services/safe-commands.js"
+import { applyLedgerUpdates, clearLedger } from "../services/task-ledger.js"
 import { shouldRunDivergenceSecondLook, resolveMaxChunksPerRun, resolveMaxFilesPerChunk } from "../services/free-tier-policy.js"
 import { recordSignals as recordConfidenceSignals, clearConfidence, getConfidence, getConfidenceState, getThresholdState } from "../services/confidence-tracker.js"
 import { runVerificationGate, gateSignals } from "../services/verification-gate.js"
@@ -542,6 +543,17 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
       if (reflectResult?.chunkReflectionBrief) {
         chunkReflectionBrief = reflectResult.chunkReflectionBrief
         attachReflection(body.runId, latestChunk.index, chunkReflectionBrief)
+
+        // Stage 2 of free-tier quality enforcement: apply the reflector's
+        // ledger updates. The reflector watches each chunk's writes and
+        // bumps the high-level subtask statuses; the task-ledger module
+        // drops unknown ids defensively. Updates land BEFORE the chunk
+        // summary persist so the next turn's system prompt reflects the
+        // new state.
+        const ledgerUpdates = chunkReflectionBrief.ledgerUpdates ?? []
+        if (Array.isArray(ledgerUpdates) && ledgerUpdates.length > 0) {
+          applyLedgerUpdates(body.runId, ledgerUpdates)
+        }
 
         // Persist this chunk's outcome to memory so /continue can resume it.
         recordChunkSummary(
@@ -1158,6 +1170,10 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     clearChunkState(body.runId)
     // Phase 11: tear down per-run confidence state on the same terminal path.
     clearConfidence(body.runId)
+    // Stage 2 of free-tier quality enforcement: tear down per-run task
+    // ledger on the same terminal path so a stale ledger doesn't bleed
+    // into the next run from the same chat.
+    clearLedger(body.runId)
     lastLlmDivergenceCheckedChunk.delete(body.runId)
     awarenessCooldownChunks.delete(body.runId)
     lastDivergenceVerdict.delete(body.runId)
