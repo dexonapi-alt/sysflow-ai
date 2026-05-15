@@ -48,6 +48,20 @@ export interface ProviderPayload {
    *  builder renders it as a "DEEPER REASONING" sub-block under the
    *  implement brief. Untyped to avoid an import cycle. */
   reasoningElaborationBrief?: unknown
+  /** Stage 3 of forced-error-reasoning plan: set by `tool-result.ts`
+   *  when an inbound tool error fired the error-reasoning chain and
+   *  the chain returned a brief. The provider's
+   *  `buildToolResultMessage` reads this and injects the
+   *  `═══ ERROR — REASON THROUGH THIS ═══` block at the end of the
+   *  tool-result body. Untyped to avoid an import cycle with the
+   *  reasoning module. */
+  errorReasoningBrief?: unknown
+  /** Stage 3: verbatim error text for the block to quote. Set
+   *  alongside `errorReasoningBrief`. */
+  errorReasoningErrorText?: string
+  /** Stage 3: tool name that failed (`run_command`, `write_file`, etc.).
+   *  Set alongside `errorReasoningBrief`. */
+  errorReasoningFailedTool?: string
   /** Phase 10 chunked-loop planner brief — when set, the prompt builder injects "files: [...]" so the model honours the chunk's file list exactly. Untyped to avoid an import cycle. */
   chunkPlanBrief?: unknown
   /** Phase 18 Stage 5: classified intent for the run, resolved by
@@ -249,6 +263,22 @@ export interface ClientResponse {
    * (PR #83) picks them up without any new render code.
    */
   intentClassificationParagraphs?: string[]
+  /**
+   * Stage 3 of forced-error-reasoning plan: the LLM chain's senior-
+   * engineer paragraphs when an error-reasoning brief was produced
+   * for this turn. CLI surfaces them in `<ReasoningPeek>` via the
+   * existing `reasoning_brief` event mechanism (same path PR #83's
+   * plain-prose render handles).
+   */
+  errorReasoningParagraphs?: string[]
+  /**
+   * Stage 3: telemetry of the error-reasoning source. Useful for
+   * usage.jsonl analysis — `"chain"` means the LLM committed;
+   * `"bug_fallback"` means the chain returned null and the existing
+   * bug pipeline (Phase 5) provided the brief instead; `null` means
+   * no error fired this turn.
+   */
+  errorReasoningSource?: "chain" | "bug_fallback" | null
 }
 
 // ─── Database ───

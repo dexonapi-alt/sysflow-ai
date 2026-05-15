@@ -286,6 +286,61 @@ describe("recordRunSummary", () => {
     expect(entry.intentClassificationSource).toBeNull()
   })
 
+  // ─── Stage 3 of forced-error-reasoning-and-recovery: errorReasoningSource ───
+
+  it("persists errorReasoningSource when chain committed", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-er-1",
+      prompt: "build a thing",
+      model: "openrouter-auto",
+      durationMs: 1_000,
+      stepCount: 5,
+      toolCount: 8,
+      errorCount: 1,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      errorReasoningSource: "chain",
+    })
+    const [entry] = await readEntries()
+    expect(entry.errorReasoningSource).toBe("chain")
+  })
+
+  it("persists errorReasoningSource=bug_fallback", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-er-2",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 1,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      errorReasoningSource: "bug_fallback",
+    })
+    const [entry] = await readEntries()
+    expect(entry.errorReasoningSource).toBe("bug_fallback")
+  })
+
+  it("emits errorReasoningSource=null on runs without errors", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-er-3",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+    })
+    const [entry] = await readEntries()
+    expect(entry.errorReasoningSource).toBeNull()
+  })
+
   it("emits divergenceConfidenceAvg=null when no snapshots were observed but other counters are present", async () => {
     await recordRunSummary(tmp, {
       runId: "r-aw3",

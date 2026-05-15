@@ -250,6 +250,20 @@ defineFlag("reasoning.intent_classification_max_iterations", 6, parseNumber)
 // true (regex fast-path on) keeps trivial cases cheap.
 defineFlag("reasoning.intent_classification_fast_path_regex_enabled", true, parseBool)
 
+// ─── Plan 2026-05-15-forced-error-reasoning-and-recovery.md Stage 3 ───
+// When true (default), tool errors fire the error-reasoning chain
+// AND the `═══ ERROR — REASON THROUGH THIS ═══` block is injected
+// into the next tool-result message. Closes the user-reported
+// failure mode where the LLM ignores tool errors and proceeds to
+// the next step without addressing them. Off-switch in case the
+// block over-fires on benign warnings (the gate uses
+// `isToolResultError` to filter out skipped / warning-only results).
+defineFlag("quality.force_error_reasoning_enabled", true, parseBool)
+// Stage 3: cap on iterations the error-reasoning chain runs. Default
+// matches `MAX_ERROR_REASONING_ITERATIONS`. Lower if telemetry shows
+// the reasoner often iterating past 2.
+defineFlag("reasoning.error_reasoning_max_iterations", 4, parseNumber)
+
 // ─── Iterative paragraph chain (follow-up to Stage C model-lock) ───
 // When true (default), the preflight reasoner builds its reasoningChain
 // paragraph-by-paragraph across N sequential Flash calls — each call

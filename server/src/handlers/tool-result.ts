@@ -23,6 +23,7 @@ import { applyToolResultBudget, estimateTokens, shouldBlockOnTokens } from "../s
 import { classifyToolError, classifyToolErrorFromResult } from "../services/tool-error-classifier.js"
 import { persistLargeToolResult } from "../store/tool-result-persistence.js"
 import { runReasoning, getReasonerBackendForRun, clearReasonerBackendForRun } from "../reasoning/task-reasoner.js"
+import { runErrorReasoningChain } from "../reasoning/error-reasoner.js"
 import { recordImplementSummary, recordBugPattern, recordChunkSummary, recordUserCorrection, applyMemoryFeedback, recallForReasoning } from "../memory-store/index.js"
 import {
   attachReflection,
@@ -489,6 +490,10 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
   // exhausted the per-run reasoning budget, run the bug pipeline and inject
   // the brief into the next provider payload so the agent benefits.
   let onErrorBrief: unknown = null
+  // Stage 3 of forced-error-reasoning plan: track the chain brief +
+  // paragraphs so we can surface them on the client response.
+  let errorReasoningChainBrief: import("../reasoning/error-reasoner.js").ErrorReasoningBrief | null = null
+  let errorReasoningSource: "chain" | "bug_fallback" | null = null
   const incomingErrors = isBatch
     ? body.toolResults!.filter((tr) => (tr.result as Record<string, unknown>).error || (tr.result as Record<string, unknown>).success === false)
     : (body.result.error || body.result.success === false ? [{ id: "single", tool: body.tool, result: body.result }] : [])
@@ -496,8 +501,62 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     const prev = consecutiveToolErrors.get(body.runId) ?? 0
     const next = prev + 1
     consecutiveToolErrors.set(body.runId, next)
+
+    // ─── Stage 3 of forced-error-reasoning plan ───
+    // Fire the LLM error-reasoning chain on EVERY error (not just
+    // consecutive ≥ 2 like the bug pipeline). The chain's brief drives
+    // the `═══ ERROR — REASON THROUGH THIS ═══` block injection at
+    // the bottom of the next tool-result message body. The existing
+    // bug pipeline below stays as the fallback when the chain
+    // returns null (no backend / parse failure / cap without
+    // commitment).
+    const forceErrorReasoningEnabled = (() => {
+      try { return getFlag<boolean>("quality.force_error_reasoning_enabled", run.sysbasePath as string | undefined) }
+      catch { return true }
+    })()
+    if (forceErrorReasoningEnabled) {
+      try {
+        const lastError = incomingErrors[incomingErrors.length - 1]
+        const errResultRecord = lastError.result as Record<string, unknown>
+        const errText = typeof errResultRecord.error === "string"
+          ? errResultRecord.error
+          : typeof errResultRecord.stderr === "string"
+          ? errResultRecord.stderr
+          : "Tool reported failure (no error text)"
+        const maxIters = (() => {
+          try { return getFlag<number>("reasoning.error_reasoning_max_iterations", run.sysbasePath as string | undefined) }
+          catch { return 4 }
+        })()
+        const chainBrief = await runErrorReasoningChain({
+          errorText: errText,
+          tool: lastError.tool,
+          args: (errResultRecord.args as Record<string, unknown>) ?? undefined,
+          platform: process.platform,
+          model: run.model,
+          maxIterations: maxIters,
+        })
+        if (chainBrief) {
+          errorReasoningChainBrief = chainBrief
+          errorReasoningSource = "chain"
+          // Patch the provider payload so the inject block reads the
+          // brief in buildToolResultMessage.
+          ;(providerPayload as Record<string, unknown>).errorReasoningBrief = chainBrief
+          ;(providerPayload as Record<string, unknown>).errorReasoningErrorText = errText
+          ;(providerPayload as Record<string, unknown>).errorReasoningFailedTool = lastError.tool
+          console.log(`[error-reasoner] chain committed (iterations=${chainBrief.iterations}, recommendation=${chainBrief.recommendedCommand})`)
+        }
+      } catch (err) {
+        console.warn(`[error-reasoner] chain threw:`, (err as Error).message)
+      }
+    }
+
     const used = onErrorReasoningCount.get(body.runId) ?? 0
-    if (next >= 2 && used < MAX_ON_ERROR_REASONING_PER_RUN) {
+    // Existing bug pipeline runs as FALLBACK — only when the chain
+    // didn't produce a brief AND the consecutive-error budget allows.
+    // The chain catches the FIRST error; the bug pipeline persists a
+    // `bug_pattern` memory entry on sustained failures, which we keep
+    // for the memory-store integration Stage 5 will extend.
+    if (!errorReasoningChainBrief && next >= 2 && used < MAX_ON_ERROR_REASONING_PER_RUN) {
       onErrorReasoningCount.set(body.runId, used + 1)
       try {
         const lastError = incomingErrors[incomingErrors.length - 1]
@@ -511,6 +570,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
           context: { tool: lastError.tool, result: lastError.result, recentErrors: incomingErrors.length },
         })
         onErrorBrief = briefResult
+        if (briefResult) errorReasoningSource = "bug_fallback"
         // Patch the provider payload so the next model call sees the bug brief.
         ;(providerPayload as Record<string, unknown>).reasoningBrief = briefResult
         if (briefResult && briefResult.pipeline === "bug") {
@@ -1202,6 +1262,16 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
   // `classifyIntentSmart` (Stage 4 of LLM iterative intent
   // classification plan); falls back to regex on cache miss.
   response.runIntent = getCachedIntentOrRegex(body.runId, run.content)
+  // Stage 3 of forced-error-reasoning plan: surface the chain's
+  // paragraphs (for <ReasoningPeek> plain-prose render via PR #83) +
+  // source (for usage.jsonl telemetry). Both fields stay absent on
+  // turns where no error fired.
+  if (errorReasoningChainBrief) {
+    response.errorReasoningParagraphs = errorReasoningChainBrief.paragraphs
+  }
+  if (errorReasoningSource) {
+    response.errorReasoningSource = errorReasoningSource
+  }
   // Phase 10: surface the chunk briefs so the CLI can render the boundary.
   if (chunkPlanBrief) (response as unknown as Record<string, unknown>).chunkPlanBrief = chunkPlanBrief
   if (chunkReflectionBrief) (response as unknown as Record<string, unknown>).chunkReflectionBrief = chunkReflectionBrief
