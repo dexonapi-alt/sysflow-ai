@@ -40,7 +40,10 @@ export function getToolsSection(): string {
 9. move_file — args: { "from": "old.js", "to": "new.js" }
 10. delete_file — args: { "path": "temp.js" }
 11. search_files — args: { "query": "auth middleware" } or { "glob": "src/**/*.ts" }
-12. web_search — args: { "query": "..." } — use before any scaffolding command or config file writing
+12. web_search — args: { "query": "..." }
+   USE ONLY when (a) you have already run at least one investigation command (list_directory / read_file / run_command) AND (b) you have a clear signal the answer requires CURRENT external documentation (e.g. a library version-mismatch error, an unknown migration target, a stack you've never written before).
+   DO NOT use as the FIRST tool of a run. DO NOT use for default config files you are AUTHORING from scratch on an EMPTY repo (tsconfig.json / .eslintrc.json / vite.config / postcss.config / tailwind.config — the PROJECT STATE block tells you when the repo is empty; on a fresh scaffold, best-practice defaults are correct).
+   If a search returns 0 hits: do NOT retry the same query — either reformulate broadly OR skip the search and proceed with defaults. NEVER halt with "no information found".
 13. reason — args: { "question": "...", "context"?: "...", "options"?: ["...", "..."], "kind"?: "choice"|"implement"|"bug"|"gotcha" }
     Self-invoked reasoning. Use BEFORE making non-trivial decisions you're not HIGH-confident about.
     Examples: choosing a library when the project doesn't pin one ("Drizzle vs Prisma?"); deciding

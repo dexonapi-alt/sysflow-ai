@@ -352,6 +352,20 @@ async function dispatch(tool: string, args: Record<string, unknown>, runId?: str
 
     case "web_search": {
       const results = await webSearchTool(args.query as string)
+      // Stage 2 of agent-runtime-fixes plan: tag 0-hit responses so the
+      // server-side error path classifies them as a recovery situation
+      // rather than a success the agent should consume verbatim.
+      // Closes bug 4 (agent halts when search returns nothing because the
+      // 'result' was technically valid but carried no signal).
+      if (Array.isArray(results) && results.length === 0) {
+        return {
+          query: args.query,
+          results: [],
+          success: false,
+          error: `Web search returned 0 hits for "${args.query}". This usually means the query is too specific, the documentation doesn't exist at that exact phrasing, or the query references a non-existent file. Do NOT retry the same query. Either reformulate broadly, or skip the search and proceed with best-practice defaults.`,
+          _errorCategory: "web_search_empty",
+        }
+      }
       return { query: args.query, results }
     }
 
