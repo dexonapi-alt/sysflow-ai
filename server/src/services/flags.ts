@@ -146,6 +146,19 @@ defineFlag("providers.lock_to_chosen_model", true, parseBool)
 // flags.json / env override if quota becomes tight.
 defineFlag("reasoning.iterative_refine_enabled", true, parseBool)
 
+// ─── Stage 1 of free-tier quality enforcement plan ───
+// When true (default), the next tool-result message after any chunk
+// that wrote files gets a `═══ VERIFY THE LAST CHUNK ═══` directive
+// block forcing the agent to cat the files / find empty dirs / run
+// typecheck BEFORE continuing. Free-tier always; paid only when
+// chunk wrote ≥ 3 files AND complexity ≥ medium (see
+// `shouldForceVerifyAfterWrite` in free-tier-policy.ts). User
+// feedback: *"free models create errors, typos, forgot to implement
+// in X folder, wrong implementations because it lacks checking every
+// iteration"*. Kill switch in case the block bloats messages on a
+// specific run.
+defineFlag("quality.force_verify_after_write", true, parseBool)
+
 // ─── Iterative paragraph chain (follow-up to Stage C model-lock) ───
 // When true (default), the preflight reasoner builds its reasoningChain
 // paragraph-by-paragraph across N sequential Flash calls — each call
