@@ -119,6 +119,25 @@ Past bugs and non-obvious constraints worth preserving so the next contributor d
 - **Test guard:** `cli-client/src/agent/__tests__/safe-commands.test.ts` covers (a) positive cases for every command in the whitelist, both bash and PowerShell forms; (b) negative cases for write variants, chained writes, and suspicious patterns (backticks, command substitution wrapping a write).
 - **What to do when adding a new safe command:** add to the regex in `safe-commands.ts`; add a positive case in the test file; if the command can chain something destructive (e.g. `xargs rm`), make sure the existing chain-detection regex rejects it. Default to NOT safe — false positives ruin the pattern.
 
+## ReasoningPeek surfaced structured-field text instead of plain-prose reasoning chain
+
+- **Source:** user-reported regression (2026-05-15)
+- **Symptom:** the `<ReasoningPeek>` block in the CLI showed structured form-field output for non-implement runs:
+  ```
+  ✦ Reasoning(bug)
+    → symptom: User requested to build a new Node.js Express PostgreSQL backend ...
+    → boundary: unknown
+    → fix: The request is for new feature development, not a bug fix. No fix is ...
+  ```
+  The `symptom` line is plainly NOT a symptom — it's a description of the user's build request. The `bugBrief.symptom` field was populated with whatever Flash produced when forced into the rigid schema, even though the actual run wasn't a bug. **The LLM's real reasoning chain (plain-prose paragraphs in `reasoningChain[]`) was invisible** — the renderer only looked at the structured fields.
+- **Root cause:** `cli-client/src/ui/components/ReasoningPeek.tsx: formatBriefSummary` extracted lines from each pipeline's structured fields (`bugBrief.symptom`, `bugBrief.suspectedBoundary`, `bugBrief.proposedFix.description`, etc.). It never consulted `briefData.reasoningChain` — the paragraph chain that `runIterativeChain` had been producing since Stage C of model-lock-and-portable-reasoning (PR #65). So the most natural surface for the LLM's deliberation was rendered out, and a form-field text artefact took its place.
+- **Fix:** new plain-prose preference at the top of `formatBriefSummary`. When `briefData.reasoningChain` is a non-empty array of strings, render those paragraphs as the peek body (up to 3, each truncated to 180 chars, with a `→ (+N more paragraphs)` tail if the chain is deeper). Structured-field rendering stays as the fallback for pipelines that don't yet produce a chain (`chunk_plan`, `chunk_reflect`, divergence verdict) — they keep their current peek shape.
+  - The structured fields (`bugBrief.symptom`, `implementBrief.recommendedStack`, etc.) stay on the schema because downstream code consumes them (divergence detector reads `bugBrief.suspectedBoundary`; the `<AgentStream>` task block reads `implementBrief.buildPlan`).
+  - Two exported helpers — `formatPlainReasoningChain(kind, paragraphs)` and `pipelineLabelFor(kind)` — keep the chain path testable and centralise the canonical label mapping so the chain path and the structured-field path always agree on `Reasoning(<kind>)`.
+- **Test guards:**
+  - `cli-client/src/ui/components/__tests__/ReasoningPeek.test.ts` — three new describe blocks cover: chain-preferred-over-structured for every pipeline kind, +N tail for long chains, singular vs plural tail, truncation, malformed-entry filtering, and the explicit fallback paths (empty / missing / non-array / whitespace-only chain → structured render fires)
+- **What to do when adding a new pipeline:** if the pipeline produces deliberative reasoning (iterative chain), `reasoningChain[]` will populate automatically and the plain-prose render path kicks in for free. Only add a new structured-field render block in `formatBriefSummary` if the pipeline's output is genuinely STRUCTURED (a file list, a coherent verdict, a divergence score) — those benefit from the labelled-line rendering. Decision rule mirrors `decisions.md: ## Planner ↔ reflector are additive, not merged` — paragraph chain for deliberation, structured form for concrete artifacts.
+
 ## "error handling" in a feature list mis-classified build prompts as bug reports
 
 - **Source:** PR fixing user-reported regression (2026-05-15)

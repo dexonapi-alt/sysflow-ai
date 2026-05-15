@@ -49,10 +49,47 @@ export interface BriefSummary {
  * fields it knows about — adding a new pipeline server-side never
  * breaks the renderer; it just falls through to the generic case.
  *
+ * 2026-05-15 update — plain-prose preference:
+ *   When the brief envelope carries `reasoningChain[]` (the
+ *   senior-engineer paragraphs `runIterativeChain` produces in
+ *   `task-reasoner.ts`), surface those AS the peek body. The
+ *   structured fields (`bugBrief.symptom`, `implementBrief.intent`,
+ *   etc.) stay on the schema for downstream code (divergence detector
+ *   reads `bugBrief.suspectedBoundary`, etc.) but are no longer the
+ *   user-facing surface. Why: a user-reported bug showed Flash
+ *   filling `bugBrief.symptom` with non-symptom text (`"User
+ *   requested to build a Node.js Express PostgreSQL backend..."`)
+ *   on a mis-routed prompt — the actual reasoning chain was already
+ *   in `reasoningChain[]` but invisible. See
+ *   `gotchas.md: ## ReasoningPeek surfaced structured-field text
+ *   instead of plain-prose reasoning chain`.
+ *
+ *   Falls back to structured-field rendering when `reasoningChain`
+ *   is empty or missing — pipelines that don't yet produce a chain
+ *   (chunk_plan, chunk_reflect, divergence verdict) keep their
+ *   current peek shape.
+ *
  * Exported so the contract is testable without rendering Ink.
  */
 export function formatBriefSummary(kind: string, briefData: Record<string, unknown> | undefined): BriefSummary {
   const data = briefData ?? {}
+
+  // ─── Plain-prose preference (2026-05-15) ───────────────────────
+  // Drain `reasoningChain` first. When the LLM ran an iterative
+  // paragraph chain (preflight / future intent classifier / any
+  // future deliberative pipeline), the paragraphs land here.
+  const chain = Array.isArray(data.reasoningChain) ? (data.reasoningChain as unknown[]) : []
+  const paragraphs = chain
+    .filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+    .map((p) => p.trim())
+  if (paragraphs.length > 0) {
+    return formatPlainReasoningChain(kind, paragraphs)
+  }
+
+  // ─── Fallback: structured-field rendering ───────────────────────
+  // Pipelines without a chain (chunk_plan, chunk_reflect, divergence
+  // verdict, or legacy briefs from before iterative reasoning landed)
+  // keep their existing pure-structured rendering.
   const lines: string[] = []
 
   // Implement pipeline — the most common preflight outcome.
@@ -143,6 +180,47 @@ export function formatBriefSummary(kind: string, briefData: Record<string, unkno
 
   // simple / unknown — generic confidence line.
   return { pipelineLabel: `Reasoning(${kind})`, lines: [confidenceLine(data)] }
+}
+
+/**
+ * Plain-prose render path. Shows up to MAX_PARAGRAPH_LINES paragraphs,
+ * each truncated to MAX_PARAGRAPH_CHARS so the peek stays compact.
+ * If the chain has more paragraphs, a tail line surfaces the count
+ * (`→ (+N more paragraphs)`) so the user knows the LLM iterated
+ * further than what's visible.
+ *
+ * Exported for tests; pure.
+ */
+const MAX_PARAGRAPH_LINES = 3
+const MAX_PARAGRAPH_CHARS = 180
+
+export function formatPlainReasoningChain(kind: string, paragraphs: string[]): BriefSummary {
+  const visible = paragraphs.slice(0, MAX_PARAGRAPH_LINES)
+  const lines = visible.map((p) => `→ ${truncate(p, MAX_PARAGRAPH_CHARS)}`)
+  const hidden = paragraphs.length - visible.length
+  if (hidden > 0) {
+    lines.push(`→ (+${hidden} more paragraph${hidden === 1 ? "" : "s"})`)
+  }
+  return { pipelineLabel: pipelineLabelFor(kind), lines }
+}
+
+/**
+ * Canonical mapping from pipeline `kind` to the human label rendered
+ * in the peek header. Centralised so the chain-render path and the
+ * structured-field path use the exact same labels.
+ */
+export function pipelineLabelFor(kind: string): string {
+  switch (kind) {
+    case "implement": return "Reasoning(implement)"
+    case "bug": return "Reasoning(bug)"
+    case "decision": return "Reasoning(decision)"
+    case "summary": return "Reasoning(summary)"
+    case "divergence": return "Reasoning(divergence)"
+    case "implement_elaborate": return "Reasoning(elaborate)"
+    case "chunk_plan": return "Reasoning(chunk plan)"
+    case "chunk_reflect": return "Reasoning(chunk reflect)"
+    default: return `Reasoning(${kind})`
+  }
 }
 
 function confidenceLine(data: Record<string, unknown>): string {
