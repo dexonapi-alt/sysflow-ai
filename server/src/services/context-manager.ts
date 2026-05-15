@@ -143,13 +143,24 @@ export function ingestSessionHistory(
 /**
  * Ingest directory tree into working context.
  * This is VERIFIED truth — the directory was just scanned.
+ *
+ * Stage 4 of agent-runtime-fixes plan: now also detects STALE files —
+ * paths the working context tracked as "created" / "edited" / "read"
+ * at the TOP LEVEL that no longer appear in the refreshed tree.
+ * Common trigger: the agent issued `delete_file` or a `rm` shell
+ * command, or a directory reset happened externally. Returns the
+ * list of stale top-level files so the caller can inject a one-shot
+ * reminder telling the agent NOT to reference deleted files.
+ *
+ * Files marked as `action: "deleted"` are excluded from the stale
+ * list (the agent already knows they're gone).
  */
 export function ingestDirectoryTree(
   runId: string,
   tree: Array<{ name: string; type: string }>
-): void {
+): { staleFiles: string[] } {
   const ctx = runContexts.get(runId)
-  if (!ctx) return
+  if (!ctx) return { staleFiles: [] }
 
   ctx.facts.set("project_structure", {
     key: "project_structure",
@@ -161,6 +172,35 @@ export function ingestDirectoryTree(
     tick: ctx.tick,
     verified: true
   })
+
+  // Stage 4: compute stale top-level files. Files in the working
+  // context whose path is top-level (no path separator) and that the
+  // agent created/edited/read but that no longer appear in the
+  // refreshed tree are flagged stale. Sub-directory files can't be
+  // checked from a top-level snapshot, so we don't include them in
+  // the stale list — under-reporting is safer than false positives.
+  const currentTopLevel = new Set(tree.map((e) => e.name))
+  const staleFiles: string[] = []
+  for (const [path, knowledge] of ctx.files) {
+    // Skip files already known to be deleted.
+    if (knowledge.action === "deleted") continue
+    // Skip sub-directory files — we can't verify them from this snapshot.
+    if (path.includes("/") || path.includes("\\")) continue
+    if (!currentTopLevel.has(path)) {
+      staleFiles.push(path)
+      // Mark the file knowledge as deleted so the warning only fires
+      // ONCE per detection — subsequent turns don't re-warn for the
+      // same file.
+      ctx.files.set(path, {
+        ...knowledge,
+        action: "deleted",
+        summary: "No longer present on disk (detected via directory refresh)",
+        tick: ctx.tick,
+        verified: true,
+      })
+    }
+  }
+  return { staleFiles }
 }
 
 /**
