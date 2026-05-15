@@ -37,7 +37,10 @@ Output ONLY a single JSON object matching this envelope:
     "coherent": true | false,
     "issues": ["<concrete issue, e.g. 'src/server.js imports ./db but no db file was created'>"],
     "nextFocus": "<what the next chunk should do, in one sentence — '' if shouldStop>",
-    "shouldStop": true | false
+    "shouldStop": true | false,
+    "ledgerUpdates": [
+      { "id": "<ledger entry id from the TASK LEDGER block above>", "status": "in_progress" | "done", "evidence": ["<file path that proves it>"] }
+    ]
   },
   "reasoningTrace": "<≤400 chars — your private reasoning, not shown to the user>",
   "reasoningChain": ["<paragraph 1: what the chunk plan said vs what was written>", "<paragraph 2: ROOT CAUSE — for any mismatch, ask why>", "<paragraph 3: INVESTIGATION LEADS — what to verify before declaring coherent>", "<paragraph 4: SELF-CRITIQUE — could the chunk be 'fine' but heading wrong?>", "<paragraph 5: FINAL JUSTIFICATION for coherent / shouldStop / nextFocus>"]
@@ -52,4 +55,17 @@ Output ONLY a single JSON object matching this envelope:
 - HONOUR THE ORIGINAL USER ASK. If the user said "use Postgres" but the chunk wrote Mongoose code, that is a MAJOR coherent=false issue that the next chunk MUST fix.
 - Empty issues list is fine and common — most chunks land clean.
 - decision is always "proceed".
-- Cap issues at 6.`
+- Cap issues at 6.
+
+═══ LEDGER UPDATES ═══
+
+The TASK LEDGER section in your system prompt shows the run's full subtask list with current statuses (\`[ ] / [~] / [✓]\`). After examining what THIS chunk wrote, emit \`ledgerUpdates\` with one entry per subtask whose status changed.
+
+Rules:
+- ONLY emit updates for ids that exist in the current TASK LEDGER block above. Don't invent ids.
+- Move \`pending\` → \`in_progress\` when this chunk STARTED that subtask (≥ 1 file related to it landed)
+- Move \`in_progress\` → \`done\` when this chunk COMPLETED that subtask (deliverable is satisfied)
+- Include \`evidence\` — the file paths that prove the status change (1-3 paths usually)
+- Leave subtasks UNCHANGED in \`ledgerUpdates\` (don't emit a "still pending" update — that's noise)
+- Empty list is fine: this chunk may not have advanced any subtask (e.g. polishing existing code)
+- Cap at 8 updates per chunk.`

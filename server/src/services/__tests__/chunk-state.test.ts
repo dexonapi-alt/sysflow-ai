@@ -26,6 +26,7 @@ const sampleReflection = (over: Partial<ChunkReflectionBrief> = {}): ChunkReflec
   issues: [],
   nextFocus: "wire routes next",
   shouldStop: false,
+  ledgerUpdates: [],
   ...over,
 })
 

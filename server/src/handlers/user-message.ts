@@ -23,6 +23,7 @@ import { recordImplementSummary, recordOriginalIntent, recordDecision, recordBug
 import { runReasoningChain } from "../reasoning/chain.js"
 import { shouldRunPreflightElaboration, resolveMaxFilesPerChunk } from "../services/free-tier-policy.js"
 import { recordChunkStart } from "../services/chunk-state.js"
+import { seedLedgerFromBuildPlan } from "../services/task-ledger.js"
 import type { ChunkPlanBrief } from "../reasoning/reasoning-schema.js"
 import { getFlag } from "../services/flags.js"
 import { getConfidence, getThresholdState } from "../services/confidence-tracker.js"
@@ -240,6 +241,18 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
       sysbasePath: body.sysbasePath,
     })
     reasoningBrief = briefResult
+    // Stage 2 of free-tier quality enforcement: seed the persistent task
+    // ledger from the preflight implement brief's buildPlan. Fires for
+    // any implement brief (not gated on confidence — even a LOW-confidence
+    // run still benefits from having "what subtasks remain" anchored in
+    // the system prompt, so the agent can't lose track of the original
+    // ask mid-run).
+    if (briefResult && briefResult.pipeline === "implement" && briefResult.implementBrief) {
+      const buildPlan = briefResult.implementBrief.buildPlan ?? []
+      if (Array.isArray(buildPlan) && buildPlan.length > 0) {
+        seedLedgerFromBuildPlan(runId, buildPlan)
+      }
+    }
     // Phase 8 + 15 Stage 1: persist preflight brief by pipeline kind.
     // Each branch self-gates on confidence + decision so a LOW-confidence
     // run doesn't ossify a guess. The recorder also has its own internal
