@@ -26,7 +26,7 @@
  */
 
 import * as React from "react"
-import { Box, Text } from "ink"
+import { Box, Text, useInput } from "ink"
 import { palette } from "../theme.js"
 import { Pulse } from "../animation/primitives/index.js"
 import type { ReasoningBriefState } from "../hooks/useAgentEvents.js"
@@ -205,6 +205,31 @@ export function formatPlainReasoningChain(kind: string, paragraphs: string[]): B
 }
 
 /**
+ * Stage 3 of agent-runtime-fixes plan: full-text render for the expand
+ * mode. Returns every paragraph with no per-paragraph cap (the prompt's
+ * pre-truncation already caps to 1200 chars per Zod schema, so the worst
+ * case is bounded). Pure; exported for tests.
+ */
+export function formatFullReasoningChain(kind: string, paragraphs: string[]): BriefSummary {
+  const lines = paragraphs.map((p) => `→ ${p}`)
+  return { pipelineLabel: pipelineLabelFor(kind), lines }
+}
+
+/**
+ * Stage 3: returns true when the brief has more content than the
+ * truncated view shows. Used by ReasoningPeek to decide whether to
+ * render the "press `r` to expand" hint. Pure; exported for tests.
+ */
+export function isBriefTruncated(briefData: Record<string, unknown> | undefined): boolean {
+  if (!briefData) return false
+  const chain = Array.isArray(briefData.reasoningChain) ? (briefData.reasoningChain as unknown[]) : []
+  const paragraphs = chain.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+  if (paragraphs.length > MAX_PARAGRAPH_LINES) return true
+  // Per-paragraph char overflow also counts as truncated.
+  return paragraphs.slice(0, MAX_PARAGRAPH_LINES).some((p) => p.length > MAX_PARAGRAPH_CHARS)
+}
+
+/**
  * Canonical mapping from pipeline `kind` to the human label rendered
  * in the peek header. Centralised so the chain-render path and the
  * structured-field path use the exact same labels.
@@ -219,6 +244,12 @@ export function pipelineLabelFor(kind: string): string {
     case "implement_elaborate": return "Reasoning(elaborate)"
     case "chunk_plan": return "Reasoning(chunk plan)"
     case "chunk_reflect": return "Reasoning(chunk reflect)"
+    case "intent_classification": return "Reasoning(intent_classification)"
+    case "error_reasoning": return "Reasoning(error)"
+    case "project_init": return "Reasoning(project init)"
+    // Stage 3 of agent-runtime-fixes plan: per-turn deliberation
+    // (the main model's reasoningChain on each tool turn).
+    case "per_turn": return "Reasoning(this turn)"
     default: return `Reasoning(${kind})`
   }
 }
@@ -256,7 +287,36 @@ function truncate(s: string, max: number): string {
 }
 
 export function ReasoningPeek({ brief }: Props): React.ReactElement {
-  const summary = formatBriefSummary(brief.kind, brief.briefData)
+  // Stage 3 of agent-runtime-fixes plan: expand toggle. Closes bug 7
+  // (truncated reasoning with no way to see full context).
+  //
+  // - `r` (lowercase) toggles between truncated and full view.
+  // - `Ctrl+R` is an alias (the user explicitly asked for it).
+  // - State resets when `brief.key` changes (new emission → fresh truncated
+  //   view; the user can re-expand if they care).
+  const [expanded, setExpanded] = React.useState(false)
+  const lastKey = React.useRef(brief.key)
+  React.useEffect(() => {
+    if (lastKey.current !== brief.key) {
+      lastKey.current = brief.key
+      setExpanded(false)
+    }
+  }, [brief.key])
+
+  useInput((input, key) => {
+    // Toggle on bare `r` OR Ctrl+R. The TextInput field captures keys
+    // when focused, so this only fires while the input is empty / blurred.
+    if ((input === "r" || input === "R") || (key.ctrl && input === "r")) {
+      setExpanded((v) => !v)
+    }
+  })
+
+  const summary = expanded && Array.isArray(brief.briefData?.reasoningChain)
+    ? formatFullReasoningChain(brief.kind, (brief.briefData!.reasoningChain as unknown[]).filter((p): p is string => typeof p === "string" && p.trim().length > 0))
+    : formatBriefSummary(brief.kind, brief.briefData)
+
+  const truncated = !expanded && isBriefTruncated(brief.briefData)
+
   return (
     <Box flexDirection="column" marginLeft={2} marginTop={1}>
       <Box>
@@ -271,6 +331,16 @@ export function ReasoningPeek({ brief }: Props): React.ReactElement {
           <Text color={palette.muted}>{line}</Text>
         </Box>
       ))}
+      {truncated && (
+        <Box marginLeft={2}>
+          <Text color={palette.muted} dimColor>press `r` to expand reasoning</Text>
+        </Box>
+      )}
+      {expanded && (
+        <Box marginLeft={2}>
+          <Text color={palette.muted} dimColor>press `r` to collapse</Text>
+        </Box>
+      )}
     </Box>
   )
 }

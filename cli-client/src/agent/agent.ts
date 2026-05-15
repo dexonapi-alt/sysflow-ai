@@ -448,6 +448,19 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       emitAgent({ type: "reasoning_brief", kind: "error_reasoning", briefData: { reasoningChain: paragraphs } })
     }
   }
+  // Stage 1 of agent-runtime-fixes plan: project-init paragraphs.
+  // Surfaces the repo-state classification + investigation plan in
+  // the peek (via the plain-prose render path) so the user sees the
+  // very first thing the agent reasoned about — what kind of repo
+  // we're in. Constant for the run; emitted ONCE here on the first
+  // response.
+  const projectInitParagraphs = (response as Record<string, unknown>).projectInitParagraphs
+  if (Array.isArray(projectInitParagraphs) && projectInitParagraphs.length > 0) {
+    const paragraphs = projectInitParagraphs.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+    if (paragraphs.length > 0) {
+      emitAgent({ type: "reasoning_brief", kind: "project_init", briefData: { reasoningChain: paragraphs } })
+    }
+  }
   const initialErrorSource = (response as Record<string, unknown>).errorReasoningSource
   // Stage 3 of forced-error-reasoning plan: track the LATEST error-
   // reasoning source observed this run (most recent wins, since
@@ -794,6 +807,18 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
           const paragraphs = errorReasoningParagraphs.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
           if (paragraphs.length > 0) {
             emitAgent({ type: "reasoning_brief", kind: "error_reasoning", briefData: { reasoningChain: paragraphs } })
+          }
+        }
+        // Stage 3 of agent-runtime-fixes plan: emit the per-turn
+        // reasoningChain as a `reasoning_brief` event so the peek tracks
+        // the LATEST deliberation, not just the first brief of the run.
+        // Closes bug 6 (peek stuck on initial brief while the agent
+        // iterated through later tools).
+        const perTurnChain = (response as Record<string, unknown>).perTurnReasoningChain
+        if (Array.isArray(perTurnChain) && perTurnChain.length > 0) {
+          const paragraphs = perTurnChain.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+          if (paragraphs.length > 0) {
+            emitAgent({ type: "reasoning_brief", kind: "per_turn", briefData: { reasoningChain: paragraphs } })
           }
         }
         // Stage 3: track the LATEST error-reasoning source seen this run.

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { formatBriefSummary, formatPlainReasoningChain, pipelineLabelFor } from "../ReasoningPeek.js"
+import { formatBriefSummary, formatPlainReasoningChain, formatFullReasoningChain, isBriefTruncated, pipelineLabelFor } from "../ReasoningPeek.js"
 
 describe("formatBriefSummary — implement pipeline", () => {
   it("surfaces the intent + recommended stack", () => {
@@ -340,5 +340,77 @@ describe("pipelineLabelFor — canonical labels", () => {
   it("returns a default Reasoning(<kind>) for unknown kinds", () => {
     expect(pipelineLabelFor("intent_classification")).toBe("Reasoning(intent_classification)")
     expect(pipelineLabelFor("future_pipeline")).toBe("Reasoning(future_pipeline)")
+  })
+})
+
+// ─── Stage 3 of agent-runtime-fixes plan: expand/collapse helpers ───
+
+describe("formatFullReasoningChain — expand mode", () => {
+  it("renders ALL paragraphs without per-paragraph truncation", () => {
+    const long = "x".repeat(400)
+    const out = formatFullReasoningChain("per_turn", [long, "second paragraph", "third"])
+    expect(out.lines).toHaveLength(3)
+    expect(out.lines[0]).toContain(long)  // not truncated
+    expect(out.lines[1]).toContain("second")
+    expect(out.lines[2]).toContain("third")
+  })
+
+  it("renders more than MAX_PARAGRAPH_LINES paragraphs (no +N tail)", () => {
+    const out = formatFullReasoningChain("per_turn", ["one", "two", "three", "four", "five"])
+    expect(out.lines).toHaveLength(5)
+    // No "+N more" tail in the expanded view.
+    expect(out.lines.some((l) => l.includes("more paragraph"))).toBe(false)
+  })
+
+  it("uses the same pipeline label as the truncated path", () => {
+    const out = formatFullReasoningChain("project_init", ["paragraph"])
+    expect(out.pipelineLabel).toBe("Reasoning(project init)")
+  })
+})
+
+describe("isBriefTruncated", () => {
+  it("returns false when no brief data", () => {
+    expect(isBriefTruncated(undefined)).toBe(false)
+    expect(isBriefTruncated({})).toBe(false)
+  })
+
+  it("returns false when reasoningChain is empty", () => {
+    expect(isBriefTruncated({ reasoningChain: [] })).toBe(false)
+  })
+
+  it("returns false when paragraph count fits AND no per-line overflow", () => {
+    expect(isBriefTruncated({ reasoningChain: ["short", "also short", "third short"] })).toBe(false)
+  })
+
+  it("returns true when paragraph count exceeds MAX_PARAGRAPH_LINES (3)", () => {
+    expect(isBriefTruncated({ reasoningChain: ["one", "two", "three", "four"] })).toBe(true)
+  })
+
+  it("returns true when any visible paragraph exceeds MAX_PARAGRAPH_CHARS (180)", () => {
+    const long = "x".repeat(200)
+    expect(isBriefTruncated({ reasoningChain: [long] })).toBe(true)
+  })
+
+  it("ignores non-string entries in reasoningChain", () => {
+    expect(isBriefTruncated({ reasoningChain: ["short", null, undefined, 42, "another"] as unknown[] })).toBe(false)
+  })
+
+  it("returns false when reasoningChain is not an array", () => {
+    expect(isBriefTruncated({ reasoningChain: "not array" as unknown as string[] })).toBe(false)
+  })
+})
+
+describe("pipelineLabelFor — Stage 3 additions", () => {
+  it("renders Reasoning(this turn) for per_turn", () => {
+    expect(pipelineLabelFor("per_turn")).toBe("Reasoning(this turn)")
+  })
+  it("renders Reasoning(project init) for project_init", () => {
+    expect(pipelineLabelFor("project_init")).toBe("Reasoning(project init)")
+  })
+  it("renders Reasoning(error) for error_reasoning", () => {
+    expect(pipelineLabelFor("error_reasoning")).toBe("Reasoning(error)")
+  })
+  it("renders Reasoning(intent_classification) for intent_classification", () => {
+    expect(pipelineLabelFor("intent_classification")).toBe("Reasoning(intent_classification)")
   })
 })
