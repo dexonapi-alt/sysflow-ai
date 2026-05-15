@@ -38,7 +38,7 @@ import { detectDivergence, pickDivergenceAnchor, type DetectorInput } from "../s
 import { isSafeReadOnlyCommand } from "../services/safe-commands.js"
 import { applyLedgerUpdates, clearLedger } from "../services/task-ledger.js"
 import { clearReviewState } from "../services/self-review-scheduler.js"
-import { shouldRunDivergenceSecondLook, resolveMaxChunksPerRun, resolveMaxFilesPerChunk } from "../services/free-tier-policy.js"
+import { shouldRunDivergenceSecondLook, resolveMaxChunksPerRun, resolveMaxFilesPerChunk, shouldRunPerStepDivergence } from "../services/free-tier-policy.js"
 import { recordSignals as recordConfidenceSignals, clearConfidence, getConfidence, getConfidenceState, getThresholdState } from "../services/confidence-tracker.js"
 import { runVerificationGate, gateSignals } from "../services/verification-gate.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
@@ -234,6 +234,40 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     actionPlanner.recordResult(body.runId, body.tool, body.result)
     ingestToolResult(body.runId, body.tool, body.result, body.result)
     updatePipelineProgress(body.runId, body.tool, body.result)
+  }
+
+  // ─── Stage 4 of free-tier-quality-enforcement: per-step divergence ───
+  // For free-tier runs, the lightweight HEURISTIC detector runs after every
+  // tool result — not just at chunk boundaries. The LLM divergence pipeline
+  // stays gated to the chunk-boundary block above (too expensive per-step).
+  // The new `same_action_repeated_in_session` heuristic is the primary
+  // payload here: it spots stuck-loops (same tool+path 3+ times in 6 turns)
+  // MID-chunk so the off-course modal can fire before the agent burns another
+  // 4 turns retrying the same broken edit. Gated by:
+  //   - `awareness.enabled` (the umbrella switch — respect cooldowns too)
+  //   - `quality.per_step_divergence_for_free_tier` (per-stage kill switch)
+  //   - `shouldRunPerStepDivergence(model)` (free-tier only)
+  try {
+    const awarenessOn = getFlag<boolean>("awareness.enabled", run.sysbasePath as string | null | undefined)
+    const perStepFlag = getFlag<boolean>("quality.per_step_divergence_for_free_tier", run.sysbasePath as string | null | undefined)
+    const cooldownLeft = awarenessCooldownChunks.get(body.runId) ?? 0
+    if (
+      awarenessOn
+      && perStepFlag
+      && cooldownLeft === 0
+      && shouldRunPerStepDivergence(run.model as string | null | undefined)
+    ) {
+      const input = buildDetectorInput(body.runId, run.content)
+      const signals = detectDivergence(input)
+      if (signals.length > 0) {
+        recordConfidenceSignals(body.runId, signals)
+        const score = getConfidence(body.runId)
+        const state = getThresholdState(body.runId, run.sysbasePath as string | null | undefined, run.model as string | undefined)
+        console.log(`[awareness] per-step: ${signals.length} signal(s), confidence=${score} state=${state} (categories: ${signals.map((s) => s.category).join(", ")})`)
+      }
+    }
+  } catch (err) {
+    console.warn(`[awareness] per-step divergence failed:`, (err as Error).message)
   }
 
   // ─── Phase 6: post-scaffold guidance — when a scaffolder run_command just succeeded,
@@ -1424,6 +1458,17 @@ function buildDetectorInput(runId: string, originalPrompt: string): DetectorInpu
   // is a cheap pure helper.
   const complexity = analyzeTaskComplexity(originalPrompt).complexity
 
+  // Stage 4 of free-tier-quality-enforcement: rolling window of the
+  // last 6 tool calls feeds the `same_action_repeated_in_session`
+  // heuristic. Truncate paths and commands to keep the comparison key
+  // stable across stored vs. raw forms (the action log already trims
+  // commands to 120 chars, so this is mostly defensive).
+  const recentActions = runLog.actions.slice(-6).map((a) => ({
+    tool: typeof a.tool === "string" ? a.tool : "",
+    path: typeof a.path === "string" ? a.path : undefined,
+    command: typeof a.command === "string" ? a.command : undefined,
+  }))
+
   return {
     originalPrompt,
     chunkHistory,
@@ -1435,6 +1480,7 @@ function buildDetectorInput(runId: string, originalPrompt: string): DetectorInpu
     investigationCommandCount,
     firstWriteOrEditIndex,
     complexity,
+    recentActions,
   }
 }
 

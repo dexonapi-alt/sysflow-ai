@@ -27,6 +27,12 @@ export type DivergenceCategory =
   // is preferred, not required for every task; trivial tasks legitimately
   // skip it. Suppressed when complexity === "simple".
   | "no_investigation_before_write"
+  // Stage 4 of free-tier-quality-enforcement: the agent ran the same
+  // tool+path tuple more than twice in a short window — almost always
+  // indicates a stuck loop (retrying the same broken edit). Fires
+  // per-step on free-tier so the off-course modal can trip MID-chunk
+  // instead of waiting for the chunk boundary.
+  | "same_action_repeated_in_session"
 
 export interface DivergenceSignal {
   category: DivergenceCategory
@@ -78,6 +84,13 @@ export interface DetectorInput {
    * investigation — the heuristic suppresses when this is "simple".
    */
   complexity?: "simple" | "medium" | "complex" | null
+  /**
+   * Stage 4 of free-tier-quality-enforcement: rolling window of recent
+   * tool calls used by the `same_action_repeated_in_session` heuristic
+   * to catch stuck-loops (e.g. retrying the same broken edit). Newest
+   * last. Empty / missing → heuristic skipped.
+   */
+  recentActions?: Array<{ tool: string; path?: string; command?: string }>
 }
 
 // ─── Tuning constants ───
@@ -176,6 +189,41 @@ export function detectDivergence(input: DetectorInput): DivergenceSignal[] {
         detail: `completion mentions ${claimedButMissing.slice(0, 3).join(", ")} but those files weren't written this run`,
         severity: "major",
       })
+    }
+  }
+
+  // ─── Heuristic 8 (Stage 4 of free-tier-quality-enforcement): same
+  // ─── action repeated more than twice in a 3-6 turn window ───
+  // Catches stuck-loops (retrying the same broken edit, re-reading the
+  // same file, running the same command). Fires per-step on free-tier
+  // so the off-course modal can trip MID-chunk instead of waiting for
+  // the chunk boundary.
+  //
+  // Threshold: > 2 occurrences of the same (tool, primaryPath) tuple
+  // in the last min(6, recentActions.length) entries. Below 3 entries
+  // total the heuristic skips (too noisy to be useful).
+  const recentActions = input.recentActions ?? []
+  const windowSize = Math.min(6, recentActions.length)
+  if (windowSize >= 3) {
+    const window = recentActions.slice(-windowSize)
+    const counts = new Map<string, number>()
+    for (const a of window) {
+      if (!a || typeof a.tool !== "string") continue
+      const key = `${a.tool}::${a.path ?? a.command ?? ""}`
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    for (const [key, count] of counts) {
+      if (count > 2) {
+        const [tool, target] = key.split("::")
+        const detail = target
+          ? `agent ran ${tool} on ${target} ${count}x in the last ${windowSize} turns — likely stuck in a loop`
+          : `agent ran ${tool} ${count}x in the last ${windowSize} turns — likely stuck in a loop`
+        signals.push({
+          category: "same_action_repeated_in_session",
+          detail,
+          severity: "moderate",
+        })
+      }
     }
   }
 
