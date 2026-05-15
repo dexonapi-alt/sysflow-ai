@@ -229,6 +229,27 @@ defineFlag("quality.investigation_budget_reminder_enabled", true, parseBool)
 // the pre-Phase-18 always-include behaviour.
 defineFlag("quality.taskplan_emission_gating_enabled", true, parseBool)
 
+// ─── Plan 2026-05-15-llm-iterative-intent-classification.md ───
+// Stage 4 — when true (default), the smart classifier's iterative
+// LLM chain runs on prompts the regex doesn't HIGH-confidence commit
+// on (everything except SIMPLE_PATTERNS matches). When false, the
+// smart wrapper degrades to regex-only — pre-plan behaviour.
+defineFlag("reasoning.intent_classification_via_llm_enabled", true, parseBool)
+// Stage 5 — per-chain depth cap. Mirrors `MAX_ITERATIVE_STEPS` for
+// the preflight chain so operators have one number for "how deep
+// can iterative reasoning go on this run". The LLM's `done` flag
+// drives most short-circuits — this is the runaway-safety ceiling.
+// Lower if telemetry shows free-tier intent classification often
+// running past iteration 3.
+defineFlag("reasoning.intent_classification_max_iterations", 6, parseNumber)
+// Stage 5 — when false, the smart classifier SKIPS the regex
+// fast-path and routes every non-cached prompt through the LLM
+// chain. Useful for telemetry / accuracy tuning — distribution of
+// `intentClassificationSource` shifts to mostly `chain` /
+// `regex_fallback` and the `regex_simple` bucket becomes 0. Default
+// true (regex fast-path on) keeps trivial cases cheap.
+defineFlag("reasoning.intent_classification_fast_path_regex_enabled", true, parseBool)
+
 // ─── Iterative paragraph chain (follow-up to Stage C model-lock) ───
 // When true (default), the preflight reasoner builds its reasoningChain
 // paragraph-by-paragraph across N sequential Flash calls — each call

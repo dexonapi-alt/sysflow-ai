@@ -444,8 +444,17 @@ export async function classifyIntentSmart(
   // nothing to add. Other regex classes (bug / summary / implement)
   // may have false-positive compound-noun matches — they MUST go
   // through the LLM.
+  //
+  // Stage 5: the regex fast-path can be disabled via
+  // `reasoning.intent_classification_fast_path_regex_enabled = false`
+  // to force every prompt through the LLM (telemetry / accuracy
+  // tuning mode).
+  const fastPathEnabled = (() => {
+    try { return getFlag<boolean>("reasoning.intent_classification_fast_path_regex_enabled") }
+    catch { return true }
+  })()
   const regexHint = classifyIntentByRegex(args.userMessage)
-  if (regexHint === "simple") {
+  if (fastPathEnabled && regexHint === "simple") {
     setIntentForRun(args.runId, regexHint)
     return { hint: regexHint, source: "regex_simple" }
   }
@@ -455,6 +464,11 @@ export async function classifyIntentSmart(
     try { return getFlag<boolean>("reasoning.intent_classification_via_llm_enabled") }
     catch { return true }
   })()
+  // Stage 5: depth cap from flag (default MAX_INTENT_CLASSIFICATION_ITERATIONS).
+  const maxIterationsFromFlag = (() => {
+    try { return getFlag<number>("reasoning.intent_classification_max_iterations") }
+    catch { return MAX_INTENT_CLASSIFICATION_ITERATIONS }
+  })()
 
   if (llmEnabled) {
     try {
@@ -463,6 +477,7 @@ export async function classifyIntentSmart(
           userMessage: args.userMessage,
           model: args.model ?? null,
           flagOverride: args.flagOverride ?? "auto",
+          maxIterations: maxIterationsFromFlag,
         },
         callBackend,
       )

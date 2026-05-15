@@ -214,6 +214,41 @@ export interface ClientResponse {
    * and server share one classification.
    */
   runIntent?: "simple" | "summary" | "bug" | "implement" | null
+  /**
+   * Stage 5 of plan 2026-05-15-llm-iterative-intent-classification.md:
+   * which classification path resolved this run's intent.
+   *   - `"cache"`           — subsequent turn after the first one
+   *                           classified it. Most turns of an
+   *                           established run.
+   *   - `"regex_simple"`    — fast-path: SIMPLE_PATTERNS matched
+   *                           (continuation phrase / bare `ls` /
+   *                           `/list` / …). No LLM call.
+   *   - `"chain"`           — LLM iterative paragraph chain
+   *                           committed the result. The happy path
+   *                           for non-trivial prompts.
+   *   - `"regex_fallback"`  — chain returned null (no API key /
+   *                           parse fail / cap without commit) so
+   *                           the regex's result was used. Worst
+   *                           case is pre-plan behaviour.
+   *   - `null`              — pre-Stage-4 surface, classification
+   *                           didn't run (shouldn't happen on first
+   *                           response after Stage 4 ships).
+   *
+   * Surfaced once per run on the initial response — constant for the
+   * rest of the run since the cache holds the value. CLI captures
+   * via the same first-observation-wins pattern as `reasonerBackend`.
+   */
+  intentClassificationSource?: "cache" | "regex_simple" | "regex_fallback" | "chain" | null
+  /**
+   * Stage 5: the LLM chain's senior-engineer paragraphs, when
+   * `intentClassificationSource === "chain"`. Surfaces in
+   * `<ReasoningPeek>` via a synthetic `reasoning_brief` event so the
+   * user sees the model's deliberation. Absent on non-chain paths
+   * (no paragraphs to render). Same shape as the brief envelope's
+   * `reasoningChain[]` so the existing plain-prose render path
+   * (PR #83) picks them up without any new render code.
+   */
+  intentClassificationParagraphs?: string[]
 }
 
 // ─── Database ───

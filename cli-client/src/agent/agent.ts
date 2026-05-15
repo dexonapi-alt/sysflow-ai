@@ -418,6 +418,26 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
     runIntent = initialIntent
     emitAgent({ type: "intent_classified", intent: initialIntent })
   }
+  // Stage 5 of llm-iterative-intent-classification: capture the
+  // classification source for usage.jsonl telemetry. First-observation
+  // wins; constant for the rest of the run since the cache holds it.
+  let intentClassificationSource: "cache" | "regex_simple" | "regex_fallback" | "chain" | null = null
+  const initialSource = (response as Record<string, unknown>).intentClassificationSource
+  if (initialSource === "cache" || initialSource === "regex_simple" || initialSource === "regex_fallback" || initialSource === "chain") {
+    intentClassificationSource = initialSource
+  }
+  // Stage 5: when the LLM iterative chain produced paragraphs, emit
+  // them as a `reasoning_brief` event so <ReasoningPeek>'s plain-prose
+  // render path (PR #83) surfaces the senior-engineer reasoning to
+  // the user. Same mechanism the other reasoning briefs use; no new
+  // renderer needed.
+  const initialChainParagraphs = (response as Record<string, unknown>).intentClassificationParagraphs
+  if (Array.isArray(initialChainParagraphs) && initialChainParagraphs.length > 0) {
+    const paragraphs = initialChainParagraphs.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+    if (paragraphs.length > 0) {
+      emitAgent({ type: "reasoning_brief", kind: "intent_classification", briefData: { reasoningChain: paragraphs } })
+    }
+  }
   // Resolve the task-display-selective flag once for the run — toggling
   // mid-run isn't a supported flow.
   const taskDisplaySelective = await getTaskDisplaySelective()
@@ -551,6 +571,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       autoPauseEvents: autoPauseEventsThisRun,
       reasonerBackend,
       investigationCommandsCount,
+      intentClassificationSource,
     })
     unregisterSpinner()
   }

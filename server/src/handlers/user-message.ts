@@ -663,6 +663,14 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
   // Phase 19 surface. The smart classifier above already cached the
   // value for this run; this just hands it to the cli.
   clientResp.runIntent = runIntent
+  // Stage 5 of llm-iterative-intent-classification: surface the
+  // classification source (for usage.jsonl telemetry) + chain
+  // paragraphs (for <ReasoningPeek> render). intentResult holds them
+  // from the smart classifier earlier in this handler.
+  clientResp.intentClassificationSource = intentResult.source
+  if (intentResult.paragraphs && intentResult.paragraphs.length > 0) {
+    clientResp.intentClassificationParagraphs = intentResult.paragraphs
+  }
   // Phase 10: surface the chunk-plan brief on the response so the CLI (Stage 5)
   // can render the chunk progress badge. Stage 4 will also inject it into the
   // provider prompt so the model honours the planner's file list.

@@ -708,3 +708,99 @@ When `chunk_plan` has fired (internal work IS happening) AND `runIntent !== "imp
 - CLI capture + gate: `cli-client/src/agent/agent.ts: runIntent + taskDisplaySelective + taskDisplayGated`
 - Header indicator: `cli-client/src/ui/components/Header.tsx: showInternalTaskIndicator`
 - Setting: `cli-client/src/lib/sysbase.ts: getTaskDisplaySelective` (default `true`)
+
+## LLM-driven intent classification
+
+- **Source:** plan `applied/2026-05-15-llm-iterative-intent-classification.md`
+
+Intent classification (`simple` / `bug` / `summary` / `implement`) decides which preflight pipeline runs + drives Phase 18's taskPlan-emission gate + Phase 19's cli render gate. Before this plan it was a brittle synchronous regex that hit compound-noun landmines (e.g. *"error handling"* in a build prompt's feature list tripped `\berror\b` → bug pipeline). After this plan it's an LLM iterative paragraph chain with self-directing depth, with the regex as fast-path + fallback.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  user_message.ts (handler entry)                                      │
+│      ↓                                                                │
+│  classifyIntentSmart(args)  (intent-classifier.ts)                    │
+│      ↓                                                                │
+│  ┌─ 1. CACHE HIT ─┐                                                   │
+│  │  getIntentForRun(runId) ≠ null  → return cached. No regex, no LLM. │
+│  └────────────────┘                                                   │
+│      ↓ (miss)                                                         │
+│  ┌─ 2. REGEX FAST-PATH ─┐                                             │
+│  │  classifyIntentByRegex → if SIMPLE_PATTERNS match → cache + commit │
+│  │  (continuation phrases, bare `ls`, `/list`, etc.)                  │
+│  │  Flag: `intent_classification_fast_path_regex_enabled` (default on)│
+│  └──────────────────────┘                                             │
+│      ↓ (non-simple)                                                   │
+│  ┌─ 3. LLM CHAIN ─┐                                                   │
+│  │  classifyIntentByChain (intent-classification-pipeline.ts)         │
+│  │  Up to 6 iterations (cap from                                       │
+│  │    `intent_classification_max_iterations` flag).                   │
+│  │  Each iteration emits ONE senior-engineer paragraph + `done` flag. │
+│  │  LLM owns the depth — commits with `done: true` when ready;        │
+│  │  iterates with `done: false` when another pass would help;         │
+│  │  can `supersedes: N` to revise a prior paragraph instead of        │
+│  │  stacking contradictions.                                          │
+│  │  Returns { hypothesis, confidence, paragraphs[], iterations,       │
+│  │    committedVia: "done_flag" | "step_cap" }                        │
+│  └────────────────┘                                                   │
+│      ↓ (chain returned null OR flag off)                             │
+│  ┌─ 4. REGEX FALLBACK ─┐                                              │
+│  │  Use the regex's result. source: "regex_fallback". Same shape as   │
+│  │  pre-plan behaviour — the safety net.                              │
+│  └────────────────────┘                                               │
+│      ↓ (cache the resolved hint regardless of source)                 │
+│  setIntentForRun(runId, hint)                                         │
+│      ↓                                                                │
+│  Return { hint, source, paragraphs? }                                 │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### The senior-engineer rubric
+
+The pipeline's system prompt frames each iteration as one mid-to-long paragraph in flowing prose (not a form). Six points:
+
+1. **Restate** the user's exact phrasing
+2. **Why this hypothesis vs alternatives**
+3. **Trade-offs** — cost of being wrong each direction
+4. **End-to-end check** — what pipeline runs, would output be right?
+5. **Double-check** — re-read opening verb + compound nouns
+6. **Decide** — commit (`done: true`) OR end paragraph with the question another pass would answer
+
+Compound-noun trap is called out explicitly: *"build a service with error handling"* → implement; *"the auth service throws an error on login"* → bug.
+
+### Per-run cache caps total Flash spend to ~1 call per run
+
+- `user-message.ts` calls `classifyIntentSmart` on the first turn → cache populates.
+- `tool-result.ts` uses `getCachedIntentOrRegex(runId, content)` → cache hits on every subsequent turn.
+- `task-reasoner.ts/pickPipeline` reads from cache too (keeping `pickPipeline` sync).
+- Cleared on terminal exit alongside the other per-run state stores.
+
+Telemetry: `RunSummary.intentClassificationSource` (`cache` / `regex_simple` / `chain` / `regex_fallback`) lands in `~/.sysflow/usage.jsonl` so operators can see distribution per run.
+
+### `<ReasoningPeek>` surfaces the chain's paragraphs
+
+When `intentClassificationSource === "chain"`, the server attaches `intentClassificationParagraphs[]` to the initial `ClientResponse`. `agent.ts` emits a `reasoning_brief` event with `kind: "intent_classification"` and `briefData.reasoningChain` carrying the paragraphs. The peek's plain-prose render path (PR #83) picks them up automatically — no new render code.
+
+User sees:
+```
+✦ Reasoning(intent_classification)
+  → The user asked to "build a Node.js Express PostgreSQL backend ..."
+    starting with a strong build verb. "error handling" is a FEATURE
+    in the build request, not a symptom — clear implement intent.
+  → Committing with HIGH confidence; no alternative reading is plausible.
+```
+
+### Key files
+
+- Pipeline prompt: `server/src/reasoning/pipelines/intent-classification-pipeline.ts`
+- `PipelineKind` registry: `server/src/reasoning/pipelines/index.ts`
+- Schema + orchestrator + smart wrapper: `server/src/reasoning/intent-classifier.ts`
+- Per-run cache: `server/src/services/intent-cache.ts`
+- Client surface: `server/src/types.ts: ClientResponse.intentClassificationSource + intentClassificationParagraphs`
+- Server population: `server/src/handlers/user-message.ts` (first turn) + sync cache reads in `tool-result.ts` / `task-reasoner.ts/pickPipeline`
+- CLI capture: `cli-client/src/agent/agent.ts: intentClassificationSource` + reasoning_brief emit
+- CLI telemetry: `cli-client/src/agent/usage-log.ts: RunSummary.intentClassificationSource`
+- Flags:
+  - `reasoning.intent_classification_via_llm_enabled` (default `true`) — kill switch
+  - `reasoning.intent_classification_max_iterations` (default `6`) — depth cap
+  - `reasoning.intent_classification_fast_path_regex_enabled` (default `true`) — force-all-through-LLM toggle
