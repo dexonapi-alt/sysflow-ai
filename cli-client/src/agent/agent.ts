@@ -5,6 +5,7 @@ import ora from "ora"
 import { callServer, callServerStream, type ServerError } from "../lib/server.js"
 import { ensureSysbase, getSelectedModel, getSysbasePath, getReasoningEnabled, getAuthToken, getPlanMode } from "../lib/sysbase.js"
 import { executeTool, executeToolsBatch } from "./executor.js"
+import { isSafeReadOnlyCommand } from "./safe-commands.js"
 import { readFileTool, computeLineDiff } from "./tools.js"
 import { clearRunDiffs } from "./diff.js"
 import { getOrBuildIndex, compactTree } from "./indexer.js"
@@ -391,6 +392,11 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   // aren't counted (intentional — telemetry is best-effort, not auditable).
   let flashCallsCount = 0
   if ((response as Record<string, unknown>).reasoningBrief) flashCallsCount += 1
+  // Stage 5 of command-first-investigation: per-run telemetry of how
+  // many safe-read-only `run_command` calls the agent dispatched.
+  // Counted at the CLI dispatch site (both single-tool and batch paths)
+  // inside `handleNeedsTool`, threaded back via NeedsToolResult.
+  let investigationCommandsCount = 0
   // Stage E of model-lock-and-portable-reasoning: capture the resolved
   // reasoner backend the FIRST time it lands on a server response (it's
   // constant for the rest of the run). Recorded into RunSummary on
@@ -529,6 +535,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       divergenceConfidenceAvg: confidenceSampleCount > 0 ? confidenceSampleSum / confidenceSampleCount : undefined,
       autoPauseEvents: autoPauseEventsThisRun,
       reasonerBackend,
+      investigationCommandsCount,
     })
     unregisterSpinner()
   }
@@ -689,6 +696,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         prevTool = result.toolThisTurn
         chunkIndex = result.chunkIndex
         flashCallsCount += result.flashCallsThisTurn
+        investigationCommandsCount += result.investigationCommandsThisTurn
         lastAwarenessState = result.lastAwarenessState
         // Phase 11 Stage 6: tally the awareness snapshot from this turn into
         // the per-run telemetry counters (recorded on terminal exit).
@@ -1033,6 +1041,10 @@ interface NeedsToolResult {
   flashCallsThisTurn: number
   /** Phase 11 Stage 5: last awareness state we surfaced (for transition log dedupe). */
   lastAwarenessState: "on_track" | "off_course" | "blocked" | null
+  /** Stage 5 of command-first-investigation: safe-read-only run_command
+   *  calls observed at dispatch this turn. Caller accumulates into the
+   *  per-run total recorded in RunSummary. */
+  investigationCommandsThisTurn: number
 }
 
 async function handleNeedsTool(
@@ -1043,6 +1055,9 @@ async function handleNeedsTool(
 ): Promise<NeedsToolResult> {
   const { hasReasoning, currentRunId, completedSteps, budget } = ctx
   let { lastDisplayedAction, lastDisplayedReasoning, taskShown, taskSteps, lastPipelineStepId } = ctx
+  // Stage 5 of command-first-investigation: local tally returned via
+  // NeedsToolResult so runAgent can accumulate the per-run total.
+  let investigationCommandsThisTurn = 0
 
   // Step transition handling
   const stepTransition = response.stepTransition as { complete?: string; start?: string } | undefined
@@ -1101,6 +1116,13 @@ async function handleNeedsTool(
     }
 
     const hasCommands = toolCalls!.some((tc) => tc.tool === "run_command")
+    // Stage 5 of command-first-investigation: tally safe-read-only
+    // investigation commands in the batch.
+    for (const tc of toolCalls!) {
+      if (tc.tool === "run_command" && isSafeReadOnlyCommand((tc.args as Record<string, unknown> | undefined)?.command)) {
+        investigationCommandsThisTurn += 1
+      }
+    }
 
     console.log("")
     const batchLabel = hasCommands ? "batch" : "parallel"
@@ -1132,12 +1154,12 @@ async function handleNeedsTool(
           tool: "_recovery",
           result: { error: (batchError as Error).message, success: false }
         })
-        return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState }
+        return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn }
       }
       console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.success("done")}`)
       console.log("")
       spinner.start(colors.muted("thinking..."))
-      return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState }
+      return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn }
     }
 
     spinner.start(colors.muted(`  executing ${toolCalls!.length} tools...`))
@@ -1189,7 +1211,7 @@ async function handleNeedsTool(
         result: { error: (batchError as Error).message, success: false }
       })
     }
-    return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState }
+    return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn }
   }
 
   // ── SINGLE TOOL PATH ──
@@ -1292,6 +1314,14 @@ async function handleNeedsTool(
 
   const currentTool = response.tool as string
   const currentCmd = args?.command as string | undefined
+
+  // Stage 5 of command-first-investigation: tally safe-read-only
+  // investigation commands in the single-tool path. Counts at dispatch
+  // time so a permission-deny or failed command still registers — the
+  // metric measures the model's INTENT to investigate, not the result.
+  if (currentTool === "run_command" && isSafeReadOnlyCommand(currentCmd)) {
+    investigationCommandsThisTurn += 1
+  }
 
   try {
     // Phase 12 Stage 4: surface a <ToolCard> for this dispatch in Ink mode.
@@ -1475,5 +1505,5 @@ async function handleNeedsTool(
     })
   }
 
-  return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState }
+  return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn }
 }

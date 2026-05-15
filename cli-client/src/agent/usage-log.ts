@@ -52,6 +52,14 @@ export interface RunSummary {
    *  telemetry analysis split metrics by backend so the cost +
    *  reliability of each path can be tracked separately. */
   reasonerBackend?: "gemini" | "anthropic" | "openrouter" | null
+  /** Stage 5 of command-first-investigation: count of safe-read-only
+   *  `run_command` calls the agent dispatched during the run. Counted
+   *  at CLI dispatch time via `isSafeReadOnlyCommand` so denied / failed
+   *  commands still register — the metric measures the agent's intent
+   *  to investigate, not its success rate. Target trend after this
+   *  plan: ≥ 2 for non-trivial implement/bug runs, ~0 for trivial
+   *  one-line fixes (the LLM should skip investigation for obvious work). */
+  investigationCommandsCount?: number
 }
 
 const PROMPT_PREVIEW_CHARS = 200
@@ -87,6 +95,10 @@ export async function recordRunSummary(sysbasePath: string | undefined | null, s
     // analysis tools can distinguish "no reasoning happened" from "no
     // such field was logged".
     reasonerBackend: summary.reasonerBackend ?? null,
+    // Stage 5 of command-first-investigation. Defaults to 0 (omitted
+    // → no investigation observed) since the cli always counts when
+    // the field flows.
+    investigationCommandsCount: summary.investigationCommandsCount ?? 0,
   }
   try {
     await fs.appendFile(file, JSON.stringify(entry) + "\n", "utf8")

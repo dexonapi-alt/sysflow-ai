@@ -40,7 +40,8 @@ import { applyLedgerUpdates, clearLedger } from "../services/task-ledger.js"
 import { clearReviewState } from "../services/self-review-scheduler.js"
 import { getLastReasoning, setLastReasoning, clearLastReasoning } from "../services/last-reasoning-store.js"
 import { pickLastReasoning } from "../services/reasoner-action-checker.js"
-import { shouldRunDivergenceSecondLook, resolveMaxChunksPerRun, resolveMaxFilesPerChunk, shouldRunPerStepDivergence } from "../services/free-tier-policy.js"
+import { shouldRunDivergenceSecondLook, resolveMaxChunksPerRun, resolveMaxFilesPerChunk, shouldRunPerStepDivergence, getInvestigationBudget } from "../services/free-tier-policy.js"
+import { classifyIntent } from "../reasoning/intent-classifier.js"
 import { recordSignals as recordConfidenceSignals, clearConfidence, getConfidence, getConfidenceState, getThresholdState } from "../services/confidence-tracker.js"
 import { runVerificationGate, gateSignals } from "../services/verification-gate.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
@@ -237,6 +238,14 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     ingestToolResult(body.runId, body.tool, body.result, body.result)
     updatePipelineProgress(body.runId, body.tool, body.result)
   }
+
+  // ─── Stage 5 of command-first-investigation: investigation-budget reminder ───
+  // When the agent has run `getInvestigationBudget` worth of safe-read-only
+  // commands without writing anything yet, inject a one-shot reminder telling
+  // it to switch from investigation to action. Latched per-run so it fires
+  // at most once; sustained over-investigation gets caught by the existing
+  // `scope_creep` heuristic via the confidence tracker.
+  maybeInjectInvestigationBudgetReminder(body.runId, run)
 
   // ─── Stage 4 of free-tier-quality-enforcement: per-step divergence ───
   // For free-tier runs, the lightweight HEURISTIC detector runs after every
@@ -1258,6 +1267,9 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     // Stage E of model-lock-and-portable-reasoning: drop the per-run
     // reasoner backend telemetry entry.
     clearReasonerBackendForRun(body.runId)
+    // Stage 5 of command-first-investigation: drop the per-run latch
+    // so a subsequent run starts with a fresh reminder budget.
+    investigationBudgetReminderFired.delete(body.runId)
     lastLlmDivergenceCheckedChunk.delete(body.runId)
     awarenessCooldownChunks.delete(body.runId)
     lastDivergenceVerdict.delete(body.runId)
@@ -1454,6 +1466,67 @@ async function writeFixFile(run: RunRecord, content: string): Promise<void> {
   } catch (err) {
     console.error("[context] Failed to write fix file:", (err as Error).message)
   }
+}
+
+/**
+ * Stage 5 of command-first-investigation plan: per-run latch so the
+ * `[BUDGET]` reminder fires AT MOST ONCE. Once injected, the divergence
+ * detector's existing `scope_creep` signal keeps the pressure on if
+ * the agent continues to over-investigate. Cleared on terminal exit.
+ */
+const investigationBudgetReminderFired = new Set<string>()
+
+function maybeInjectInvestigationBudgetReminder(
+  runId: string,
+  run: Awaited<ReturnType<typeof getRun>>,
+): void {
+  if (investigationBudgetReminderFired.has(runId)) return
+
+  // Flag-gated kill switch.
+  const flagOn = (() => {
+    try { return getFlag<boolean>("quality.investigation_budget_reminder_enabled", run.sysbasePath as string | null | undefined) }
+    catch { return true }
+  })()
+  if (!flagOn) return
+
+  const runLog = getRunActions(runId)
+
+  // Count safe-read-only run_commands and detect whether the agent
+  // has already written anything. The investigation phase is "before
+  // first write" — after the agent transitions to action, the budget
+  // reminder is moot.
+  let investigationCount = 0
+  let hasWritten = false
+  for (const a of runLog.actions) {
+    if (!a || typeof a.tool !== "string") continue
+    if (a.tool === "write_file" || a.tool === "edit_file" || a.tool === "batch_write" || a.tool === "create_directory") {
+      hasWritten = true
+      break
+    }
+    if (a.tool === "run_command" && typeof a.command === "string" && isSafeReadOnlyCommand(a.command)) {
+      investigationCount += 1
+    }
+  }
+  if (hasWritten) return
+
+  const complexity = analyzeTaskComplexity(run.content).complexity
+  // Coarse intent classification — same regex hint the preflight uses.
+  // Maps to the policy helper's `intent` parameter; for the budget,
+  // only "bug" vs other matters.
+  const intentHint = classifyIntent(run.content)
+  const budget = getInvestigationBudget({
+    model: run.model as string | null | undefined,
+    intent: intentHint,
+    complexity,
+  })
+
+  if (investigationCount <= budget) return
+
+  // Over-budget AND no writes yet → inject the reminder. Single-shot.
+  const note = `[BUDGET] You've run ${investigationCount} read-only investigation commands in this run without writing anything yet — that's past the ${budget}-command budget for this task complexity. Switch from investigation to action: open the file(s) you've identified and start implementing. If you genuinely need more investigation, surface the specific question you're trying to answer in \`reasoningChain\` first so the next command is purposeful.`
+  actionPlanner.injectContext(runId, note)
+  investigationBudgetReminderFired.add(runId)
+  console.log(`[budget] investigation reminder fired for run ${runId} at ${investigationCount}/${budget} (intent=${intentHint}, complexity=${complexity})`)
 }
 
 /**

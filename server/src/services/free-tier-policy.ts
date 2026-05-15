@@ -375,6 +375,59 @@ export function resolveMaxFilesPerChunk(model: string | null | undefined): numbe
 }
 
 /**
+ * Stage 5 of command-first-investigation plan: cap on the number of
+ * read-only investigation commands the agent should run before it
+ * either (a) writes something or (b) gets a reminder to switch from
+ * investigation to action.
+ *
+ * Three knobs:
+ *   - Trivial tasks (`complexity === "simple"`) cap at 1 command. This
+ *     mirrors the LLM-side "skip the investigation loop for obvious
+ *     work" instruction baked into `task-guidelines.ts`. The system cap
+ *     is the safety net for when the LLM ignores its own depth advice.
+ *   - Free-tier non-trivial: budget per intent. Bugs get a slightly
+ *     bigger budget (6) because root-cause hunting often needs a few
+ *     more probes than implementing a known scaffold (4).
+ *   - Paid: 10 commands. Paid models drift less and pay-per-token, so
+ *     we don't constrain them as tightly.
+ *
+ * The "intent" string is the preflight reasoner's `pipeline` field
+ * (`implement` / `bug` / `decision` / `summary` / `explain`). Unknown
+ * intents share the implement budget.
+ *
+ * Pure helper — exported for unit tests + for the tool-result handler
+ * that injects the over-budget reminder.
+ */
+export interface InvestigationBudgetInput {
+  /** Run's main-model identifier. */
+  model: string | null | undefined
+  /** Preflight pipeline ("implement" / "bug" / "decision" / "summary" / "explain" / unknown). */
+  intent: string | null | undefined
+  /** Task complexity from `analyzeTaskComplexity(prompt).complexity`. */
+  complexity: "simple" | "medium" | "complex" | null | undefined
+}
+
+export function getInvestigationBudget(input: InvestigationBudgetInput): number {
+  // Trivial tasks cap at 1 regardless of tier. The LLM-side instruction
+  // already says *"skip investigation for obvious work"*; the cap is
+  // the safety net for when the LLM ignores its own guidance.
+  if (input.complexity === "simple") return 1
+
+  if (isFreeTierModel(input.model)) {
+    // Free-tier non-trivial: bug-hunt gets a slightly larger budget
+    // because root-cause investigation typically needs a few more
+    // probes than implementing a known scaffold.
+    if ((input.intent ?? "").toLowerCase() === "bug") return 6
+    return 4
+  }
+
+  // Paid tier: 10 commands per run before the reminder fires. Paid
+  // models drift less, and the user pays per token — they likely WANT
+  // thorough investigation rather than a forced action switch.
+  return 10
+}
+
+/**
  * Stage D of model-lock-and-portable-reasoning plan: which reasoner
  * backend should serve this run?
  *

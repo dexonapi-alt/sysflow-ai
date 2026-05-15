@@ -510,6 +510,75 @@ The Phase 12 event union grew with two slots and one extension:
 - Hints table: `cli-client/src/ui/state/hints.ts` (`pickHints`, `formatHints`, `HINT_TABLE`)
 - Legacy gating predicate: `cli-client/src/agent/events.ts: shouldRenderInlineForLegacy()`
 
+## Command-first investigation
+
+- **Source:** plan `applied/2026-05-13-command-first-investigation.md`
+
+For non-trivial implement/bug runs, the agent's default mode of context-gathering is `run_command` (shell), not `read_file`. Files are read only when the agent is about to edit them. Each command result feeds the next via per-turn `reasoningChain[]` prose so the agent's mental model is built from short, factual command output rather than long-file skim-and-hallucinate.
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  user_message  →  preflight reasoner produces implementBrief / bugBrief │
+│                   (incl. investigationPlan: [{ command, expectedSignal,│
+│                    pivotIf }] up to 6 entries)                          │
+│       │                                                                  │
+│       ▼                                                                  │
+│  main model: dispatches first `run_command` from investigationPlan       │
+│       │                                                                  │
+│       ▼                                                                  │
+│  cli executor: auto-approves if isSafeReadOnlyCommand matches the        │
+│                 whitelist (`git status`, `ls`, `grep`, `find`, `cat`,    │
+│                 `npm list`, etc.) — no permission prompt. Increments     │
+│                 `investigationCommandsCount` (Stage 5 telemetry).        │
+│       │                                                                  │
+│       ▼                                                                  │
+│  server: command output lands in tool-result                             │
+│       │                                                                  │
+│       ▼                                                                  │
+│  main model emits next response with:                                    │
+│       reasoningChain: [\"output revealed X\", \"so my assumption Y is\",  │
+│                         \"next I'll probe Z to disambiguate\"]            │
+│       tool: run_command  (or read_file once a target file is identified) │
+│       │                                                                  │
+│       └─── repeat command → reasoning → command → ... → first write ─┐  │
+│                                                                       │  │
+│                                                                       ▼  │
+│           investigation phase ends; implementation phase begins.        │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### Five guardrails working together (each catches a different failure)
+
+1. **Prompt directive** (`prompt/sections/tools.ts` + `task-guidelines.ts` + new `investigation.ts`) frames `run_command` as the PRIMARY context-gathering tool; `read_file` only for files about to be edited. Platform-aware command examples via `env-info.ts`.
+2. **Per-turn `reasoningChain[]`** on the `needs_tool` envelope — the agent reasons in prose between every command, not just at preflight. Surfaces in `<ReasoningPeek>` so the user sees the deliberation happen.
+3. **Safe-command allowlist** (`cli-client/src/agent/safe-commands.ts: isSafeReadOnlyCommand`) — regex whitelist of read-only investigation commands. Auto-approved in permissions; settable via `commands.auto_approve_safe` setting.
+4. **`investigationPlan` brief field** on implement/bug briefs — preflight reasoner suggests 3-5 commands BEFORE writing. Confidence-aware framing: HIGH → MUST run; LOW → suggested.
+5. **`no_investigation_before_write` divergence heuristic** + **investigation budget** — soft signal when the agent writes before exploring (Phase 11 awareness); `getInvestigationBudget` caps runaway investigation per tier/intent/complexity. Trivial tasks (`complexity === "simple"`) cap at 1 command.
+
+### Trivial-task short-circuit
+
+The LLM gauges depth via the same instruction Stage C of model-lock baked into `DEEP_REASONING_PROMPT` — *"be smart, don't manufacture investigation where none is needed."* Below the LLM is the system safety net: `getInvestigationBudget` returns 1 for `complexity === "simple"`, latching the budget reminder to fire if the model insists on probing past it. *"Add a `console.log` to line 42"* gets one command at most.
+
+### Telemetry (Stage 5)
+
+- `cli-client/src/agent/agent.ts` counts safe-read-only `run_command` calls at dispatch — both single-tool and batch paths route through `isSafeReadOnlyCommand`.
+- Recorded as `RunSummary.investigationCommandsCount`; `usage.jsonl` emits per-run.
+- The `[BUDGET]` reminder is logged on the server side; the CLI's counter tracks the *behaviour*, not the reminder count.
+
+### Key files (one source of truth per concern)
+
+- Safe-command allowlist: `cli-client/src/agent/safe-commands.ts: isSafeReadOnlyCommand`
+- Permission auto-approve gate: `cli-client/src/agent/permissions.ts` (consults `isSafeReadOnlyCommand` before `ask`)
+- System-prompt section: `server/src/providers/prompt/sections/investigation.ts` (platform-aware)
+- Brief field: `server/src/reasoning/reasoning-schema.ts: investigationPlan` on implement + bug envelopes
+- Brief renderer: `server/src/providers/prompt/sections/reasoning-brief.ts` (`═══ INVESTIGATE FIRST ═══` block)
+- Repair: `server/src/reasoning/repair.ts` defaults `investigationPlan` to `[]`
+- Divergence heuristic: `server/src/services/divergence-detector.ts: no_investigation_before_write`
+- Budget policy: `server/src/services/free-tier-policy.ts: getInvestigationBudget`
+- Budget reminder injection: `server/src/handlers/tool-result.ts: maybeInjectInvestigationBudgetReminder`
+- Telemetry: `cli-client/src/agent/usage-log.ts: RunSummary.investigationCommandsCount`
+- Flags: `quality.investigation_budget_reminder_enabled`, `awareness.no_investigation_heuristic_enabled`, `reasoning.investigation_plan_enabled`
+
 ## Reasoner backends (model-aware)
 
 - **Source:** plan `applied/2026-05-07-model-lock-and-portable-reasoning.md` (Stages D + E)

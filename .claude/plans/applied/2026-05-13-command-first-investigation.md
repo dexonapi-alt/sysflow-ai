@@ -1,7 +1,7 @@
 # Command-first investigation: shell as the primary context-gathering interface, reasoning interleaved with every command
 
 - **Created:** 2026-05-13
-- **Status:** in-progress
+- **Status:** implemented (2026-05-15)
 - **Scope:** Shift the agent's default mode of context-gathering from `read_file` to `run_command`. Mirror Claude Code's behaviour: investigate the system end-to-end with shell commands first, **reason naturally and deeply after each command's output before deciding the next command**, and only read files when about to edit them. Add a safe-command allowlist so read-only investigation doesn't drown the user in permission prompts. Extend reasoning briefs with an `investigationPlan` so the preflight reasoner decides which commands to run. Add a divergence heuristic that catches "wrote files without exploring first." **Complexity-aware throughout — trivial / obvious tasks skip the heavy investigation loop; the LLM gauges depth, mirroring Stage C's `DEEP_REASONING_PROMPT` pattern.** Compose cleanly on top of the model-lock-and-portable-reasoning plan (Stages A-C already merged when this plan lands).
 
 ## Goal
@@ -193,3 +193,33 @@ Each stage = one PR off `main`. Stage labels: `feat(prompts): Stage 1 — invest
 - **Multi-turn investigation orchestration via a separate "investigator agent"** — single-agent loop is enough; the reasoning brief + divergence heuristic give us the discipline without splitting agents.
 - **Cross-session investigation memory** — each run's investigation is fresh. If a future "what did I learn last time" feature wants to persist, that's Phase 12-style continuation territory.
 - **Replacing the Phase-10 chunk planner's file list with a command-and-file list** — chunk plan stays file-focused. Investigation commands sit in the preflight brief (Stage 3), not in the chunk plan.
+
+## Completion notes
+
+All five stages shipped as separate PRs off `main`, merged in order:
+
+- **PR #66** — Stage 1 + 1.5: investigate-first system-prompt directive + per-turn `reasoningChain[]` on `NormalizedResponse` (the loop-closure that lets the model reason between commands).
+- **PR #67** — Stage 1.5 follow-up: iterative paragraph chain mode (paragraph-by-paragraph reasoning across N Flash calls, anti-staleness via `supersedes`).
+- **PR #68** — Stage 2: `isSafeReadOnlyCommand` allowlist + permissions auto-approval + `commands.auto_approve_safe` setting.
+- **PR #69** — Stage 3: `investigationPlan` field on `implementBrief` + `bugBrief` envelopes; `═══ INVESTIGATE FIRST ═══` renderer; repair pass defaults.
+- **PR #70** — Stage 4: `no_investigation_before_write` divergence heuristic + handler tracking; `ReasoningPeek` surface for the investigation plan.
+- **PR #79 (this PR)** — Stage 5: `getInvestigationBudget(model, intent, complexity)` + `[BUDGET]` reminder injection on over-budget runs; `RunSummary.investigationCommandsCount` telemetry; four knowledge entries.
+
+**Deviations from the original plan:**
+
+- Stage 5's per-turn budget was reinterpreted as **per-run pre-first-write count**, not literally per-turn. "Turn" in our architecture maps to "one round of model output", which is too small (most turns run 1-3 tools); the original failure mode was *agent runs 15 investigation commands before writing anything*, which is naturally measured run-wide. The reminder fires once per run (latched) so the agent isn't spammed; sustained over-investigation gets caught by the existing `scope_creep` heuristic via the confidence tracker.
+- Intent classification for the budget uses the existing `classifyIntent(content)` regex helper rather than threading the preflight reasoner's `pipeline` field through the handler. Cheap, deterministic, and accurate enough for the bug-vs-other budget distinction the helper actually cares about.
+- Telemetry count is CLI-side (counted at dispatch via the existing `isSafeReadOnlyCommand`) rather than server-surfaced. The CLI has the same allowlist module; pushing through the server response would add seams without information gain.
+- The CLI's `agent.ts` counter is threaded through `NeedsToolResult.investigationCommandsThisTurn` so the accumulator stays in `runAgent` (same pattern as `flashCallsThisTurn`).
+
+**Telemetry / next-look items (NOT in this plan's scope but worth flagging):**
+
+- Watch `investigationCommandsCount` in `usage.jsonl`. Target trend after this plan: ≥ 2 for non-trivial implement/bug runs; ~0 for trivial one-line fixes. If the average falls below 1 for non-trivial tasks, the prompt directive isn't sticking and the lever is `task-guidelines.ts` + `investigation.ts`, NOT relaxing the budget. The budget is the safety net, not the steering wheel.
+- The `no_investigation_before_write` heuristic's −15 confidence penalty was deliberately mild. If telemetry shows it firing on too many legitimate runs (user pastes code + asks for a feature, doesn't need exploration), consider tightening the gate — currently `complexity !== "simple"` is the only suppressor.
+
+**Knowledge entries captured:**
+
+- `architecture.md: ## Command-first investigation` — five-guardrails diagram + selection matrix + telemetry surface + key files
+- `decisions.md: ## Why investigate via commands, not file reads` — three reasons (short output / exploratory shape / system-level visibility) and the kept-`read_file` rationale
+- `patterns.md: ## Investigation-before-write pattern` (NEW FILE — `patterns.md` was empty before this plan) — bash + PowerShell command sequences for bug / implement / explore intents, plus the rule for adding the next intent
+- `gotchas.md: ## Read-only commands used to require approval per call` — the Stage 1 → Stage 2 dependency: without the allowlist, the new directive was unusable
