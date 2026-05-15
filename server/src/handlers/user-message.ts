@@ -501,6 +501,14 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     } as ClientResponse
   }
 
+  // Phase 18 Stage 5: surface the run's classified intent + complexity
+  // on the provider payload so the system-rules section can conditionally
+  // emit the taskPlan instruction (and the normalizer can defensively
+  // drop a stray taskPlan if a free-tier model emits one anyway).
+  // `taskComplexity` was already computed earlier in this handler (line ~60)
+  // for logging — reuse `taskComplexity.complexity` directly.
+  const runIntent = classifyIntent(body.content)
+
   let normalized = await callModelAdapter({
     model: body.model,
     runId,
@@ -515,6 +523,8 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     reasoningBrief,
     reasoningElaborationBrief,
     chunkPlanBrief,
+    runIntent,
+    taskComplexity: taskComplexity.complexity,
     userId: body.userId || null,
     chatId: body.chatId || null
   } as never)

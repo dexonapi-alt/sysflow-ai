@@ -5,6 +5,7 @@ import { isFrontendTask } from "../knowledge/frontend-patterns.js"
 import { getFrontendPatternsCompact } from "../knowledge/frontend-patterns.js"
 import { getPipeline } from "../services/task-pipeline.js"
 import { buildSystemPrompt, type PromptCtx } from "./prompt/build.js"
+import { shouldIncludeTaskPlanInstruction } from "./prompt/sections/system-rules.js"
 import { buildVerifyAfterWriteBlock, extractWritesFromToolResults } from "../services/post-write-verifier.js"
 import { shouldForceVerifyAfterWrite, getSelfReviewCadence } from "../services/free-tier-policy.js"
 import { getFlag } from "../services/flags.js"
@@ -288,6 +289,26 @@ export abstract class BaseProvider {
   /** Per-run original task — persisted so every tool result includes a reminder */
   protected runTasks = new Map<string, string>()
 
+  /**
+   * Phase 18 Stage 5: per-run taskPlan emission gate. Set by each
+   * provider's `call(payload)` from `payload.runIntent` +
+   * `payload.taskComplexity` before invoking the model; read by
+   * `parseJsonResponse` so the defensive drop knows whether a stray
+   * taskPlan emission should be suppressed. Cleared by
+   * `clearRunState(runId)`.
+   */
+  protected runTaskPlanGate = new Map<string, { runIntent: "simple" | "summary" | "bug" | "implement" | null; taskComplexity: "simple" | "medium" | "complex" | null }>()
+
+  /** Phase 18 Stage 5: helper called by each provider's `call(payload)` before
+   *  the model invocation so the normalizer sees the gate. Idempotent —
+   *  re-writes are no-ops when the values are the same. */
+  protected setRunTaskPlanGate(payload: ProviderPayload): void {
+    this.runTaskPlanGate.set(payload.runId, {
+      runIntent: payload.runIntent ?? null,
+      taskComplexity: payload.taskComplexity ?? null,
+    })
+  }
+
   /** Per-run malformed-response counter — caps recovery loops. */
   protected runParseFailures = new Map<string, number>()
   protected static readonly MAX_PARSE_FAILURES = 2
@@ -331,6 +352,15 @@ export abstract class BaseProvider {
    * of memory flow. Future work can centralise the async-discovery path.
    */
   getSystemPromptForRequest(payload: ProviderPayload): string {
+    // Phase 18 Stage 5: resolve the taskPlan-emission flag once per
+    // request. Default `true` (gate on); flag-off path lets operators
+    // restore the pre-Phase-18 always-include behaviour without code
+    // changes.
+    const gatingEnabled = (() => {
+      try { return getFlag<boolean>("quality.taskplan_emission_gating_enabled") }
+      catch { return true }
+    })()
+
     return getSystemPrompt({
       model: payload.model,
       cwd: payload.cwd,
@@ -345,6 +375,10 @@ export abstract class BaseProvider {
       // prompt always reflects which subtasks remain. Empty array when
       // the run had no implementBrief.buildPlan to seed from.
       taskLedger: getLedger(payload.runId),
+      // Phase 18 Stage 5: taskPlan emission gating.
+      runIntent: payload.runIntent ?? null,
+      complexity: payload.taskComplexity ?? null,
+      gatingEnabled,
     })
   }
 
@@ -357,6 +391,7 @@ export abstract class BaseProvider {
     this.runFilePaths.delete(runId)
     this.runParseFailures.delete(runId)
     this.runMaxOutputAttempts.delete(runId)
+    this.runTaskPlanGate.delete(runId)
   }
 
   /** Store the original task for this run */
@@ -1072,14 +1107,35 @@ export abstract class BaseProvider {
       }
     }
 
-    // Extract AI-generated task plan from first response
+    // Extract AI-generated task plan from first response.
+    // Phase 18 Stage 5: defensively DROP the taskPlan when the
+    // emission gate said skip. Free-tier models sometimes ignore the
+    // system-rules instruction and emit a taskPlan on a simple Q&A
+    // anyway; this is the second layer of defense (Phase 19's cli
+    // render gate is the first). Same decision logic as the prompt
+    // builder via `shouldIncludeTaskPlanInstruction` so the two
+    // sides always agree.
     if (json.taskPlan && typeof json.taskPlan === "object") {
-      const plan = json.taskPlan as Record<string, unknown>
-      const title = (plan.title as string) || ""
-      const steps = Array.isArray(plan.steps) ? (plan.steps as unknown[]).filter((s) => typeof s === "string").map(String) : []
-      if (steps.length > 0) {
-        normalized.taskPlan = { title, steps }
-        console.log(`[ai-plan] AI generated task plan: "${title}" (${steps.length} steps)`)
+      const gate = runId ? this.runTaskPlanGate.get(runId) : undefined
+      const gatingEnabled = (() => {
+        try { return getFlag<boolean>("quality.taskplan_emission_gating_enabled") }
+        catch { return true }
+      })()
+      const gateSaysInclude = shouldIncludeTaskPlanInstruction({
+        runIntent: gate?.runIntent ?? null,
+        complexity: gate?.taskComplexity ?? null,
+        gatingEnabled,
+      })
+      if (!gateSaysInclude) {
+        console.log(`[ai-plan] dropping stray taskPlan emitted on non-implement / trivial-complexity run (intent=${gate?.runIntent ?? "null"}, complexity=${gate?.taskComplexity ?? "null"})`)
+      } else {
+        const plan = json.taskPlan as Record<string, unknown>
+        const title = (plan.title as string) || ""
+        const steps = Array.isArray(plan.steps) ? (plan.steps as unknown[]).filter((s) => typeof s === "string").map(String) : []
+        if (steps.length > 0) {
+          normalized.taskPlan = { title, steps }
+          console.log(`[ai-plan] AI generated task plan: "${title}" (${steps.length} steps)`)
+        }
       }
     }
 

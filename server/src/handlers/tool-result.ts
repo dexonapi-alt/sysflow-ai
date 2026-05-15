@@ -376,7 +376,14 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     // by buildPrompt which runs inside callModelAdapter).
     reasoningBrief: null as unknown,
     userId: run.userId || null,
-    chatId: run.chatId || null
+    chatId: run.chatId || null,
+    // Phase 18 Stage 5: thread the run's classified intent + complexity
+    // so the system-rules section's taskPlan instruction stays
+    // conditional on every turn (the model only sees the "include
+    // taskPlan" rubric on the first response of implement-class
+    // medium/complex runs).
+    runIntent: classifyIntent(run.content),
+    taskComplexity: analyzeTaskComplexity(run.content).complexity,
   }
 
   if (isBatch) {

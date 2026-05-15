@@ -27,6 +27,9 @@ export class OpenRouterProvider extends BaseProvider {
   async call(payload: ProviderPayload): Promise<NormalizedResponse> {
     const apiKey = this.getApiKey()
     const modelName = this.getModelName(payload.model)
+    // Phase 18 Stage 5: stash the taskPlan gate so the normalizer's
+    // defensive drop can see the run's intent + complexity.
+    this.setRunTaskPlanGate(payload)
 
     try {
       let history = this.runState.get(payload.runId) as ChatMessage[] | undefined

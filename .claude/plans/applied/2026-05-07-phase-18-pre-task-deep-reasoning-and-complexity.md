@@ -1,7 +1,7 @@
 # Phase 18 — Pre-task deep reasoning + complexity-aware orchestration
 
 - **Created:** 2026-05-07
-- **Status:** draft
+- **Status:** implemented (2026-05-15) — Stage 5 only; Stages 2-4 subsumed by Phase 16
 - **Scope:** Today every implement run produces a taskPlan unconditionally and every prompt routes through the same depth of preflight reasoning regardless of difficulty. The user's hypothesis: free-tier models flatten complexity — they treat easy tasks as complex and complex tasks as easy. Phase 18 makes the system distinguish, **think** about WHY before committing, and **gate** taskPlan generation on the task actually being a task.
 
 ## Goal
@@ -154,3 +154,34 @@ End-to-end:
 - Replacing the existing preflight pipelines. They stay; pre-task reasoning is a NEW stage that runs after intent classification + before the existing preflight call (or replaces it for free-tier complex cases — TBD during implementation).
 - Tuning the complexity classifier for specific domains (web dev vs systems vs ML). Generic regex patterns stay; per-domain tuning is a future phase.
 - Replacing taskPlan with something else. The shape stays; only its emission is gated.
+
+## Completion notes
+
+**Implemented scope: Stage 5 only.** Stages 2-4 of the original plan (pre-task-reasoning pipeline + task-confirmation pipeline + orchestrator) are **subsumed by Phase 16** (`applied/2026-05-07-phase-16-deep-reasoning-on-free-models.md`), which shipped first and built the chained `implement_elaborate` Flash that produces *whyThisApproach* + *whyNotAlternative* + *preconditions* + re-scored confidence on free-tier complex runs. Re-building those stages under different names would have produced overlapping abstractions; the cleaner move was to ship the genuinely-new emission gate and document the subsumption.
+
+**What landed (Stage 5):** TaskPlan emission gating — the server-side companion to Phase 19's cli render gate.
+
+- `ProviderPayload.runIntent` + `ProviderPayload.taskComplexity` — new optional fields. Set in `user-message.ts` + `tool-result.ts` from `classifyIntent(run.content)` + `analyzeTaskComplexity(run.content).complexity`.
+- `getSystemRulesSection({runIntent, complexity, gatingEnabled})` — now ctx-aware. Emits the "include taskPlan" rubric only on `implement` + medium/complex; otherwise emits a "Do NOT include a `taskPlan` field" rubric. Exports `shouldIncludeTaskPlanInstruction` so the defensive drop uses the same decision logic.
+- `BaseProvider.runTaskPlanGate: Map<runId, gate>` — new per-run state map populated by `setRunTaskPlanGate(payload)` at the top of each provider's `call`. Read by `parseJsonResponse` to defensively drop stray taskPlan emissions. Cleared by `clearRunState`.
+- New flag `quality.taskplan_emission_gating_enabled` (default `true`).
+- 13 new tests in `system-rules.test.ts` cover the gate matrix (flag-off / pre-classification fallback / Phase-19-matching gate) + rendered content for both variants + shared blocks.
+
+**Deviations from the (still-relevant) Stage 5 plan text:**
+
+- Original plan called for `parseJsonResponse` to take a new `routingDecision` argument. Threading through the existing signature would have broken every caller + test. Switched to a per-run state map (`runTaskPlanGate`) following the same pattern as `runTasks` / `runFilePaths` / `runMaxOutputAttempts`. No public signature change; all existing tests continue to pass.
+- Original plan suggested the gating should fire for `intent === "implement" AND complexity ≥ medium`. Shipped with that exact rule. The fallback (`runIntent == null` or `complexity == null` → include) preserves pre-Phase-18 behaviour for callers / tests that haven't been updated to pass the gate inputs.
+
+**Knowledge entry:**
+
+- `decisions.md: ## TaskPlan emission gates on intent + complexity (server-side companion to the cli render gate)` — gate matrix + why both an instruction gate AND a normalizer drop + why Phase 16 made Stages 2-4 redundant + key files
+
+**Composition outcome:**
+
+The full Phase 18 + Phase 19 picture is now:
+
+- Server preflight reasoner sees the chained `implement_elaborate` for free-tier complex runs (Phase 16) — produces the deep deliberation the original Phase 18 wanted.
+- Server emission gate (Phase 18 Stage 5) makes sure non-implement runs don't surface a taskPlan in the response payload.
+- CLI render gate (Phase 19) makes sure even a stray taskPlan from a free-tier model doesn't blow past the gate at the visible-UI layer.
+
+Three independent gates form defense-in-depth; the single-Stage Phase 18 closes the loop.

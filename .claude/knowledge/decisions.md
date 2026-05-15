@@ -256,6 +256,41 @@ We chose (2). `confidence-tracker.ts` re-exports `isFreeTierModel` and `FREE_MOD
 
 The discipline: when a future stage wants to adapt for free-tier, it adds either a constant or a pure helper to `free-tier-policy.ts` and the call site reads from there. No raw `isFreeTierModel(...)` checks in handlers — they should always be inside a policy helper.
 
+## TaskPlan emission gates on intent + complexity (server-side companion to the cli render gate)
+
+- **Source:** plan `applied/2026-05-07-phase-18-pre-task-deep-reasoning-and-complexity.md` (Stage 5)
+
+Phase 19 added a cli RENDER gate on the visible task box; Phase 18 Stage 5 adds the matching server EMISSION gate. The system-rules section's "FIRST RESPONSE (must include taskPlan)" instruction now renders only when the run is `implement`-class AND complexity ≥ medium. Other combinations see a no-taskPlan rubric ("Do NOT include a `taskPlan` field"). A defensive drop in `parseJsonResponse` ALSO removes a stray taskPlan from the normalized response when the gate said skip, so free-tier models that ignore the prompt directive can't blow past the gate. Composes as defense-in-depth with Phase 19.
+
+**The gate matches Phase 19's cli gate.** Both call sites use the same `shouldIncludeTaskPlanInstruction` helper (exported from `system-rules.ts`) — single source of truth for the decision:
+
+- `runIntent === "implement"` AND `complexity ∈ { "medium", "complex" }` → include
+- Anything else (simple Q&A, summary, bug-fix Q&A, trivial single-line implements) → omit
+- `runIntent == null` or `complexity == null` → include (pre-classification fallback preserves pre-Phase-18 behaviour)
+- `gatingEnabled === false` (flag off) → always include (off-switch path)
+
+**Why both an instruction gate AND a normalizer drop:**
+
+The prompt instruction is advisory ("Do NOT include taskPlan"). Free-tier models with weaker instruction-following can ignore it and emit one anyway. Without the normalizer drop, the agent's `ClientResponse.taskPlan` field still populates, the cli reducer sees it, and the user's mental model gets the wrong cue (even if Phase 19's render gate ALSO hides the box, the cli would still emit `task_start` events under the hood). Two-layer gating ensures `taskPlan` is structurally absent for non-implement runs at every layer of the stack.
+
+**Why not Phase 18's original Stages 2-4 (pre-task-reasoning + task-confirmation pipelines):**
+
+The original Phase 18 plan called for two new Flash pipelines (`pre_task_reasoning` producing `whyThisApproach` + alternatives + preconditions; `task_confirmation` re-checking against the literal prompt). Phase 16 shipped first and built `implement_elaborate` — a chained Flash that produces *whyThisApproach* + *whyNotAlternative* + *preconditions* + re-scored confidence on free-tier complex runs. That is operationally Stage 2 + Stage 3 of Phase 18 under a different name. Re-building those stages would produce overlapping abstractions; the cleaner move was to ship Phase 18 Stage 5 (the genuinely-new emission gate) and document the Phase 16 subsumption.
+
+**Per-run state, not per-call:**
+
+The gate is stashed on a `runTaskPlanGate: Map<string, ...>` on the BaseProvider class, set by each provider's `call(payload)` from `payload.runIntent + payload.taskComplexity` before the model invocation. `parseJsonResponse` reads it. Cleared by `clearRunState(runId)` alongside the other per-run state maps. This avoids changing the public `parseJsonResponse(text, runId?)` signature (which many tests depend on) while still threading the gate through.
+
+**Key files:**
+
+- Gate helper: `server/src/providers/prompt/sections/system-rules.ts: shouldIncludeTaskPlanInstruction`
+- Conditional renderer: `server/src/providers/prompt/sections/system-rules.ts: getSystemRulesSection({runIntent, complexity, gatingEnabled})`
+- Per-run state: `server/src/providers/base-provider.ts: runTaskPlanGate` + `setRunTaskPlanGate`
+- Defensive drop: `server/src/providers/base-provider.ts: parseJsonResponse` (taskPlan extraction block)
+- Provider hooks: each `call(payload)` in `gemini.ts` / `anthropic.ts` / `openrouter.ts` calls `this.setRunTaskPlanGate(payload)` early
+- Handler population: `user-message.ts` + `tool-result.ts` set `runIntent` + `taskComplexity` on `providerPayload` from `classifyIntent(content)` + `analyzeTaskComplexity(content).complexity`
+- Flag: `server/src/services/flags.ts: quality.taskplan_emission_gating_enabled` (default `true`)
+
 ## Task box gates on intent classification, not on prior-render heuristics
 
 - **Source:** plan `applied/2026-05-07-phase-19-task-display-selectivity.md`
