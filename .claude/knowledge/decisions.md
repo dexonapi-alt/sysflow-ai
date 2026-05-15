@@ -256,6 +256,59 @@ We chose (2). `confidence-tracker.ts` re-exports `isFreeTierModel` and `FREE_MOD
 
 The discipline: when a future stage wants to adapt for free-tier, it adds either a constant or a pure helper to `free-tier-policy.ts` and the call site reads from there. No raw `isFreeTierModel(...)` checks in handlers — they should always be inside a policy helper.
 
+## System-level enforcement beats prompt-level guidance for free models
+
+- **Source:** plan `applied/2026-05-15-free-tier-quality-enforcement.md`
+
+Across all 5 stages of free-tier quality enforcement, the recurring user feedback was *"prompts get ignored when models are confused or overloaded — adding more text to the system prompt won't fix it."* The plan committed to fixing every failure mode at the SYSTEM level — INJECTING directives into tool-result bodies (verify-after-write, mandatory self-review), REJECTING completions that violate the contract (server-side validation), and FORCING per-step / per-cadence checks the prompt-only path couldn't enforce.
+
+**Why prompts alone fall over on free models:**
+
+1. **Free models truncate, drift, and confuse.** Free OpenRouter routes (Llama, Mistral, openrouter-auto, gemini-flash-or) ship with shorter effective attention spans, more aggressive token truncation under load, and weaker instruction-following on multi-step contracts. Every additional system-prompt sentence is a sentence that might get dropped, mis-weighted, or contradicted by the closer turn-level prompt.
+2. **Prompts are advisory, code is dispositive.** A handler that appends `═══ VERIFY THE LAST CHUNK ═══` to the next tool-result message forces the model to see the directive at the most-recent-attention position. A handler that filters write-tools out of the next response when self-review is due makes the contract MECHANICALLY enforceable, not aspirational.
+3. **Failure modes compound.** When the model forgets one step, it tends to forget the next. The persistent task ledger (Stage 2) re-injects high-level subtask state into every system prompt, so even a model that drops 80% of the prompt sees the unfinished work each turn.
+
+**The five concrete mechanisms the plan added:**
+
+- Stage 1 — INJECTION: `═══ VERIFY THE LAST CHUNK ═══` block appended to the tool-result body for the next turn after writes (`server/src/services/post-write-verifier.ts`).
+- Stage 2 — REPETITION: ledger of high-level subtasks rendered in every system prompt (`server/src/services/task-ledger.ts` + `prompt/sections/task-ledger.ts`).
+- Stage 3 — INJECTION + REJECTION: `═══ REVIEW REQUIRED ═══` block fires on a cadence; server-side validation rejects writes during a review turn (`server/src/services/self-review-scheduler.ts`).
+- Stage 4 — CADENCE CHANGE: heuristic divergence runs after EVERY tool result on free-tier, not just chunk boundary (`tool-result.ts` per-step block).
+- Stage 5 — CROSS-CHECK: detect "said X did Y" disconnect between `reasoningChain` and the next action (`server/src/services/reasoner-action-checker.ts`).
+
+**When this principle applies vs. when it doesn't:**
+
+- APPLIES: any contract the model SHOULD follow but is observed to ignore on free-tier (verify writes, read before fix, plan before scaffold, etc).
+- DOESN'T APPLY: behaviour that depends on the model's own judgement (which API to call, which file structure to use). Those are still prompt-shaped because there's no objective system-level oracle to check against.
+
+A future stage that wants "the model should X" must answer: *what's the system-level enforcement?* If the only answer is "tell it harder in the prompt", expect the same failure mode to come back from a different angle on free-tier.
+
+## Conservative heuristics — only flag unambiguous mismatches
+
+- **Source:** plan `applied/2026-05-15-free-tier-quality-enforcement.md` (Stage 5 + carry-over from Phase 11)
+
+The reasoner-vs-action cross-check (Stage 5) sits inside the awareness loop alongside ~7 other divergence categories. Its design point: *only fire on the UNAMBIGUOUS read-intent + write-tool case*. The inverse (write-intent + read-tool) is deliberately not flagged. Mixed intent in the reasoning passes through. Short reasoning passes through. Unsafe `run_command` is treated as `other` (no flag), not `write` (avoiding flagging install / build / migration commands).
+
+**Why conservative:**
+
+1. **The confidence-tracker decays multiplicatively.** Each fire deducts weight × severity-multiplier; multiple distinct categories piling up cross the off-course threshold (`awareness.threshold_off_course = 60` by default, +10 for free-tier). A noisy heuristic doesn't just produce noisy logs — it actively pushes the run toward the off-course modal, which interrupts the user. Cost of a false positive scales with how disruptive the downstream action is.
+2. **One conservative signal composes; one greedy signal dominates.** Phase 11 deliberately tunes weights so no single heuristic can take a fresh run from on_track to blocked in one fire. A heuristic that flags too aggressively would either need a tiny weight (making it useless) or would dominate the tracker (making the other signals decorative).
+3. **The agent will be wrong sometimes — that's fine.** The right comparison isn't "does this heuristic fire on EVERY case of bad behaviour" but "is the false-positive rate low enough that operators trust the signal". Conservative heuristics earn that trust; greedy ones lose it on the second false alarm.
+
+**The carve-out rule** (re-stated for future heuristics):
+
+- The mismatch the heuristic flags MUST be a case where a careful human reading the same data would also say "yes, that's clearly off". 
+- If the mismatch is *probably* off — e.g. write-intent paired with a read tool, which is *usually* a setup pattern but *occasionally* a "I changed my mind mid-paragraph" — don't flag. Let it through. Other signals (per-step `same_action_repeated_in_session`, chunk-boundary verification gate, etc.) will catch the genuinely-bad cases via composition.
+
+Concrete examples from the live code that follow this rule:
+
+- `same_action_repeated_in_session` requires >2 occurrences in a 3-6 turn window. Below threshold passes through.
+- `no_investigation_before_write` requires `complexity !== "simple"`. Trivial tasks pass through.
+- `reasoning_action_mismatch` requires UNAMBIGUOUS read-intent + write-tool with no mixed signals.
+- `intent_keyword_absent` requires the keyword to be in the INTENT_VOCAB whitelist. Generic English words pass through.
+
+**When to consider a less-conservative variant:** if telemetry shows that a known-bad pattern fires very rarely under the conservative rule. The fix is then a SECOND heuristic with its own category, not a relaxation of the existing one (which would change the weight calibration the whole tracker depends on).
+
 ## Asymmetric chunk caps for free-tier (runtime tighten, not schema relax)
 
 - **Source:** plan `applied/2026-05-07-phase-16-deep-reasoning-on-free-models.md` (Stage 5)
