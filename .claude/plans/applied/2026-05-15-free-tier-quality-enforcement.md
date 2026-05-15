@@ -1,7 +1,7 @@
 # Free-tier quality enforcement — verify-after-write, persistent task ledger, mandatory self-review
 
 - **Created:** 2026-05-15
-- **Status:** in-progress
+- **Status:** implemented (2026-05-15)
 - **Scope:** Five subsystems that enforce constant verification, investigation, and reasoning at the SYSTEM LEVEL (not prompt level) so free models can't drift, forget, or skip checks between iterations. Builds on Phase 11 awareness + Phase 16 free-tier policy + the command-first-investigation Stages 1-4 already merged; closes the failure modes those plans surface but don't fully prevent.
 
 ## Goal
@@ -184,3 +184,30 @@ Each stage = one PR off `main`. Stage labels: `feat(quality): Stage 1 — verify
 - **Reasoner-action cross-check on EVERY tool, not just write tools** — the cross-checker only flags read-intent + write-action mismatches. The inverse (write-intent + read-action) is usually legitimate setup; flagging it would be noisy. Future iterations can extend the heuristic if telemetry shows the noise floor is acceptable.
 - **Off-course modal extension** — Phase 11's off-course modal already has continue / backtrack / redirect. Adding a "force re-review" option is desirable but not load-bearing — the mandatory self-review (Stage 3) achieves the same outcome via injection instead of a user prompt.
 - **Per-LLM-call retry of the verify-after-write block** — if the block is injected but the model's next response still doesn't include verification commands, this plan doesn't re-inject. The agent's deviation is captured by the divergence detector and surfaces at the next chunk boundary instead.
+
+## Completion notes
+
+All five stages shipped as separate PRs off `main`, merged in order:
+
+- **PR #71** — Stage 1: verify-after-write injector (`post-write-verifier.ts`, `shouldForceVerifyAfterWrite`, flag `quality.force_verify_after_write`)
+- **PR #72** — Stage 2: persistent task ledger (`task-ledger.ts`, `prompt/sections/task-ledger.ts`, `ledgerUpdates` field on `chunkReflectionBriefSchema`)
+- **PR #73** — Stage 3: mandatory self-review chunks (`self-review-scheduler.ts`, `getSelfReviewCadence`, flag `quality.mandatory_self_review_enabled`)
+- **PR #74** — Stage 4: per-step divergence for free-tier (`same_action_repeated_in_session` heuristic, `recentActions` field on `DetectorInput`, `shouldRunPerStepDivergence`, flag `quality.per_step_divergence_for_free_tier`)
+- **PR #75** — Stage 5: reasoner-vs-action cross-check (`reasoner-action-checker.ts`, `last-reasoning-store.ts`, `reasoning_action_mismatch` category, flag `quality.reasoning_action_cross_check_enabled`)
+
+**Deviations from the original plan:**
+
+- Stage 3 plan called for server-side rejection when the model emits a write tool during a review turn. Shipped the directive + state-tracking, **deferred the rejection** to a follow-up if telemetry shows the model ignores the block in practice. The existing `no_investigation_before_write` divergence heuristic + the new `reasoning_action_mismatch` (Stage 5) catch the worst case via the confidence tracker anyway.
+- Stage 4 ended up not needing the `getRunActions(...).actions.slice(-6)` snapshot to be pre-classified — the divergence detector itself does the tool+path key construction, which keeps the contract for `recentActions` simpler (`{ tool, path?, command? }`).
+- Stage 5's heuristic was tuned more conservative than the plan implied: write-intent + read-tool is **not** flagged (legitimate read-before-write pattern), and unsafe `run_command` is classified as `other` (no mismatch) rather than `write` — avoiding false alarms on install/build/migration commands. Captured the rule in `decisions.md: ## Conservative heuristics — only flag unambiguous mismatches`.
+
+**Telemetry / next-look items (NOT in this plan's scope but worth flagging):**
+
+- Validate that the per-step divergence cadence isn't too noisy on free-tier — the new `same_action_repeated_in_session` signal could fire on legitimate retry-after-fix loops (write → verify → write-correction). Tuning lever: window size or threshold count, both in `divergence-detector.ts`.
+- Validate that `reasoning_action_mismatch` isn't dominated by a single mis-phrased reasoning pattern. Intent-vocab is in `reasoner-action-checker.ts` and intentionally small — extending it should be data-driven, not pre-emptive.
+- The ledger renders as a Markdown block in the system prompt every turn. If telemetry shows token bloat on long-running runs, consider truncating the rendered ledger to the last N items or eliding `done` entries past a threshold.
+
+**Knowledge entries captured:**
+
+- `decisions.md: ## System-level enforcement beats prompt-level guidance for free models` — the load-bearing insight of the whole plan
+- `decisions.md: ## Conservative heuristics — only flag unambiguous mismatches` — design discipline that recurs across all 8+ divergence categories
