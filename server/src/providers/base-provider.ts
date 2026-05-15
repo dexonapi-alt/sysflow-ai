@@ -7,6 +7,7 @@ import { getPipeline } from "../services/task-pipeline.js"
 import { buildSystemPrompt, type PromptCtx } from "./prompt/build.js"
 import { shouldIncludeTaskPlanInstruction } from "./prompt/sections/system-rules.js"
 import { buildVerifyAfterWriteBlock, extractWritesFromToolResults } from "../services/post-write-verifier.js"
+import { buildErrorReasoningBlock } from "../services/error-reason-block.js"
 import { shouldForceVerifyAfterWrite, getSelfReviewCadence } from "../services/free-tier-policy.js"
 import { getFlag } from "../services/flags.js"
 import { getLedger } from "../services/task-ledger.js"
@@ -698,7 +699,59 @@ export abstract class BaseProvider {
     // it last (closest to its response window).
     toolMsg += renderChunkPlanSection(payload.chunkPlanBrief)
 
+    // Stage 3 of forced-error-reasoning plan: when a tool errored
+    // this turn AND the error-reasoning chain produced a brief,
+    // inject the `═══ ERROR — REASON THROUGH THIS ═══` block at the
+    // VERY END of the tool-result body so it's the last thing the
+    // model reads before its response window. Closes the user-
+    // reported failure mode where the LLM ignores tool errors and
+    // proceeds to the next step.
+    toolMsg += this.renderErrorReasoningBlock(payload)
+
     return toolMsg
+  }
+
+  /**
+   * Stage 3 of forced-error-reasoning plan: protected helper that
+   * builds the error-reasoning directive block when
+   * `payload.errorReasoningBrief` is set (which `tool-result.ts`
+   * sets after `runErrorReasoningChain` commits). Returns empty
+   * string when the brief is absent (no error fired this turn, or
+   * the chain returned null and the existing bug-pipeline fallback
+   * is rendering via `reasoningBrief` instead).
+   */
+  protected renderErrorReasoningBlock(payload: ProviderPayload): string {
+    if (!payload.errorReasoningBrief) return ""
+
+    const flagEnabled = (() => {
+      try { return getFlag<boolean>("quality.force_error_reasoning_enabled") }
+      catch { return true }
+    })()
+    if (!flagEnabled) return ""
+
+    // The brief shape comes from `ErrorReasoningBrief` in
+    // `reasoning/error-reasoner.ts`; loose-typed on `ProviderPayload`
+    // to avoid an import cycle into the reasoning module.
+    const brief = payload.errorReasoningBrief as {
+      rootCause?: string
+      platformContext?: string
+      alternativeCommands?: string[]
+      recommendedCommand?: string
+      confidence?: "HIGH" | "MEDIUM" | "LOW"
+    }
+    if (!brief.recommendedCommand || !brief.rootCause) return ""
+
+    return buildErrorReasoningBlock({
+      errorText: payload.errorReasoningErrorText ?? "(no error text captured)",
+      tool: payload.errorReasoningFailedTool ?? "tool",
+      brief: {
+        rootCause: brief.rootCause,
+        platformContext: brief.platformContext ?? "unknown",
+        alternativeCommands: brief.alternativeCommands ?? [],
+        recommendedCommand: brief.recommendedCommand,
+        confidence: brief.confidence ?? "LOW",
+      },
+    })
   }
 
   /**

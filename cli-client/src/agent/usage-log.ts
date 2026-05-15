@@ -67,6 +67,14 @@ export interface RunSummary {
    *  carries it (constant for the run); null on legacy runs where
    *  the server hasn't shipped the field yet. */
   intentClassificationSource?: "cache" | "regex_simple" | "regex_fallback" | "chain" | null
+  /** Stage 3 of forced-error-reasoning plan: which error-reasoning
+   *  path resolved the run's most-recent error.
+   *    `"chain"`         — LLM iterative chain committed.
+   *    `"bug_fallback"`  — chain returned null; existing on-error
+   *                        bug pipeline (Phase 5) produced the brief.
+   *    `null`            — no error fired this run, OR the run is
+   *                        from before this telemetry field shipped. */
+  errorReasoningSource?: "chain" | "bug_fallback" | null
 }
 
 const PROMPT_PREVIEW_CHARS = 200
@@ -111,6 +119,10 @@ export async function recordRunSummary(sysbasePath: string | undefined | null, s
     // Stage-4) so jq / analysis tools can distinguish "no signal"
     // from "field not logged".
     intentClassificationSource: summary.intentClassificationSource ?? null,
+    // Stage 3 of forced-error-reasoning plan. Null sentinel on runs
+    // where no error fired (most runs) so the distribution of `chain`
+    // vs `bug_fallback` is countable.
+    errorReasoningSource: summary.errorReasoningSource ?? null,
   }
   try {
     await fs.appendFile(file, JSON.stringify(entry) + "\n", "utf8")

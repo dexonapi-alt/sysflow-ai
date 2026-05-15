@@ -438,6 +438,24 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       emitAgent({ type: "reasoning_brief", kind: "intent_classification", briefData: { reasoningChain: paragraphs } })
     }
   }
+  // Stage 3 of forced-error-reasoning plan: same shape but for
+  // error-reasoning paragraphs on the initial response (rare path —
+  // user-message.ts doesn't currently fire on_error, but defensive).
+  const initialErrorParagraphs = (response as Record<string, unknown>).errorReasoningParagraphs
+  if (Array.isArray(initialErrorParagraphs) && initialErrorParagraphs.length > 0) {
+    const paragraphs = initialErrorParagraphs.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+    if (paragraphs.length > 0) {
+      emitAgent({ type: "reasoning_brief", kind: "error_reasoning", briefData: { reasoningChain: paragraphs } })
+    }
+  }
+  const initialErrorSource = (response as Record<string, unknown>).errorReasoningSource
+  // Stage 3 of forced-error-reasoning plan: track the LATEST error-
+  // reasoning source observed this run (most recent wins, since
+  // different error turns may take different paths).
+  let errorReasoningSourceLatest: "chain" | "bug_fallback" | null = null
+  if (initialErrorSource === "chain" || initialErrorSource === "bug_fallback") {
+    errorReasoningSourceLatest = initialErrorSource
+  }
   // Resolve the task-display-selective flag once for the run — toggling
   // mid-run isn't a supported flow.
   const taskDisplaySelective = await getTaskDisplaySelective()
@@ -572,6 +590,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       reasonerBackend,
       investigationCommandsCount,
       intentClassificationSource,
+      errorReasoningSource: errorReasoningSourceLatest,
     })
     unregisterSpinner()
   }
@@ -749,6 +768,27 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         tallyAwareness((response as Record<string, unknown>).awarenessSnapshot as { state: string; confidence: number } | undefined)
         if ((response as Record<string, unknown>).awarenessChoice === true) {
           autoPauseEventsThisRun += 1
+        }
+        // Stage 3 of forced-error-reasoning plan: when a turn's response
+        // carries `errorReasoningParagraphs`, emit a reasoning_brief
+        // event so <ReasoningPeek>'s plain-prose render path (PR #83)
+        // surfaces the LLM's error analysis to the user. Without this
+        // the chain paragraphs are invisible — same root-cause-of-
+        // gloss-over the plan was designed to fix.
+        const errorReasoningParagraphs = (response as Record<string, unknown>).errorReasoningParagraphs
+        if (Array.isArray(errorReasoningParagraphs) && errorReasoningParagraphs.length > 0) {
+          const paragraphs = errorReasoningParagraphs.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+          if (paragraphs.length > 0) {
+            emitAgent({ type: "reasoning_brief", kind: "error_reasoning", briefData: { reasoningChain: paragraphs } })
+          }
+        }
+        // Stage 3: track the LATEST error-reasoning source seen this run.
+        // Last-write-wins (mirrors the per-error trigger — every error
+        // turn may have a different source; the most recent is the
+        // most informative for telemetry).
+        const ers = (response as Record<string, unknown>).errorReasoningSource
+        if (ers === "chain" || ers === "bug_fallback") {
+          errorReasoningSourceLatest = ers
         }
         // Stage E of model-lock-and-portable-reasoning: capture the
         // backend if it wasn't surfaced on the very first response
