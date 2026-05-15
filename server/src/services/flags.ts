@@ -285,6 +285,20 @@ defineFlag("quality.error_acknowledgement_rejection_enabled", true, parseBool)
 // the reasoner.
 defineFlag("memory.error_pattern_recall_enabled", true, parseBool)
 
+// ─── Plan 2026-05-15-agent-runtime-fixes-and-project-init-reasoning.md Stage 1 ───
+// When true (default), the project-init iterative reasoner fires at
+// the START of every implement-class run (before preflight). The
+// brief classifies the repo as empty / small / existing-small /
+// existing-large + emits a tailored investigation plan and a
+// `skipConfigVerificationFor` list that gates the action-planner's
+// config-search hijack. Closes the user-reported failure mode where
+// the agent demanded `tsconfig.json` in an empty directory and
+// hard-stopped on a 0-hit web search. Off-switch restores pre-Stage-1
+// behaviour (no project-init brief; action-planner always hijacks
+// recognised configs).
+defineFlag("quality.project_init_reasoning_enabled", true, parseBool)
+defineFlag("reasoning.project_init_max_iterations", 3, parseNumber)
+
 // ─── Iterative paragraph chain (follow-up to Stage C model-lock) ───
 // When true (default), the preflight reasoner builds its reasoningChain
 // paragraph-by-paragraph across N sequential Flash calls — each call

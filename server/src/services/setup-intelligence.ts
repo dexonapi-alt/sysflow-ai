@@ -157,8 +157,14 @@ const CONFIG_FILE_PATTERNS: Array<{ pattern: RegExp; framework: string; searchQu
 
 /**
  * Check if a file path is a framework config file that needs verified setup.
+ *
+ * When `runId` is provided AND the project-init brief flagged this path
+ * as a fresh-scaffold authored config (via `setConfigSkipList`), this
+ * returns `null` — the action-planner's web-search hijack should not
+ * fire on greenfield scaffolds (Stage 1 of agent-runtime-fixes plan).
  */
-export function detectConfigFile(filePath: string): ConfigFileInfo | null {
+export function detectConfigFile(filePath: string, runId?: string): ConfigFileInfo | null {
+  if (runId && isConfigSkipped(runId, filePath)) return null
   for (const cf of CONFIG_FILE_PATTERNS) {
     if (cf.pattern.test(filePath)) {
       return {
@@ -185,6 +191,37 @@ export function markFrameworkSearched(runId: string, framework: string): void {
 
 export function clearRunSearches(runId: string): void {
   runSearches.delete(runId)
+  configSkipList.delete(runId)
+}
+
+// ─── Stage 1 of agent-runtime-fixes plan ───
+// Per-run skip list populated by `runProjectInitChain` when the
+// project-init brief commits with `repoState: "empty" | "small"` and
+// HIGH/MEDIUM confidence. Stores filename patterns (e.g. "tsconfig.json",
+// ".eslintrc.json") that the action-planner's config-search hijack
+// should NOT fire for. The override is correct behaviour for existing
+// projects (verify against current docs) but wrong for fresh scaffolds
+// (file is being authored — best-practice defaults are fine).
+const configSkipList = new Map<string, Set<string>>()
+
+export function setConfigSkipList(runId: string, paths: string[]): void {
+  if (!runId) return
+  configSkipList.set(runId, new Set(paths.map((p) => p.toLowerCase())))
+}
+
+export function isConfigSkipped(runId: string, filePath: string): boolean {
+  const skip = configSkipList.get(runId)
+  if (!skip || skip.size === 0) return false
+  const lower = filePath.toLowerCase()
+  // Match by exact filename OR by suffix (handles "src/tsconfig.json" vs "tsconfig.json")
+  for (const entry of skip) {
+    if (lower === entry || lower.endsWith("/" + entry) || lower.endsWith("\\" + entry)) return true
+  }
+  return false
+}
+
+export function clearConfigSkipList(runId: string): void {
+  configSkipList.delete(runId)
 }
 
 // ─── Response Overrides ───
@@ -241,7 +278,7 @@ export function checkToolsForConfigFiles(runId: string, tools: ToolCall[]): Conf
   for (const tc of tools) {
     if (tc.tool !== "write_file" && tc.tool !== "edit_file") continue
     const filePath = (tc.args?.path as string) || ""
-    const config = detectConfigFile(filePath)
+    const config = detectConfigFile(filePath, runId)
     if (config && !hasSearchedForFramework(runId, config.framework)) {
       return config
     }

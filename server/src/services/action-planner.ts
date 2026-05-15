@@ -475,7 +475,13 @@ class ActionPlanner {
 
     // ─── Rule 0.5: Config file verification — search for current setup docs before writing ───
     if ((tool === "write_file" || tool === "edit_file") && path) {
-      const configInfo = detectConfigFile(path)
+      // Stage 1 of agent-runtime-fixes plan: `detectConfigFile` honours
+      // the per-run skip list set by `runProjectInitChain`. On fresh
+      // scaffolds the skip list contains the configs the agent is
+      // authoring from scratch — verifying them against the web is
+      // pointless (nothing to compare against) and was the canonical
+      // failure mode that prompted this plan.
+      const configInfo = detectConfigFile(path, state.runId)
       if (configInfo && !hasSearchedForFramework(state.runId, configInfo.framework)) {
         console.log(`[planner] Config file "${path}" detected (${configInfo.framework}) — forcing web_search for current setup`)
         const { override, pendingContext } = buildConfigSearchOverride(state.runId, configInfo, normalized)

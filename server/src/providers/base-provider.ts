@@ -380,6 +380,10 @@ export abstract class BaseProvider {
       runIntent: payload.runIntent ?? null,
       complexity: payload.taskComplexity ?? null,
       gatingEnabled,
+      // Stage 1 of agent-runtime-fixes plan: thread the project-init
+      // brief into the system prompt so the agent's first move reflects
+      // the classified repo state.
+      projectInitBrief: payload.projectInitBrief,
     })
   }
 

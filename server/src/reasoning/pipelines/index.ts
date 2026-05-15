@@ -13,8 +13,9 @@ import { CHUNK_REFLECT_SYSTEM_PROMPT } from "./chunk-reflector-pipeline.js"
 import { DIVERGENCE_SYSTEM_PROMPT } from "./divergence-pipeline.js"
 import { INTENT_CLASSIFICATION_SYSTEM_PROMPT } from "./intent-classification-pipeline.js"
 import { ERROR_REASONING_SYSTEM_PROMPT } from "./error-reasoning-pipeline.js"
+import { PROJECT_INIT_SYSTEM_PROMPT } from "./project-init-pipeline.js"
 
-export type PipelineKind = "implement" | "implement_elaborate" | "bug" | "summary" | "decision" | "chunk_plan" | "chunk_reflect" | "divergence" | "intent_classification" | "error_reasoning"
+export type PipelineKind = "implement" | "implement_elaborate" | "bug" | "summary" | "decision" | "chunk_plan" | "chunk_reflect" | "divergence" | "intent_classification" | "error_reasoning" | "project_init"
 
 export function getPipelineSystemPrompt(kind: PipelineKind): string {
   switch (kind) {
@@ -28,5 +29,6 @@ export function getPipelineSystemPrompt(kind: PipelineKind): string {
     case "divergence":            return DIVERGENCE_SYSTEM_PROMPT
     case "intent_classification": return INTENT_CLASSIFICATION_SYSTEM_PROMPT
     case "error_reasoning":       return ERROR_REASONING_SYSTEM_PROMPT
+    case "project_init":          return PROJECT_INIT_SYSTEM_PROMPT
   }
 }
