@@ -24,6 +24,7 @@ import { classifyToolError, classifyToolErrorFromResult } from "../services/tool
 import { persistLargeToolResult } from "../store/tool-result-persistence.js"
 import { runReasoning, getReasonerBackendForRun, clearReasonerBackendForRun } from "../reasoning/task-reasoner.js"
 import { runErrorReasoningChain } from "../reasoning/error-reasoner.js"
+import { validateErrorAcknowledgement, buildErrorAcknowledgementRejectPrompt, primaryArg } from "../services/error-acknowledgement-guard.js"
 import { recordImplementSummary, recordBugPattern, recordChunkSummary, recordUserCorrection, applyMemoryFeedback, recallForReasoning } from "../memory-store/index.js"
 import {
   attachReflection,
@@ -56,6 +57,13 @@ const MAX_COMPLETION_REJECTIONS = 3
 const consecutiveToolErrors = new Map<string, number>()
 const onErrorReasoningCount = new Map<string, number>()
 const MAX_ON_ERROR_REASONING_PER_RUN = 2
+
+/** Stage 4 of forced-error-reasoning plan: per-run count of
+ *  error-acknowledgement rejections. Hard cap (3) prevents infinite
+ *  loops if the model never acknowledges. Mirrors the
+ *  completionRejections shape. */
+const errorAcknowledgementRejections = new Map<string, number>()
+const MAX_ERROR_ACK_REJECTIONS = 3
 
 /** Track frontend quality rejections per run (separate from structural completion guard) */
 const frontendQualityRejections = new Map<string, number>()
@@ -988,6 +996,59 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
 
   let normalized = await callModelAdapter(providerPayload as never)
 
+  // ─── Stage 4 of forced-error-reasoning plan: ack-rejection loop ───
+  // When the prior turn fired an error-reasoning brief, validate the
+  // model's response addressed the error. If not, inject a stronger
+  // reject prompt + re-call the adapter. Capped at 3 rejections per
+  // run so a stuck model can't hold the handler forever.
+  if (errorReasoningChainBrief && incomingErrors.length > 0) {
+    const ackFlagOn = (() => {
+      try { return getFlag<boolean>("quality.error_acknowledgement_rejection_enabled", run.sysbasePath as string | undefined) }
+      catch { return true }
+    })()
+    if (ackFlagOn) {
+      const lastError = incomingErrors[incomingErrors.length - 1]
+      const failedToolName = lastError.tool
+      const failedResult = lastError.result as Record<string, unknown>
+      const failedArgs = (failedResult.args as Record<string, unknown> | undefined) ?? undefined
+      const errCtx = {
+        errorText: typeof failedResult.error === "string" ? failedResult.error : typeof failedResult.stderr === "string" ? failedResult.stderr : "",
+        rootCause: errorReasoningChainBrief.rootCause,
+        failedTool: failedToolName,
+        failedPrimaryArg: primaryArg(failedToolName, failedArgs),
+      }
+      let rejections = errorAcknowledgementRejections.get(body.runId) ?? 0
+      while (rejections < MAX_ERROR_ACK_REJECTIONS) {
+        const check = validateErrorAcknowledgement({
+          responseKind: normalized.kind,
+          reasoningChain: Array.isArray(normalized.reasoningChain) ? normalized.reasoningChain : [],
+          content: typeof normalized.content === "string" ? normalized.content : null,
+          responseTool: typeof normalized.tool === "string" ? normalized.tool : null,
+          responseArgs: (normalized.args as Record<string, unknown> | undefined) ?? null,
+          context: errCtx,
+        })
+        if (check.ok) break
+
+        rejections += 1
+        errorAcknowledgementRejections.set(body.runId, rejections)
+        console.log(`[error-ack] rejection ${rejections}/${MAX_ERROR_ACK_REJECTIONS}: ${check.reason}`)
+        // Inject the reject prompt as additional context so the
+        // next call sees it. Use the actionPlanner's pendingContext
+        // (consumed exactly once) — same channel the verify /
+        // self-review blocks land through.
+        actionPlanner.injectContext(body.runId, buildErrorAcknowledgementRejectPrompt(check, errCtx, rejections, MAX_ERROR_ACK_REJECTIONS))
+        normalized = await callModelAdapter(providerPayload as never)
+      }
+      // After the loop: either validator passed, OR we hit the cap.
+      // In both cases, clear the rejection counter so the next run
+      // starts fresh. Phase 11 awareness's `same_action_repeated_in_session`
+      // catches sustained drift past this point.
+      if (rejections >= MAX_ERROR_ACK_REJECTIONS) {
+        console.warn(`[error-ack] hit rejection cap (${MAX_ERROR_ACK_REJECTIONS}); proceeding without ack — Phase 11 awareness will catch sustained drift`)
+      }
+    }
+  }
+
   await persistModelUsage({
     runId: body.runId,
     projectId: run.projectId,
@@ -1354,6 +1415,9 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     // Stage 4 of llm-iterative-intent-classification: drop the per-run
     // intent cache so the next run on the same handler reclassifies.
     clearIntentForRun(body.runId)
+    // Stage 4 of forced-error-reasoning plan: drop the per-run
+    // rejection counter so a subsequent run starts fresh.
+    errorAcknowledgementRejections.delete(body.runId)
     // Stage 5 of command-first-investigation: drop the per-run latch
     // so a subsequent run starts with a fresh reminder budget.
     investigationBudgetReminderFired.delete(body.runId)
