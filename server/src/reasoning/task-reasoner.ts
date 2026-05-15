@@ -13,7 +13,7 @@
  */
 
 import crypto from "node:crypto"
-import { classifyIntent, type IntentHint } from "./intent-classifier.js"
+import { classifyIntent, getCachedIntentOrRegex, type IntentHint } from "./intent-classifier.js"
 import { reasoningEnvelopeSchema, assertEnvelopeShape, type ReasoningBrief, type ReasoningTrigger } from "./reasoning-schema.js"
 import { getReasoningCache, setReasoningCache } from "./reasoning-cache.js"
 import { applyCriticalContextDetector } from "./critical-context-detector.js"
@@ -279,7 +279,15 @@ function pickPipeline(payload: ReasoningPayload): PipelineKind | "simple" {
   // free-tier-policy.ts: shouldRunPreflightElaboration.
   if (payload.trigger === "implement_elaborate") return "implement_elaborate"
   // preflight: defer to intent classifier.
-  const hint: IntentHint = classifyIntent(payload.userMessage)
+  //
+  // Stage 4 of llm-iterative-intent-classification: when the run has
+  // a runId, the smart classifier in user-message.ts has already
+  // cached the resolved intent (LLM chain on the first turn, cache
+  // hit thereafter). Reading from the cache here keeps `pickPipeline`
+  // sync while still benefiting from the LLM's classification.
+  // Cache miss (no runId, or legacy callers) falls back to the
+  // sync regex — same behaviour as before Stage 4.
+  const hint: IntentHint = getCachedIntentOrRegex(payload.runId, payload.userMessage)
   return hint
 }
 

@@ -30,6 +30,8 @@ import { z } from "zod"
 import { callReasonerBackend } from "./backends/index.js"
 import { pickReasonerBackend, type ReasonerBackend } from "../services/free-tier-policy.js"
 import { getPipelineSystemPrompt } from "./pipelines/index.js"
+import { getFlag } from "../services/flags.js"
+import { getIntentForRun, setIntentForRun } from "../services/intent-cache.js"
 
 export type IntentHint = "simple" | "bug" | "summary" | "implement"
 
@@ -145,6 +147,21 @@ export function classifyIntent(userMessage: string): IntentHint {
 /** Alias of {@link classifyIntent} — explicit name used by the
  *  async chain wrapper's fallback path. */
 export const classifyIntentByRegex = classifyIntent
+
+/**
+ * Sync helper for callsites that already have a runId from a prior
+ * `classifyIntentSmart` call (most commonly `tool-result.ts`'s
+ * synchronous response-building code). Reads the per-run cache first;
+ * on miss falls back to the regex.
+ *
+ * Use this instead of `classifyIntent` (raw regex) on any code path
+ * that runs AFTER `user-message.ts` already populated the cache.
+ * Keeps the resolved intent stable for the lifetime of the run
+ * without forcing the caller to become async.
+ */
+export function getCachedIntentOrRegex(runId: string | null | undefined, userMessage: string): IntentHint {
+  return getIntentForRun(runId) ?? classifyIntentByRegex(userMessage)
+}
 
 // ─── LLM iterative paragraph chain (Stage 1+2 of plan
 // ─── 2026-05-15-llm-iterative-intent-classification.md) ──────────
@@ -351,4 +368,117 @@ async function defaultLlmCall(args: { backend: ReasonerBackend; systemInstructio
     maxOutputTokens: args.maxOutputTokens,
     systemInstruction: args.systemInstruction,
   })
+}
+
+// ─── Smart wrapper: cache → regex fast-path → LLM chain → regex fallback ───
+// Stage 4 entry point used by user-message.ts + tool-result.ts.
+
+export type ClassifyIntentSource = "cache" | "regex_simple" | "regex_fallback" | "chain"
+
+export interface ClassifyIntentSmartArgs {
+  /** The user's prompt. Same string `classifyIntent(regex)` consumes. */
+  userMessage: string
+  /** Per-run cache key. When set, classification fires ONCE per run
+   *  and subsequent calls return the cached hint. Pass `null` /
+   *  `undefined` to disable caching (e.g. one-shot CLI commands that
+   *  don't have a runId yet). */
+  runId?: string | null
+  /** Main-model identifier — fed to `pickReasonerBackend` so the
+   *  classifier uses the same backend the preflight reasoner would. */
+  model?: string | null
+  /** Resolved value of `reasoning.backend` flag. Defaults to `"auto"`
+   *  (model-driven backend pick); operators can pin a specific
+   *  backend via the flag. */
+  flagOverride?: string
+}
+
+export interface ClassifyIntentSmartResult {
+  hint: IntentHint
+  /** Where the hint came from (telemetry — Stage 5 will surface this
+   *  on `RunSummary.intentClassificationSource`). */
+  source: ClassifyIntentSource
+  /** Senior-engineer paragraphs from the chain, when `source === "chain"`.
+   *  Caller can surface these in `<ReasoningPeek>` via the brief envelope's
+   *  `reasoningChain[]` field — `formatPlainReasoningChain` (PR #83)
+   *  renders them automatically. */
+  paragraphs?: string[]
+}
+
+/**
+ * The user-facing async classifier. Walks four paths in order:
+ *
+ *   1. **Cache hit.** If `runId` is set and the cache holds a value
+ *      from earlier in this run, return it immediately. No regex
+ *      pass, no LLM call. Constant for the run.
+ *   2. **Regex fast-path.** Run the sync regex; if it classifies as
+ *      `simple` (continuation phrase / bare `ls` / `/list` / etc.),
+ *      commit immediately. Those prompts are trivial and unambiguous;
+ *      no LLM value-add.
+ *   3. **LLM chain.** If the regex classified as anything else AND
+ *      `reasoning.intent_classification_via_llm_enabled` is true,
+ *      run `classifyIntentByChain`. The LLM owns its own depth (1-6
+ *      iterations via `done`). When it commits, the chain's
+ *      `hypothesis` wins and `paragraphs` flow back to the caller.
+ *   4. **Regex fallback.** If the LLM chain returned `null` (no
+ *      backend / unparseable / chain ran to cap without committing)
+ *      OR the flag was off, return the regex's classification with
+ *      `source: "regex_fallback"`. The regex's classification IS
+ *      always available — the worst case is the existing pre-plan
+ *      behaviour.
+ *
+ * The `callBackend` parameter is for testing — defaults to
+ * `classifyIntentByChain`'s default `defaultLlmCall`.
+ */
+export async function classifyIntentSmart(
+  args: ClassifyIntentSmartArgs,
+  callBackend?: ClassifyIntentLlmCall,
+): Promise<ClassifyIntentSmartResult> {
+  // 1. Cache hit — short-circuit before any classification work.
+  const cached = getIntentForRun(args.runId)
+  if (cached) {
+    return { hint: cached, source: "cache" }
+  }
+
+  // 2. Regex fast-path. SIMPLE_PATTERNS match → commit + cache.
+  // Bare `ls`, `pwd`, `/continue` etc. are unambiguous; the LLM has
+  // nothing to add. Other regex classes (bug / summary / implement)
+  // may have false-positive compound-noun matches — they MUST go
+  // through the LLM.
+  const regexHint = classifyIntentByRegex(args.userMessage)
+  if (regexHint === "simple") {
+    setIntentForRun(args.runId, regexHint)
+    return { hint: regexHint, source: "regex_simple" }
+  }
+
+  // 3. LLM chain. Flag-gated.
+  const llmEnabled = (() => {
+    try { return getFlag<boolean>("reasoning.intent_classification_via_llm_enabled") }
+    catch { return true }
+  })()
+
+  if (llmEnabled) {
+    try {
+      const brief = await classifyIntentByChain(
+        {
+          userMessage: args.userMessage,
+          model: args.model ?? null,
+          flagOverride: args.flagOverride ?? "auto",
+        },
+        callBackend,
+      )
+      if (brief) {
+        setIntentForRun(args.runId, brief.hypothesis)
+        return { hint: brief.hypothesis, source: "chain", paragraphs: brief.paragraphs }
+      }
+    } catch (err) {
+      // Chain shouldn't throw to the caller — it catches its own
+      // network / parse failures. A throw here is a programmer error
+      // (DI stub mistake, etc.). Log + fall through to regex fallback.
+      console.warn(`[intent-classifier] smart wrapper caught chain throw: ${(err as Error).message}; falling back to regex`)
+    }
+  }
+
+  // 4. Regex fallback. The regex's `regexHint` IS the safe default.
+  setIntentForRun(args.runId, regexHint)
+  return { hint: regexHint, source: "regex_fallback" }
 }

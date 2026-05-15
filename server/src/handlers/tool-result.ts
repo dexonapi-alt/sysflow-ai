@@ -41,7 +41,8 @@ import { clearReviewState } from "../services/self-review-scheduler.js"
 import { getLastReasoning, setLastReasoning, clearLastReasoning } from "../services/last-reasoning-store.js"
 import { pickLastReasoning } from "../services/reasoner-action-checker.js"
 import { shouldRunDivergenceSecondLook, resolveMaxChunksPerRun, resolveMaxFilesPerChunk, shouldRunPerStepDivergence, getInvestigationBudget } from "../services/free-tier-policy.js"
-import { classifyIntent } from "../reasoning/intent-classifier.js"
+import { classifyIntent, getCachedIntentOrRegex } from "../reasoning/intent-classifier.js"
+import { clearIntentForRun } from "../services/intent-cache.js"
 import { recordSignals as recordConfidenceSignals, clearConfidence, getConfidence, getConfidenceState, getThresholdState } from "../services/confidence-tracker.js"
 import { runVerificationGate, gateSignals } from "../services/verification-gate.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
@@ -382,7 +383,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     // conditional on every turn (the model only sees the "include
     // taskPlan" rubric on the first response of implement-class
     // medium/complex runs).
-    runIntent: classifyIntent(run.content),
+    runIntent: getCachedIntentOrRegex(body.runId, run.content),
     taskComplexity: analyzeTaskComplexity(run.content).complexity,
   }
 
@@ -1195,11 +1196,12 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
   // resolved a backend.
   const reasonerBackend = getReasonerBackendForRun(body.runId)
   if (reasonerBackend) response.reasonerBackend = reasonerBackend
-  // Phase 19: classifyIntent is pure + cheap over run.content; surfacing
-  // it on every response lets the CLI gate the task box defensively even
-  // if the initial user-message response was lost or arrived out of
-  // order. Same classification the preflight reasoner used.
-  response.runIntent = classifyIntent(run.content)
+  // Phase 19: surfacing runIntent on every response lets the CLI gate
+  // the task box defensively even if the initial user-message response
+  // was lost. Reads the per-run cache populated by user-message.ts's
+  // `classifyIntentSmart` (Stage 4 of LLM iterative intent
+  // classification plan); falls back to regex on cache miss.
+  response.runIntent = getCachedIntentOrRegex(body.runId, run.content)
   // Phase 10: surface the chunk briefs so the CLI can render the boundary.
   if (chunkPlanBrief) (response as unknown as Record<string, unknown>).chunkPlanBrief = chunkPlanBrief
   if (chunkReflectionBrief) (response as unknown as Record<string, unknown>).chunkReflectionBrief = chunkReflectionBrief
@@ -1279,6 +1281,9 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     // Stage E of model-lock-and-portable-reasoning: drop the per-run
     // reasoner backend telemetry entry.
     clearReasonerBackendForRun(body.runId)
+    // Stage 4 of llm-iterative-intent-classification: drop the per-run
+    // intent cache so the next run on the same handler reclassifies.
+    clearIntentForRun(body.runId)
     // Stage 5 of command-first-investigation: drop the per-run latch
     // so a subsequent run starts with a fresh reminder budget.
     investigationBudgetReminderFired.delete(body.runId)
@@ -1525,7 +1530,7 @@ function maybeInjectInvestigationBudgetReminder(
   // Coarse intent classification — same regex hint the preflight uses.
   // Maps to the policy helper's `intent` parameter; for the budget,
   // only "bug" vs other matters.
-  const intentHint = classifyIntent(run.content)
+  const intentHint = getCachedIntentOrRegex(runId, run.content)
   const budget = getInvestigationBudget({
     model: run.model as string | null | undefined,
     intent: intentHint,
