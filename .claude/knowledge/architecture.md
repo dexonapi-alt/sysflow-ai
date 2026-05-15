@@ -804,3 +804,70 @@ User sees:
   - `reasoning.intent_classification_via_llm_enabled` (default `true`) — kill switch
   - `reasoning.intent_classification_max_iterations` (default `6`) — depth cap
   - `reasoning.intent_classification_fast_path_regex_enabled` (default `true`) — force-all-through-LLM toggle
+
+## Forced error reasoning + recovery
+
+- **Source:** plan `applied/2026-05-15-forced-error-reasoning-and-recovery.md`
+
+Four overlapping nets force the agent to stop, reason about, and address every tool error before proceeding. The user-reported failure mode is **the agent skims past errors and moves on without engaging** — Phase 5's on-error bug brief was easy to ignore in the prompt stream. The fix is system-level: chain → inject → reject → memory.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  tool result with error  (incomingErrors.length > 0)             │
+│       │                                                          │
+│       ▼                                                          │
+│  recallErrorPatterns        (Stage 5)                            │
+│       │   match on (platform + signature) from .sysflow-memory.md│
+│       │   matches → priorRecall string                           │
+│       ▼                                                          │
+│  runErrorReasoningChain     (Stage 1+2)                          │
+│       │   iterative paragraphs, 1-4 calls, self-directing depth  │
+│       │   commits with { rootCause, alternatives, recommended,   │
+│       │                  paragraphs[], confidence }              │
+│       │   on null → falls back to Phase 5 on_error bug pipeline  │
+│       ▼                                                          │
+│  ═══ ERROR — REASON THROUGH THIS ═══   (Stage 3, inject)         │
+│       │   block rendered at END of next tool-result body         │
+│       │   model MUST acknowledge + pick a recovery               │
+│       ▼                                                          │
+│  callModelAdapter                                                │
+│       │                                                          │
+│       ▼                                                          │
+│  validateErrorAcknowledgement  (Stage 4, hard veto)              │
+│       │   if response did not acknowledge AND did not pivot      │
+│       │   → inject reject prompt + re-call (up to 3 rejections)  │
+│       │   hard-fail on same-(tool, primaryArg) retry             │
+│       ▼                                                          │
+│  next tool result (no error)                                     │
+│       │                                                          │
+│       ▼                                                          │
+│  recordErrorPattern         (Stage 5, learning)                  │
+│           failedCommand → workingCommand persisted               │
+│           next similar error short-circuits via recall above     │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+The four nets are **additive, not alternative**: chain produces the reasoning, inject forces the agent to read it, reject veto stops it from ignoring it, memory makes the recovery improve across runs. Each stage has its own kill switch flag (`quality.force_error_reasoning_enabled`, `quality.error_acknowledgement_rejection_enabled`, `memory.error_pattern_recall_enabled`).
+
+**Key boundaries:**
+
+- Chain runs on the FIRST error (Phase 11 awareness handles sustained drift after the cap).
+- Chain returning `null` is signal to fall back to the existing Phase 5 bug pipeline — never silent.
+- Same `(tool, primaryArg)` retry is the canonical broken behaviour the validator catches.
+- Recording is conservative — only `run_command` recoveries are mined for v1 (other tools' recoveries are too heterogeneous).
+
+**Files & flags:**
+
+- Pipeline + schema + orchestrator: `server/src/reasoning/error-reasoner.ts` + `pipelines/error-reasoning-pipeline.ts`
+- Inject block renderer: `server/src/services/error-reason-block.ts`
+- Server-side validator + reject builder: `server/src/services/error-acknowledgement-guard.ts`
+- Memory: `server/src/memory-store/error-pattern.ts` (recorder + recall + format/parse + reasoner-prose render)
+- Wiring: `server/src/handlers/tool-result.ts` (recall + chain + inject + reject loop + recovery recorder, in this order)
+- Provider injection point: `server/src/providers/base-provider.ts: buildToolResultMessage` (block lands LAST in the tool-result body)
+- Client surface: `server/src/types.ts: ClientResponse.errorReasoningParagraphs + errorReasoningSource + errorAckRejectionCount`
+- CLI capture + telemetry: `cli-client/src/agent/agent.ts` + `usage-log.ts: RunSummary.errorReasoningSource / errorReasoningEvents / errorAcknowledgementRejections`
+- Flags:
+  - `quality.force_error_reasoning_enabled` (default `true`) — chain + inject kill switch
+  - `reasoning.error_reasoning_max_iterations` (default `4`) — chain depth cap
+  - `quality.error_acknowledgement_rejection_enabled` (default `true`) — Stage 4 reject loop kill switch
+  - `memory.error_pattern_recall_enabled` (default `true`) — Stage 5 recall + recorder kill switch

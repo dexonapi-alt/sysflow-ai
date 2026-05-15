@@ -279,6 +279,15 @@ export interface ClientResponse {
    * no error fired this turn.
    */
   errorReasoningSource?: "chain" | "bug_fallback" | null
+  /**
+   * Stage 6 of forced-error-reasoning plan: running per-run count of
+   * Stage 4 error-acknowledgement rejections. The handler tracks this
+   * server-side via `errorAcknowledgementRejections: Map<runId, number>`;
+   * we surface the latest value on every tool-result response so the
+   * CLI can capture max-observed for `RunSummary.errorAcknowledgementRejections`.
+   * Absent on responses that don't touch the error-reasoning path.
+   */
+  errorAckRejectionCount?: number
 }
 
 // ─── Database ───

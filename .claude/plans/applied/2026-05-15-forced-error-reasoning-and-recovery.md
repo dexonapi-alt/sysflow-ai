@@ -1,7 +1,7 @@
 # Forced error reasoning + persistent error memory + recovery
 
 - **Created:** 2026-05-15
-- **Status:** draft
+- **Status:** implemented (2026-05-15)
 - **Scope:** Make the agent **stop, reason about, and address every tool error** before proceeding. Today's `on_error` pipeline (Phase 5) fires a Flash brief but the main model often skims past it and moves to the next step without acknowledging the failure. This plan layers four overlapping nets: iterative paragraph error-reasoner (replaces the structured bug-brief shape), mandatory error-acknowledgement injection (forces the next prompt to address the error), error-pattern memory (recalls past fixes for similar errors), and server-side rejection of responses that ignore the error.
 
 ## Goal
@@ -243,3 +243,17 @@ Four asks, all addressed:
 - **Recommended steps** → the six-stage implementation order above, in dependency sequence; each stage = one PR.
 
 The systemic principle (per `decisions.md: ## System-level enforcement beats prompt-level guidance for free models`) drives every stage: telling the agent *"please reason about errors"* in the system prompt doesn't work on free-tier models. Forcing the reasoner to run, injecting the result, rejecting non-acknowledgement, and recording the fix for next time are the mechanical fixes.
+
+## Completion notes
+
+Shipped across six PRs as designed, no scope creep:
+
+- **PR #88** — Stage 1+2: pipeline registration + Zod schema + iterative orchestrator `runErrorReasoningChain` + 19 tests. Foundation only — not wired into handlers yet.
+- **PR #89** — Stage 3: `═══ ERROR — REASON THROUGH THIS ═══` block rendered by `error-reason-block.ts` + injected at the END of `buildToolResultMessage`. Chain fires on every error (not just consecutive ≥ 2 like the bug pipeline). New flag `quality.force_error_reasoning_enabled`. 22 new tests.
+- **PR #90** — Stage 4: `validateErrorAcknowledgement` server-side validator + reject loop bounded by `MAX_ERROR_ACK_REJECTIONS = 3`. 28 new tests. Initial test run had 4 failures (period suffix in tokens, threshold too strict at 0.30, zero-token reasoning case missing, plural `retry`/`retries` bug) — all four fixed during development by lowering threshold to 0.25, stripping leading/trailing punctuation in `tokenise`, adding a zero-token + different-arg → pass branch, and using `${remaining === 1 ? "retry" : "retries"}`.
+- **PR #91** — Stage 5: `error-pattern.ts` module with `recordErrorPattern` / `recallErrorPatterns` / `formatRecallForReasoner` + 26 tests. Wired via `pendingErrorRecovery: Map<runId, ...>` per-run state (stash on error, capture agent's attempted args after `callModelAdapter`, record on next no-error tool result). Only `run_command` is mined for v1.
+- **PR #92** — Stage 6: this PR. Two new `RunSummary` counters (`errorReasoningEvents`, `errorAcknowledgementRejections`), `ClientResponse.errorAckRejectionCount` for CLI capture, three new KB entries (architecture flow + two decisions), plan archived.
+
+**Deviation:** Stage 5's plan called for a generic `recordErrorPattern` interface across all tool kinds. We narrowed to `run_command` only for v1 — see `decisions.md: ## Error pattern memory records run_command only for v1` for the rationale. The recorder signature accepts arbitrary tool names, so future expansion doesn't require a schema change.
+
+**Test counts at archive time:** server 836 / 836 + 2 new Stage 6 cases; cli 385 / 385 + 2 new Stage 6 cases. All typecheck clean.
