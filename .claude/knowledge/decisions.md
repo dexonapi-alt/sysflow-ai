@@ -256,6 +256,40 @@ We chose (2). `confidence-tracker.ts` re-exports `isFreeTierModel` and `FREE_MOD
 
 The discipline: when a future stage wants to adapt for free-tier, it adds either a constant or a pure helper to `free-tier-policy.ts` and the call site reads from there. No raw `isFreeTierModel(...)` checks in handlers — they should always be inside a policy helper.
 
+## Task box gates on intent classification, not on prior-render heuristics
+
+- **Source:** plan `applied/2026-05-07-phase-19-task-display-selectivity.md`
+
+The visible task box at the top of an AgentStream renders ONLY on `implement` runs. Q&A, summary, and bug pipelines surface via tool cards + `<ReasoningPeek>` alone — no multi-step plan ceiling the conversation. Three alternative gating strategies were considered + rejected:
+
+**1. Hide the box if no `task` field on the response.** Server-only signal — the cli renders whatever it gets. Reject: free-tier models ignore the "skip taskPlan for simple Q&A" prompt directive (Phase 18 territory) and emit a task box anyway. The cli has no fallback to hide it, so simple questions get the same multi-step plan ceiling Phase 19 was designed to remove.
+
+**2. Heuristic based on prior rendering (e.g. hide the box after the first turn returns < N tools).** Reactive — by the time the heuristic decides to hide it, the box has already rendered and the user has already seen the multi-step plan UI. The first impression sets the user's mental model; later hiding feels like the UI is broken, not selective.
+
+**3. User-toggle keystroke (`ctrl+h`) to show/hide the box on demand.** Too late — the box is up by default and the user has to remember the keystroke to dismiss it. Phase 19's premise is the box should be ABSENT by default for non-implement runs, surfaced when actually needed. A keystroke could land later as a power-user feature without contradicting the default.
+
+**The rule:** the gate is `taskDisplaySelective && runIntent !== "implement"`. The intent is classified by `classifyIntent(prompt)` on the server (same regex helper the preflight reasoner's `pickPipeline` uses), surfaced on every `ClientResponse.runIntent`, captured at `runAgent` entry, threaded through `NeedsToolCtx`. The classification is **sticky** for the run — complexity may upgrade mid-run but the visible-task gate doesn't reactively flip.
+
+Why sticky:
+
+1. **First impression matters.** If the box is hidden on turn 1 and flipped on later because complexity grew, the user reads it as a UI inconsistency, not a feature. Better to commit to the choice from the first response.
+2. **`classifyIntent` is cheap + deterministic over `prompt` text.** No new state, no cache invalidation. Every response carries the same value.
+3. **The internal-task indicator** (`· thinking through it` in the Header) covers the case where work IS happening behind the scenes on a non-implement run. Users see activity without the full multi-step UI.
+
+**Composition with Phase 18 (when it lands):** Phase 18 will gate `taskPlan` EMISSION on the server side. Phase 19 owns the cli RENDER side. Both layers can ship independently; together they form defense-in-depth. Phase 19 doesn't require Phase 18 — even if a stray taskPlan slips through, the cli's gate hides it.
+
+**Setting:** `taskDisplaySelective` in `sysbase.ts` (default `true`). Off-switch for users who prefer the pre-Phase-19 always-show behaviour.
+
+**Key files (one source of truth per concern):**
+- Server: `server/src/handlers/user-message.ts` + `server/src/handlers/tool-result.ts` set `clientResp.runIntent`
+- Server type: `server/src/types.ts: ClientResponse.runIntent`
+- CLI capture: `cli-client/src/agent/agent.ts` captures from initial + subsequent responses
+- CLI event: `cli-client/src/agent/events.ts: intent_classified`
+- CLI reducer slot: `cli-client/src/ui/hooks/useAgentEvents.ts: AgentEventState.runIntent`
+- CLI gate (handleNeedsTool's task block): `cli-client/src/agent/agent.ts: taskDisplayGated`
+- Header indicator: `cli-client/src/ui/components/Header.tsx: showInternalTaskIndicator`
+- Setting: `cli-client/src/lib/sysbase.ts: getTaskDisplaySelective`
+
 ## Why investigate via commands, not file reads
 
 - **Source:** plan `applied/2026-05-13-command-first-investigation.md`

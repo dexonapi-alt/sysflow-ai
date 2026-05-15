@@ -131,6 +131,35 @@ export async function setSafeCommandsAutoApprove(enabled: boolean): Promise<void
   await fs.writeFile(MODELS_META_FILE, JSON.stringify(data, null, 2), "utf8")
 }
 
+// ─── Phase 19: task-display selectivity ───
+
+/**
+ * When true (default), the task box / step-transition log lines render
+ * ONLY on `implement` runs. Q&A, summary, and bug pipelines render via
+ * tool cards + reasoning peek alone — no multi-step plan ceremony.
+ * Set false to restore the pre-Phase-19 behaviour where every prompt's
+ * server-emitted `task` payload produces a task header in the stream.
+ */
+export async function getTaskDisplaySelective(): Promise<boolean> {
+  await ensureSysbase()
+  try {
+    const raw = await fs.readFile(MODELS_META_FILE, "utf8")
+    const data = JSON.parse(raw)
+    // Default true: undefined / missing key → selective gating is on.
+    return data.taskDisplaySelective !== false
+  } catch {
+    return true
+  }
+}
+
+export async function setTaskDisplaySelective(enabled: boolean): Promise<void> {
+  await ensureSysbase()
+  const raw = await fs.readFile(MODELS_META_FILE, "utf8")
+  const data = JSON.parse(raw)
+  data.taskDisplaySelective = enabled === true
+  await fs.writeFile(MODELS_META_FILE, JSON.stringify(data, null, 2), "utf8")
+}
+
 // ─── Permission mode persistence ───
 
 import type { PermissionMode } from "../agent/permissions.js"

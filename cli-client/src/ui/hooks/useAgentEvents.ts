@@ -92,9 +92,15 @@ export interface AgentEventState {
    *  elapsed clock keeps counting until the run actually finishes.
    *  Cleared on `clear` and `complete`. */
   runStartedAt: number | null
+  /** Phase 19: intent classification result for the current run, set
+   *  by an `intent_classified` event after the preflight classifier
+   *  runs. Drives the <AgentStream> gate that hides the task box for
+   *  non-implement runs (`simple` Q&A, `summary`, `bug`). Most-recent
+   *  wins; `clear` wipes it for a fresh prompt. */
+  runIntent: "simple" | "summary" | "bug" | "implement" | null
 }
 
-const INITIAL: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null, runStartedAt: null }
+const INITIAL: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null, runStartedAt: null, runIntent: null }
 
 let nextLogId = 1
 
@@ -206,6 +212,18 @@ export function reduceAgentEvent(prev: AgentEventState, event: AgentEvent): Agen
         ...prev,
         reasoningBrief: { kind: event.kind, briefData: event.briefData, key: prevKey + 1 },
       }
+    }
+    case "intent_classified": {
+      // Defensive: ignore unknown intent values so a malformed payload
+      // can't put the reducer into a non-enumerated state. The four
+      // known values match the server's `IntentHint` union.
+      if (
+        event.intent !== "simple"
+        && event.intent !== "summary"
+        && event.intent !== "bug"
+        && event.intent !== "implement"
+      ) return prev
+      return { ...prev, runIntent: event.intent }
     }
     default:
       return prev

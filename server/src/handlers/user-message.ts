@@ -18,6 +18,7 @@ import { createPipelineFromAiPlan, createFallbackPipeline, pipelineToTaskMeta } 
 import { detectScaffoldingNeed, buildScaffoldConfirmationMessage } from "../scaffold/index.js"
 import { estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import { runReasoning, getReasonerBackendForRun } from "../reasoning/task-reasoner.js"
+import { classifyIntent } from "../reasoning/intent-classifier.js"
 import { recommendScaffold, resolveCommand, getInstallCommand } from "../scaffold/index.js"
 import { recordImplementSummary, recordOriginalIntent, recordDecision, recordBugPattern, applyMemoryFeedback } from "../memory-store/index.js"
 import { runReasoningChain } from "../reasoning/chain.js"
@@ -629,6 +630,13 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
   // runReasoning call lands; constant for the rest of the run.
   const reasonerBackend = getReasonerBackendForRun(runId)
   if (reasonerBackend) clientResp.reasonerBackend = reasonerBackend
+  // Phase 19: surface the classified intent so the CLI's <AgentStream>
+  // can gate the task box (only `implement` runs render the box; Q&A /
+  // summary / bug pipelines keep the surface lean — see plan
+  // `applied/2026-05-07-phase-19-task-display-selectivity.md`).
+  // Always present on the initial response so the cli reducer has the
+  // intent BEFORE any taskPlan arrives.
+  clientResp.runIntent = classifyIntent(body.content)
   // Phase 10: surface the chunk-plan brief on the response so the CLI (Stage 5)
   // can render the chunk progress badge. Stage 4 will also inject it into the
   // provider prompt so the model honours the planner's file list.

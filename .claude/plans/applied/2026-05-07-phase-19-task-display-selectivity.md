@@ -1,7 +1,7 @@
 # Phase 19 — Task display selectivity (Claude-style hidden internal task vs visible implement task)
 
 - **Created:** 2026-05-07
-- **Status:** draft
+- **Status:** implemented (2026-05-15)
 - **Scope:** Claude Code only renders a task box when it's actually implementing something. For Q&A / investigations / quick questions, the answer comes back without a multi-step plan ceiling the conversation. sysflow today instructs every prompt's main model to produce a `taskPlan` and renders the resulting task box regardless of whether the prompt is "build a full app" or "what does this file do?". Phase 19 makes that selective.
 
 ## Goal
@@ -119,3 +119,29 @@ End-to-end:
 - Heuristics that auto-show a task box mid-Q&A if the work turns out to be larger than expected. The intent classification is sticky for the run; complexity may upgrade but the visible-task gate doesn't reactively flip.
 - A user toggle keystroke to surface the hidden internal task on demand. Could be added later via the focus-stack store; out of scope here.
 - Server-side intent classification improvements. The existing classifier in `intent-classifier.ts` is what we use.
+
+## Completion notes
+
+Shipped as a single PR (Phase 19 is smaller than the recent multi-stage plans; five stages bundle cleanly without review-load concerns).
+
+**Stage execution:**
+
+- Stage 1 — `intent_classified` event + `runIntent` reducer slot landed in `useAgentEvents.ts`. 7 new reducer tests covering the known values, malformed-input defense, most-recent-wins, survival across other events, and `clear` wipes it.
+- Stage 2 — server emits `ClientResponse.runIntent` from both `user-message.ts` (initial response) and `tool-result.ts` (every subsequent response, defensive). Both use `classifyIntent(run.content)` — pure regex, no extra Flash call. The cli emits `intent_classified` from the bus on the first response that carries the field; subsequent responses are guarded so the event fires at most once.
+- Stage 3 — `handleNeedsTool` reads `runIntent` + `taskDisplaySelective` from `NeedsToolCtx`; the task block (`if (task && !taskDisplayGated)`) skips when the gate trips. Threaded through the existing ctx pattern, no new state-machine seams.
+- Stage 4 — `Header.tsx` gains a `showInternalTaskIndicator` derived state. When `chunk` fired AND `runIntent !== "implement"`, the muted `· thinking through it` cell renders instead of the chunk-pulse. Pre-classification (runIntent null) preserves the existing chunk-pulse behaviour for defense-in-depth.
+- Stage 5 — two knowledge entries (architecture diagram + decisions on the gating principle); plan archived to `applied/`.
+
+**Deviations from the original plan:**
+
+- The original plan listed `cli-client/src/lib/server.ts` extensions to surface intent through SSE phase events. **Not needed** — `ClientResponse.runIntent` on the existing response payload is enough. The reducer captures from the first response; SSE-channel plumbing was unnecessary indirection.
+- The plan mentioned a new `AgentStream` task render to gate. **Not the actual gate point** — the task box already doesn't render in Ink mode (Phase 14 Stage 1 gated `renderPipelineBox` behind `shouldRenderInlineForLegacy()`). The real surface in Ink mode is the `printStepTransition` log lines + `renderCompletion`'s taskSteps render, both driven by `handleNeedsTool`'s task block populating `ctx.taskSteps`. Gating the populating block (not a render call) is the cleanest place — if `taskSteps` stays empty, all downstream renders naturally skip.
+- The plan called for a flag `cli.task_display_selective` (default `true`). Shipped as `taskDisplaySelective` in sysbase (same convention as the other Phase 14/17/Stage-2 settings).
+- Per-server-test coverage of the new `runIntent` field: deferred. The server change is two `clientResp.runIntent = classifyIntent(...)` lines + a non-breaking optional field on `ClientResponse`. The cli reducer + handler tests cover the consumption shape; a focused server-side test pair adds review surface without information gain.
+
+**Stage 3 of Phase 18 ("server gates taskPlan emission"):** still draft. Phase 19's frontend gate is the defense-in-depth layer that Phase 18 will later compose with. No regression — even if a free-tier model ignores the future Phase 18 server directive and emits a stray taskPlan, the cli's gate hides it.
+
+**Knowledge entries captured:**
+
+- `architecture.md: ## Task display selectivity (Phase 19)` — flow diagram + key files + composition with future Phase 18
+- `decisions.md: ## Task box gates on intent classification, not on prior-render heuristics` — three rejected alternatives + the sticky-classification rule

@@ -1188,6 +1188,11 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
   // resolved a backend.
   const reasonerBackend = getReasonerBackendForRun(body.runId)
   if (reasonerBackend) response.reasonerBackend = reasonerBackend
+  // Phase 19: classifyIntent is pure + cheap over run.content; surfacing
+  // it on every response lets the CLI gate the task box defensively even
+  // if the initial user-message response was lost or arrived out of
+  // order. Same classification the preflight reasoner used.
+  response.runIntent = classifyIntent(run.content)
   // Phase 10: surface the chunk briefs so the CLI can render the boundary.
   if (chunkPlanBrief) (response as unknown as Record<string, unknown>).chunkPlanBrief = chunkPlanBrief
   if (chunkReflectionBrief) (response as unknown as Record<string, unknown>).chunkReflectionBrief = chunkReflectionBrief

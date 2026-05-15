@@ -3,7 +3,7 @@ import path from "node:path"
 import readline from "node:readline"
 import ora from "ora"
 import { callServer, callServerStream, type ServerError } from "../lib/server.js"
-import { ensureSysbase, getSelectedModel, getSysbasePath, getReasoningEnabled, getAuthToken, getPlanMode } from "../lib/sysbase.js"
+import { ensureSysbase, getSelectedModel, getSysbasePath, getReasoningEnabled, getAuthToken, getPlanMode, getTaskDisplaySelective } from "../lib/sysbase.js"
 import { executeTool, executeToolsBatch } from "./executor.js"
 import { isSafeReadOnlyCommand } from "./safe-commands.js"
 import { readFileTool, computeLineDiff } from "./tools.js"
@@ -406,6 +406,21 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   if (initialBackend === "gemini" || initialBackend === "anthropic" || initialBackend === "openrouter") {
     reasonerBackend = initialBackend
   }
+  // Phase 19: capture the classified intent on the initial response.
+  // Held in `runIntent` for the lifetime of the run; emitted to the
+  // event bus so the useAgentEvents reducer + <AgentStream> can gate
+  // the task box (only `implement` runs render the box; Q&A / summary /
+  // bug pipelines stay lean — see plan
+  // `applied/2026-05-07-phase-19-task-display-selectivity.md`).
+  let runIntent: "simple" | "summary" | "bug" | "implement" | null = null
+  const initialIntent = (response as Record<string, unknown>).runIntent
+  if (initialIntent === "simple" || initialIntent === "summary" || initialIntent === "bug" || initialIntent === "implement") {
+    runIntent = initialIntent
+    emitAgent({ type: "intent_classified", intent: initialIntent })
+  }
+  // Resolve the task-display-selective flag once for the run — toggling
+  // mid-run isn't a supported flow.
+  const taskDisplaySelective = await getTaskDisplaySelective()
   // Phase 11 Stage 5: track the last awareness state we've shown so we can
   // emit a one-line transition log when the badge flips
   // (on_track → off_course or off_course → blocked).
@@ -683,7 +698,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         const result = await handleNeedsTool(
           response,
           spinner,
-          { hasReasoning, lastDisplayedAction, lastDisplayedReasoning, currentRunId, taskShown, taskSteps, completedSteps, lastPipelineStepId, prevTool, chunkIndex, flashCallsThisTurn: 0, lastAwarenessState, budget },
+          { hasReasoning, lastDisplayedAction, lastDisplayedReasoning, currentRunId, taskShown, taskSteps, completedSteps, lastPipelineStepId, prevTool, chunkIndex, flashCallsThisTurn: 0, lastAwarenessState, runIntent, taskDisplaySelective, budget },
           makeServerCall,
         )
         response = result.response
@@ -697,6 +712,16 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         chunkIndex = result.chunkIndex
         flashCallsCount += result.flashCallsThisTurn
         investigationCommandsCount += result.investigationCommandsThisTurn
+        // Phase 19: defensive capture of runIntent from subsequent
+        // responses in case the initial response didn't carry it.
+        // Once set, stays set — the value is run-constant.
+        if (!runIntent) {
+          const next = (response as Record<string, unknown>).runIntent
+          if (next === "simple" || next === "summary" || next === "bug" || next === "implement") {
+            runIntent = next
+            emitAgent({ type: "intent_classified", intent: next })
+          }
+        }
         lastAwarenessState = result.lastAwarenessState
         // Phase 11 Stage 6: tally the awareness snapshot from this turn into
         // the per-run telemetry counters (recorded on terminal exit).
@@ -1022,6 +1047,14 @@ interface NeedsToolCtx {
   /** Phase 11 Stage 5: last awareness state we surfaced. Used to dedup the
    *  one-line transition log when the badge flips state turn-over-turn. */
   lastAwarenessState: "on_track" | "off_course" | "blocked" | null
+  /** Phase 19: classified intent for the run. The task-rendering block
+   *  inside handleNeedsTool reads this to decide whether the step
+   *  transition log + initial pipeline box render (only when
+   *  `runIntent === "implement"` AND the selective flag is on). */
+  runIntent: "simple" | "summary" | "bug" | "implement" | null
+  /** Phase 19: resolved value of the `taskDisplaySelective` sysbase
+   *  setting. Captured once per run; toggling mid-run isn't supported. */
+  taskDisplaySelective: boolean
   budget: RetryBudget
 }
 
@@ -1053,7 +1086,7 @@ async function handleNeedsTool(
   ctx: NeedsToolCtx,
   makeServerCall: (payload: Record<string, unknown>, phaseHandler?: (label: string) => void) => Promise<Record<string, unknown>>,
 ): Promise<NeedsToolResult> {
-  const { hasReasoning, currentRunId, completedSteps, budget } = ctx
+  const { hasReasoning, currentRunId, completedSteps, runIntent, taskDisplaySelective, budget } = ctx
   let { lastDisplayedAction, lastDisplayedReasoning, taskShown, taskSteps, lastPipelineStepId } = ctx
   // Stage 5 of command-first-investigation: local tally returned via
   // NeedsToolResult so runAgent can accumulate the per-run total.
@@ -1066,9 +1099,18 @@ async function handleNeedsTool(
   const toolCalls = response.tools as Array<{ id: string; tool: string; args: Record<string, unknown> }> | undefined
   const isParallel = toolCalls && toolCalls.length > 1
 
+  // Phase 19: gate the task-display block. When the selective flag is
+  // on (default) AND the run's intent is anything other than
+  // `implement`, skip the step-transition log + initial pipeline-box
+  // emission entirely. The agent still has internal task structure
+  // (chunked loop, reasoning briefs, memory) — it's just not surfaced
+  // as a multi-step plan ceiling the conversation. See plan
+  // `applied/2026-05-07-phase-19-task-display-selectivity.md`.
+  const taskDisplayGated = taskDisplaySelective && runIntent !== null && runIntent !== "implement"
+
   // Pipeline display
   const task = response.task as Record<string, unknown> | null
-  if (task) {
+  if (task && !taskDisplayGated) {
     const incomingSteps = (task.steps || []) as Array<{ id: string; label: string; status?: string }>
     for (const s of incomingSteps) {
       if (s.status === "completed" && s.id) completedSteps.add(s.id)
