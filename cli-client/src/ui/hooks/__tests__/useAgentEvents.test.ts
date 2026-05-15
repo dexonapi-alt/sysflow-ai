@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest"
 import { reduceAgentEvent, _resetIdsForTests, type AgentEventState } from "../useAgentEvents.js"
 
-const initial: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null, runStartedAt: null }
+const initial: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null, runStartedAt: null, runIntent: null }
 
 beforeEach(() => _resetIdsForTests())
 
@@ -304,5 +304,58 @@ describe("reduceAgentEvent — reasoning_brief (Phase 14 Stage 4)", () => {
     let s = reduceAgentEvent(initial, { type: "reasoning_brief", kind: "implement", briefData: { confidence: "HIGH" } })
     s = reduceAgentEvent(s, { type: "reasoning_brief", kind: "implement", briefData: { confidence: "LOW" } })
     expect(s.reasoningBrief?.briefData).toEqual({ confidence: "LOW" })
+  })
+})
+
+// ─── Phase 19: intent_classified reducer slot ───
+
+describe("reduceAgentEvent — intent_classified (Phase 19)", () => {
+  it("runIntent is null on initial state", () => {
+    expect(initial.runIntent).toBeNull()
+  })
+
+  it("sets runIntent for each known intent value", () => {
+    for (const intent of ["simple", "summary", "bug", "implement"] as const) {
+      const s = reduceAgentEvent(initial, { type: "intent_classified", intent })
+      expect(s.runIntent).toBe(intent)
+    }
+  })
+
+  it("ignores unknown intent values (defensive against malformed payloads)", () => {
+    // @ts-expect-error — deliberately passing an out-of-enum value
+    const s = reduceAgentEvent(initial, { type: "intent_classified", intent: "garbage" })
+    expect(s.runIntent).toBeNull()
+  })
+
+  it("most-recent wins when multiple events arrive on the same run", () => {
+    let s = reduceAgentEvent(initial, { type: "intent_classified", intent: "simple" })
+    expect(s.runIntent).toBe("simple")
+    s = reduceAgentEvent(s, { type: "intent_classified", intent: "implement" })
+    expect(s.runIntent).toBe("implement")
+  })
+
+  it("runIntent survives across spinner / tool / brief events", () => {
+    let s = reduceAgentEvent(initial, { type: "intent_classified", intent: "implement" })
+    s = reduceAgentEvent(s, { type: "spinner", text: "thinking" })
+    s = reduceAgentEvent(s, { type: "tool_start", id: "t1", tool: "read_file", label: "Read(foo.ts)" })
+    s = reduceAgentEvent(s, { type: "chunk_plan", chunkIndex: 1, nextAction: "write models" })
+    s = reduceAgentEvent(s, { type: "reasoning_brief", kind: "implement" })
+    expect(s.runIntent).toBe("implement")
+  })
+
+  it("clear wipes runIntent", () => {
+    let s = reduceAgentEvent(initial, { type: "intent_classified", intent: "implement" })
+    expect(s.runIntent).toBe("implement")
+    s = reduceAgentEvent(s, { type: "clear" })
+    expect(s.runIntent).toBeNull()
+  })
+
+  it("complete does NOT wipe runIntent (terminal exit still wants the badge state)", () => {
+    let s = reduceAgentEvent(initial, { type: "intent_classified", intent: "implement" })
+    s = reduceAgentEvent(s, { type: "complete" })
+    // Reducer leaves runIntent alone on complete — it's the *next prompt's*
+    // `clear` that drops it. Lets a post-completion render still see the
+    // intent if anything reads it during the final repaint.
+    expect(s.runIntent).toBe("implement")
   })
 })

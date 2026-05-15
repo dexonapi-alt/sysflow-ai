@@ -188,6 +188,16 @@ export interface ClientResponse {
    * is sufficient.
    */
   reasonerBackend?: "gemini" | "anthropic" | "openrouter" | null
+  /**
+   * Phase 19: the classified intent for this run, computed by
+   * `classifyIntent(content)` in user-message.ts. The CLI's reducer
+   * reads this on the first response and stores it in `runIntent` so
+   * the <AgentStream> gate can decide whether the task box renders.
+   * Constant for the duration of a run; the value is the same as
+   * what the preflight reasoner's `pickPipeline` chose so the cli
+   * and server share one classification.
+   */
+  runIntent?: "simple" | "summary" | "bug" | "implement" | null
 }
 
 // ─── Database ───

@@ -645,3 +645,66 @@ Why: cross-backend fallback was rejected by the model-lock plan because it re-in
 - Flag: `server/src/services/flags.ts: reasoning.backend` (default `"auto"`)
 - Client surface: `server/src/types.ts: ClientResponse.reasonerBackend`
 - CLI summary: `cli-client/src/agent/usage-log.ts: RunSummary.reasonerBackend`
+
+## Task display selectivity (Phase 19)
+
+- **Source:** plan `applied/2026-05-07-phase-19-task-display-selectivity.md`
+
+The visible task box at the top of `<AgentStream>` is conditional on the run's classified intent. Only `implement` runs render the multi-step plan; simple Q&A, summary, and bug-fix pipelines surface via tool cards + `<ReasoningPeek>` alone.
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│  user_message                                                       │
+│       │                                                              │
+│       ▼                                                              │
+│  server: classifyIntent(body.content) → "simple" / "summary" /      │
+│          "bug" / "implement". Attached to ClientResponse.runIntent.  │
+│       │                                                              │
+│       ▼                                                              │
+│  cli runAgent: captures initial response.runIntent.                  │
+│                Emits `intent_classified` event so the reducer holds  │
+│                runIntent for the lifetime of the run.                │
+│                Reads `taskDisplaySelective` from sysbase (default    │
+│                true). Threads both through NeedsToolCtx.             │
+│       │                                                              │
+│       ▼                                                              │
+│  cli handleNeedsTool: taskDisplayGated =                            │
+│      taskDisplaySelective && runIntent !== "implement"               │
+│                                                                      │
+│      if (response.task && !taskDisplayGated):                        │
+│          ┌─ renderPipelineBox (legacy console) ─┐                    │
+│          │  printStepTransition on transitions  │  ← only when       │
+│          │  taskSteps populates ctx for         │     runIntent ===  │
+│          │  renderCompletion's final summary    │     "implement"    │
+│          └──────────────────────────────────────┘                    │
+│                                                                      │
+│      else (non-implement OR flag-off):                              │
+│          ┌─ tool cards stream                   ─┐                   │
+│          │  ReasoningPeek shows brief content   │   ← lean surface   │
+│          │  Header gets · thinking through it · │                    │
+│          │  for non-implement + chunk_plan      │                    │
+│          └──────────────────────────────────────┘                    │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+### Sticky classification, not reactive
+
+The intent is classified once from the user's prompt and held for the whole run. Complexity may upgrade mid-run (chunked-loop may grow the buildPlan) but the visible-task gate doesn't flip — see `decisions.md: ## Task box gates on intent classification, not on prior-render heuristics` for the rejected alternatives.
+
+### Composition with Phase 18 (when it lands)
+
+Phase 18 (still draft) gates `taskPlan` EMISSION on the server side. Phase 19 owns the cli RENDER side. Both layers can ship independently; together they form defense-in-depth. Phase 19 doesn't require Phase 18 — even if a stray taskPlan slips through from a free-tier model that ignored the prompt directive, the cli's frontend gate hides it.
+
+### Internal-task indicator
+
+When `chunk_plan` has fired (internal work IS happening) AND `runIntent !== "implement"` (the box is gated off), the Header surfaces a tiny muted `· thinking through it` cell. Lets the user see activity without the multi-step plan UI claiming the conversation.
+
+### Key files (one source of truth per concern)
+
+- Server emission: `server/src/handlers/user-message.ts` + `server/src/handlers/tool-result.ts` → `clientResp.runIntent = classifyIntent(content)`
+- Client surface: `server/src/types.ts: ClientResponse.runIntent`
+- CLI event: `cli-client/src/agent/events.ts: intent_classified`
+- CLI reducer slot: `cli-client/src/ui/hooks/useAgentEvents.ts: AgentEventState.runIntent`
+- CLI capture + gate: `cli-client/src/agent/agent.ts: runIntent + taskDisplaySelective + taskDisplayGated`
+- Header indicator: `cli-client/src/ui/components/Header.tsx: showInternalTaskIndicator`
+- Setting: `cli-client/src/lib/sysbase.ts: getTaskDisplaySelective` (default `true`)

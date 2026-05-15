@@ -70,7 +70,15 @@ function confidenceToGradientT(confidence: number): number {
 
 export function Header({ model, user, chatTitle, planMode, cwd }: Props): React.ReactElement {
   const folder = path.basename(cwd ?? process.cwd())
-  const { awareness, chunk } = useAgentEvents()
+  const { awareness, chunk, runIntent } = useAgentEvents()
+
+  // Phase 19: surface a tiny muted "thinking through it" cell when the
+  // agent has internal task structure (chunk_plan has fired) but the
+  // task box is gated off (runIntent is non-implement, e.g. simple Q&A
+  // with chunked memory recall happening behind the scenes). Lets the
+  // user see that work IS happening even though the multi-step plan
+  // ceiling isn't being rendered.
+  const showInternalTaskIndicator = chunk !== null && runIntent !== null && runIntent !== "implement"
 
   return (
     <Box flexDirection="column">
@@ -95,12 +103,33 @@ export function Header({ model, user, chatTitle, planMode, cwd }: Props): React.
             <AwarenessBadge snapshot={awareness} />
           </>
         )}
-        {chunk && (
+        {chunk && runIntent === "implement" && (
           <>
             <Text color={palette.muted}>  ·  </Text>
             <Pulse flash={palette.accent} settle={palette.muted} triggerKey={chunk.pulseKey}>
               {`▸ ${chunk.index}`}
             </Pulse>
+          </>
+        )}
+        {chunk && runIntent !== "implement" && runIntent === null && (
+          // Pre-Phase-19 path: no intent classified yet (legacy or
+          // mid-run before the cli reducer observed the first response).
+          // Render the chunk pulse normally so we don't regress the
+          // visible-progress signal in that window.
+          <>
+            <Text color={palette.muted}>  ·  </Text>
+            <Pulse flash={palette.accent} settle={palette.muted} triggerKey={chunk.pulseKey}>
+              {`▸ ${chunk.index}`}
+            </Pulse>
+          </>
+        )}
+        {showInternalTaskIndicator && (
+          // Phase 19: non-implement run with internal task structure.
+          // Tiny muted indicator instead of the chunk pulse so the user
+          // sees activity without the "this is a multi-step plan" cue.
+          <>
+            <Text color={palette.muted}>  ·  </Text>
+            <Text color={palette.muted}>{`· thinking through it`}</Text>
           </>
         )}
       </Box>

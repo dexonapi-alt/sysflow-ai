@@ -68,6 +68,14 @@ export type AgentEvent =
   // because the schema lives server-side; the renderer reads only
   // the fields it knows). Cleared by `clear`.
   | { type: "reasoning_brief"; kind: string; briefData?: Record<string, unknown> }
+  // ── Phase 19: intent classification ──
+  // Emitted by `agent.ts` when the server's initial response carries a
+  // `runIntent` field (set by the preflight intent classifier in
+  // `task-reasoner.ts: pickPipeline` and surfaced in user-message.ts).
+  // The reducer holds this slot for the lifetime of the run; the
+  // <AgentStream> reads it to decide whether the task box renders
+  // (`implement` → show; everything else → hide).
+  | { type: "intent_classified"; intent: "simple" | "summary" | "bug" | "implement" }
 
 const emitter = new EventEmitter()
 emitter.setMaxListeners(20)
