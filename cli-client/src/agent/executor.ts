@@ -750,12 +750,28 @@ export async function executeToolsBatch(
     cleanupSnapshot(process.cwd(), runId).catch(() => {})
   }
 
+  // ─── Stage 4 of agent-runtime-fixes plan: per-turn directory refresh ───
+  // If this batch contained any MUTATING tool (write / edit / delete /
+  // create_directory / batch_write / run_command), snapshot the top-level
+  // directory tree NOW and attach it to the tool_result payload. The
+  // server-side context-manager compares it against the working
+  // context's file map and injects a "DIRECTORY STATE CHANGED" reminder
+  // when previously-tracked top-level files no longer exist. Closes bug
+  // 5 (stale file references / hallucination).
+  const MUTATING_TOOLS = new Set(["write_file", "edit_file", "delete_file", "create_directory", "batch_write", "move_file", "run_command"])
+  const batchMutated = tools.some((tc) => MUTATING_TOOLS.has(tc.tool))
+  let refreshedTree: Array<{ name: string; type: "file" | "directory" }> | undefined
+  if (batchMutated) {
+    refreshedTree = await captureTopLevelTree(process.cwd())
+  }
+
   const payload = {
     type: "tool_result",
     runId,
     tool: tools[0].tool,      // backwards compat
     result: allResults[0]?.result || {},
-    toolResults: allResults
+    toolResults: allResults,
+    directoryTree: refreshedTree,
   }
 
   // Try streaming first, fall back to batch
@@ -763,5 +779,25 @@ export async function executeToolsBatch(
     return await callServerStream(payload, onPhase)
   } catch {
     return callServer(payload)
+  }
+}
+
+/**
+ * Stage 4 of agent-runtime-fixes plan: top-level directory snapshot
+ * used by the per-turn refresh path. Cheap — single readdir, no
+ * recursion. Best-effort: returns undefined on I/O error so the
+ * caller drops the field (server falls back to the prior tree).
+ *
+ * Skips dotfiles + node_modules + the sysbase directory to keep the
+ * payload small. The agent never operates on those at the top level.
+ */
+async function captureTopLevelTree(cwd: string): Promise<Array<{ name: string; type: "file" | "directory" }> | undefined> {
+  try {
+    const entries = await fs.readdir(cwd, { withFileTypes: true })
+    return entries
+      .filter((e) => !e.name.startsWith(".") && e.name !== "node_modules" && !e.name.startsWith("sysbase"))
+      .map((e) => ({ name: e.name, type: e.isDirectory() ? ("directory" as const) : ("file" as const) }))
+  } catch {
+    return undefined
   }
 }

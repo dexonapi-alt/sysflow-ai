@@ -15,7 +15,7 @@ import { recordVerificationResult, shouldBlockCompletion, buildVerificationFixPa
 import { validateFrontendQuality, buildFrontendRejectionPayload, accumulateFrontendContent, clearFrontendContent } from "../services/frontend-quality-guard.js"
 import { actionPlanner } from "../services/action-planner.js"
 import { isFrontendTask } from "../knowledge/frontend-patterns.js"
-import { ingestToolResult, clearRunContext, buildWorkingContextString } from "../services/context-manager.js"
+import { ingestToolResult, ingestDirectoryTree, clearRunContext, buildWorkingContextString } from "../services/context-manager.js"
 import { updatePipelineProgress, completePipeline, clearPipeline, getPipeline, hasPipeline, pipelineToTaskMeta, createPipelineFromAiPlan } from "../services/task-pipeline.js"
 import { getScaffoldChoice, storeScaffoldChoice, parseScaffoldResponse, clearScaffoldState } from "../scaffold/index.js"
 import { getPendingError, clearPendingError, setPendingError, buildFixInstructions, setPendingFileContent, hasPendingErrors, popNextPendingError } from "../services/error-autofix.js"
@@ -115,6 +115,13 @@ interface ToolResultBody {
   result: Record<string, unknown>
   toolResults?: Array<{ id: string; tool: string; result: Record<string, unknown> }>
   planMode?: boolean
+  /** Stage 4 of agent-runtime-fixes plan: fresh top-level directory
+   *  tree the cli captured AFTER the just-executed tool batch. Present
+   *  only when the batch contained mutating tools (write_file /
+   *  edit_file / delete_file / create_directory / batch_write /
+   *  run_command). Used to detect stale file references the agent may
+   *  hallucinate from prior turns. */
+  directoryTree?: Array<{ name: string; type: "file" | "directory" }>
 }
 
 export async function handleToolResult(body: ToolResultBody): Promise<ClientResponse> {
@@ -711,6 +718,34 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
       }
     }
     pendingErrorRecovery.delete(body.runId)
+  }
+
+  // ─── Stage 4 of agent-runtime-fixes plan: per-turn directory refresh ───
+  // When the cli executor sent a fresh directoryTree (it does this after
+  // mutating tool batches), ingest it. The ingest call detects top-level
+  // files the working context tracked as present that no longer appear
+  // on disk — common when the agent deleted them via `rm` or
+  // `delete_file`, or when the directory was reset externally. Inject a
+  // one-shot reminder so the next response doesn't reference deleted
+  // files. Best-effort; failures degrade silently.
+  if (Array.isArray(body.directoryTree) && body.directoryTree.length >= 0) {
+    try {
+      const { staleFiles } = ingestDirectoryTree(body.runId, body.directoryTree as Array<{ name: string; type: "file" | "directory" }>)
+      if (staleFiles.length > 0) {
+        console.log(`[directory-refresh] ${staleFiles.length} stale top-level file(s): ${staleFiles.slice(0, 5).join(", ")}`)
+        const block = `═══ DIRECTORY STATE CHANGED ═══
+
+The following ${staleFiles.length} top-level file${staleFiles.length === 1 ? "" : "s"} ${staleFiles.length === 1 ? "is" : "are"} NO LONGER ON DISK since the previous turn:
+${staleFiles.slice(0, 12).map((p) => `  - ${p}`).join("\n")}${staleFiles.length > 12 ? `\n  … and ${staleFiles.length - 12} more` : ""}
+
+Do NOT reference these files in your next action. Do NOT try to read or edit them — they don't exist. Use the refreshed PROJECT STATE block as your source of truth.
+
+═══ END DIRECTORY STATE CHANGED ═══`
+        actionPlanner.injectContext(body.runId, block)
+      }
+    } catch (err) {
+      console.warn(`[directory-refresh] failed:`, (err as Error).message)
+    }
   }
 
   // ─── Pre-API token guard ───
