@@ -18,7 +18,7 @@ import { createPipelineFromAiPlan, createFallbackPipeline, pipelineToTaskMeta } 
 import { detectScaffoldingNeed, buildScaffoldConfirmationMessage } from "../scaffold/index.js"
 import { estimateTokens, shouldBlockOnTokens } from "../services/context-budget.js"
 import { runReasoning, getReasonerBackendForRun } from "../reasoning/task-reasoner.js"
-import { classifyIntent } from "../reasoning/intent-classifier.js"
+import { classifyIntent, classifyIntentSmart } from "../reasoning/intent-classifier.js"
 import { recommendScaffold, resolveCommand, getInstallCommand } from "../scaffold/index.js"
 import { recordImplementSummary, recordOriginalIntent, recordDecision, recordBugPattern, applyMemoryFeedback } from "../memory-store/index.js"
 import { runReasoningChain } from "../reasoning/chain.js"
@@ -507,7 +507,21 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
   // drop a stray taskPlan if a free-tier model emits one anyway).
   // `taskComplexity` was already computed earlier in this handler (line ~60)
   // for logging — reuse `taskComplexity.complexity` directly.
-  const runIntent = classifyIntent(body.content)
+  //
+  // Stage 4 of plan 2026-05-15-llm-iterative-intent-classification.md:
+  // Use the smart classifier. First turn of a run goes through the LLM
+  // iterative chain (when enabled); the per-run cache caps total
+  // intent-classification cost to ~1 call per run. tool-result.ts
+  // reads from the cache on subsequent turns.
+  const intentResult = await classifyIntentSmart({
+    userMessage: body.content,
+    runId,
+    model: body.model,
+  })
+  const runIntent = intentResult.hint
+  if (intentResult.source !== "cache") {
+    console.log(`[intent-classifier] run ${runId} → ${runIntent} (source: ${intentResult.source}${intentResult.paragraphs?.length ? `, ${intentResult.paragraphs.length} paragraph${intentResult.paragraphs.length === 1 ? "" : "s"}` : ""})`)
+  }
 
   let normalized = await callModelAdapter({
     model: body.model,
@@ -646,7 +660,9 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
   // `applied/2026-05-07-phase-19-task-display-selectivity.md`).
   // Always present on the initial response so the cli reducer has the
   // intent BEFORE any taskPlan arrives.
-  clientResp.runIntent = classifyIntent(body.content)
+  // Phase 19 surface. The smart classifier above already cached the
+  // value for this run; this just hands it to the cli.
+  clientResp.runIntent = runIntent
   // Phase 10: surface the chunk-plan brief on the response so the CLI (Stage 5)
   // can render the chunk progress badge. Stage 4 will also inject it into the
   // provider prompt so the model honours the planner's file list.
