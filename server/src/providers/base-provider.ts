@@ -5,6 +5,9 @@ import { isFrontendTask } from "../knowledge/frontend-patterns.js"
 import { getFrontendPatternsCompact } from "../knowledge/frontend-patterns.js"
 import { getPipeline } from "../services/task-pipeline.js"
 import { buildSystemPrompt, type PromptCtx } from "./prompt/build.js"
+import { buildVerifyAfterWriteBlock, extractWritesFromToolResults } from "../services/post-write-verifier.js"
+import { shouldForceVerifyAfterWrite } from "../services/free-tier-policy.js"
+import { getFlag } from "../services/flags.js"
 export { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from "./prompt/build.js"
 
 /**
@@ -633,12 +636,60 @@ export abstract class BaseProvider {
       toolMsg += "\n\nContinue with the next action needed to complete the task."
     }
 
+    // Stage 1 of free-tier quality enforcement: if this chunk wrote any
+    // files, inject a verify-after-write directive block instructing the
+    // agent to cat/typecheck/find before proceeding. Free-tier always;
+    // paid only on real-sized chunks. Closes the "agent wrote a typo and
+    // didn't notice / created an empty folder and moved on" failure mode.
+    toolMsg += this.renderVerifyAfterWriteBlock(payload, tools)
+
     // Phase 10: chunk plan injection. Each turn that has a fresh planner
     // verdict gets the file list re-stamped at the bottom so the model sees
     // it last (closest to its response window).
     toolMsg += renderChunkPlanSection(payload.chunkPlanBrief)
 
     return toolMsg
+  }
+
+  /**
+   * Stage 1 of free-tier quality enforcement plan: protected helper that
+   * builds the verify-after-write block from this turn's tool results.
+   * Returns empty string when:
+   *   - The gate (`shouldForceVerifyAfterWrite`) says no, OR
+   *   - No writes happened this turn
+   *
+   * The block is concatenated into `buildToolResultMessage`'s outgoing
+   * text BEFORE the chunk plan section so the agent sees verify-first,
+   * plan-next ordering.
+   */
+  protected renderVerifyAfterWriteBlock(
+    payload: ProviderPayload,
+    tools: Array<{ tool: string; result: Record<string, unknown> }>,
+  ): string {
+    const { filesWritten, dirsCreated } = extractWritesFromToolResults({ tools })
+    if (filesWritten.length === 0 && dirsCreated.length === 0) return ""
+
+    // Gate via free-tier-policy: free-tier always; paid on ≥3 files +
+    // medium/complex complexity.
+    const flagEnabled = (() => {
+      try { return getFlag<boolean>("quality.force_verify_after_write") } catch { return true }
+    })()
+    const originalTask = this.runTasks.get(payload.runId) || payload.userMessage || ""
+    const complexity = analyzeTaskComplexity(originalTask).complexity
+    if (!shouldForceVerifyAfterWrite({
+      model: payload.model,
+      complexity,
+      filesWrittenInChunk: filesWritten.length,
+      flagEnabled,
+    })) {
+      return ""
+    }
+
+    return buildVerifyAfterWriteBlock({
+      filesWritten,
+      dirsCreated,
+      platform: process.platform,
+    })
   }
 
 

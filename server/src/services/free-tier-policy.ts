@@ -170,6 +170,44 @@ export function shouldRunIterativeRefine(input: IterativeRefineGateInput): boole
 }
 
 /**
+ * Stage 1 of free-tier quality enforcement: should a verify-after-write
+ * directive block be injected into the next tool-result message?
+ *
+ * User feedback that drove this: *"free models create errors, typos,
+ * forgot to implement in X folder (no files implemented), wrong
+ * implementations because it lacks checking every iteration."*
+ *
+ * Free-tier ALWAYS gets the block — the failure modes are most acute
+ * there. Paid tier gets it only when the chunk wrote enough files to
+ * be worth verifying (≥ 3) AND the task was non-trivial.
+ *
+ * Pure helper — exported for unit tests.
+ */
+export interface VerifyAfterWriteGateInput {
+  /** Run's model identifier — used to detect free-tier. */
+  model: string | null | undefined
+  /** Task complexity from `analyzeTaskComplexity`. */
+  complexity: "simple" | "medium" | "complex" | null | undefined
+  /** How many files this chunk wrote (write_file + edit_file + batch_write). */
+  filesWrittenInChunk: number
+  /** Resolved value of `quality.force_verify_after_write`. */
+  flagEnabled: boolean
+}
+
+export function shouldForceVerifyAfterWrite(input: VerifyAfterWriteGateInput): boolean {
+  if (!input.flagEnabled) return false
+  // Nothing to verify — no writes happened this chunk.
+  if (input.filesWrittenInChunk <= 0) return false
+  // Free-tier always gets the block — the failure modes are worst here.
+  if (isFreeTierModel(input.model)) return true
+  // Paid tier: only on real chunks (≥ 3 files) AND non-trivial complexity.
+  // Single-file edits on simple tasks don't need the ceremony.
+  if (input.filesWrittenInChunk < 3) return false
+  if (input.complexity !== "medium" && input.complexity !== "complex") return false
+  return true
+}
+
+/**
  * Iterative paragraph chain mode (paragraph-by-paragraph reasoning).
  *
  * User feedback that drove this: *"reason it one by one → call llm →
