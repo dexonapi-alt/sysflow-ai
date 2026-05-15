@@ -2,6 +2,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { spawn } from "node:child_process"
 import { emitAgent, isInkActive } from "./events.js"
+import { getShellInvocation } from "./shell.js"
 
 // ─── Web Search ───
 
@@ -549,14 +550,17 @@ const SEARCH_EXCLUDE_DIRS = [
 export async function searchCodeTool(directory: string, pattern: string): Promise<string[]> {
   return new Promise((resolve) => {
     const isWindows = process.platform === "win32"
-    const shell = isWindows ? "cmd.exe" : "/bin/sh"
 
-    // Use PowerShell on Windows for proper directory exclusion
-    // Use grep with --exclude-dir on Linux/Mac
+    // Pre-Windows-shell-fix this branch spawned cmd.exe and then
+    // invoked PowerShell as a nested process to do the actual work.
+    // The outer wrapper isn't needed anymore — `getShellInvocation`
+    // already routes to PowerShell directly on Windows, so the inner
+    // command can be the PowerShell expression itself without the
+    // `powershell -NoProfile -Command "..."` indirection.
     const cmd = isWindows
-      ? `powershell -NoProfile -Command "Get-ChildItem -Path '.' -Recurse -File -Include *.ts,*.tsx,*.js,*.jsx,*.json,*.prisma,*.css,*.html,*.md ${SEARCH_EXCLUDE_DIRS.map(d => `| Where-Object { $_.FullName -notmatch '\\\\${d}\\\\' }`).join(" ")} | Select-String -Pattern '${pattern.replace(/'/g, "''")}' -List | ForEach-Object { $_.Path + ':' + $_.LineNumber + ':' + $_.Line.Trim() }"`
+      ? `Get-ChildItem -Path '.' -Recurse -File -Include *.ts,*.tsx,*.js,*.jsx,*.json,*.prisma,*.css,*.html,*.md ${SEARCH_EXCLUDE_DIRS.map(d => `| Where-Object { $_.FullName -notmatch '\\\\${d}\\\\' }`).join(" ")} | Select-String -Pattern '${pattern.replace(/'/g, "''")}' -List | ForEach-Object { $_.Path + ':' + $_.LineNumber + ':' + $_.Line.Trim() }`
       : `grep -rn "${pattern}" "${directory}" --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" --include="*.json" --include="*.prisma" --include="*.css" --include="*.html" ${SEARCH_EXCLUDE_DIRS.map(d => `--exclude-dir="${d}"`).join(" ")} -l`
-    const shellArgs = isWindows ? ["/c", cmd] : ["-c", cmd]
+    const { shell, args: shellArgs } = getShellInvocation(cmd)
 
     const child = spawn(shell, shellArgs, { cwd: directory })
     let stdout = ""
@@ -745,9 +749,10 @@ export async function runCommandTool(
   // We forward output to the terminal AND watch for dev server startup (to auto-kill).
   if (isInteractive) {
     return new Promise((resolve, reject) => {
+      const { shell, args: shellArgs } = getShellInvocation(trimmed)
+      // Still need the platform flag for `taskkill` on the timeout
+      // path further down — separate concern from shell selection.
       const isWindows = process.platform === "win32"
-      const shell = isWindows ? "cmd.exe" : "/bin/sh"
-      const shellArgs = isWindows ? ["/c", trimmed] : ["-c", trimmed]
 
       console.log("") // blank line before interactive output
 
@@ -876,9 +881,7 @@ export async function runCommandTool(
 
   // Normal commands: capture output
   return new Promise((resolve, reject) => {
-    const isWindows = process.platform === "win32"
-    const shell = isWindows ? "cmd.exe" : "/bin/sh"
-    const shellArgs = isWindows ? ["/c", trimmed] : ["-c", trimmed]
+    const { shell, args: shellArgs } = getShellInvocation(trimmed)
 
     const child = spawn(shell, shellArgs, { cwd, env: { ...process.env, FORCE_COLOR: "0" } })
 
