@@ -211,6 +211,81 @@ describe("recordRunSummary", () => {
     expect(entry.reasonerBackend).toBeNull()
   })
 
+  // ─── Stage 5 of llm-iterative-intent-classification: intentClassificationSource ───
+
+  it("persists intentClassificationSource when supplied", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-ic-src-1",
+      prompt: "build a postgres-backed API",
+      model: "openrouter-auto",
+      durationMs: 1_000,
+      stepCount: 1,
+      toolCount: 1,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      intentClassificationSource: "chain",
+    })
+    const [entry] = await readEntries()
+    expect(entry.intentClassificationSource).toBe("chain")
+  })
+
+  it("persists each known intentClassificationSource value", async () => {
+    for (const source of ["cache", "regex_simple", "regex_fallback", "chain"] as const) {
+      await recordRunSummary(tmp, {
+        runId: `r-ic-src-${source}`,
+        prompt: "x",
+        model: "openrouter-auto",
+        durationMs: 1,
+        stepCount: 0,
+        toolCount: 0,
+        errorCount: 0,
+        estimatedInputTokens: 0,
+        estimatedOutputTokens: 0,
+        terminalReason: "completed",
+        intentClassificationSource: source,
+      })
+    }
+    const entries = await readEntries()
+    expect(entries.map((e) => e.intentClassificationSource)).toEqual(["cache", "regex_simple", "regex_fallback", "chain"])
+  })
+
+  it("emits intentClassificationSource=null on legacy runs (field omitted)", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-ic-src-legacy",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+    })
+    const [entry] = await readEntries()
+    expect(entry.intentClassificationSource).toBeNull()
+  })
+
+  it("preserves explicit intentClassificationSource=null", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-ic-src-null",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      intentClassificationSource: null,
+    })
+    const [entry] = await readEntries()
+    expect(entry.intentClassificationSource).toBeNull()
+  })
+
   it("emits divergenceConfidenceAvg=null when no snapshots were observed but other counters are present", async () => {
     await recordRunSummary(tmp, {
       runId: "r-aw3",

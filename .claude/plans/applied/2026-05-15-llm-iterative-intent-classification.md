@@ -1,7 +1,7 @@
 # LLM-driven iterative intent classification (replace the brittle regex)
 
 - **Created:** 2026-05-15
-- **Status:** draft
+- **Status:** implemented (2026-05-15)
 - **Scope:** Replace `intent-classifier.ts`'s regex-based hint with an LLM-driven **iterative paragraph chain** that uses the same self-directing-depth pattern already shipped for preflight reasoning (`runIterativeChain` in `task-reasoner.ts`). Each iteration is a short Flash call producing ONE senior-engineer-flavoured paragraph (whys, trade-offs, end-to-end check, double-check) + a `done` flag the LLM ITSELF raises when it's ready to commit. The depth is **adaptive**: trivial prompts commit after 1 iteration, ambiguous ones keep reasoning (up to MAX_ITERATIVE_STEPS = 6). The regex stays as the fast-path for obvious cases + the fallback when no reasoner backend is available.
 
 ## Goal
@@ -277,3 +277,25 @@ Because some prompts are genuinely ambiguous. *"make this faster"* could be impl
 ### Why max 6?
 
 Matches `MAX_ITERATIVE_STEPS` for the preflight chain. Six paragraphs is more than any genuinely ambiguous classification needs; runs past 4 are a smell. Telemetry on `iterations` distribution will inform whether to lower the default.
+
+## Completion notes
+
+Shipped across three PRs:
+
+- **PR #84** — Stages 1+2: pipeline + schema + orchestrator + tests. The `intent_classification` PipelineKind, `INTENT_CLASSIFICATION_SYSTEM_PROMPT` with the senior-engineer rubric, `classifyIntentByChain(payload, callBackend?)`, Zod schema for per-iteration shape, 26 tests. Foundation only — not wired.
+- **PR #85** — Stages 3+4: per-run cache + async wiring. `services/intent-cache.ts`, `classifyIntentSmart` walks cache → regex fast-path → LLM chain → regex fallback. `getCachedIntentOrRegex` sync helper for `tool-result.ts` + `pickPipeline`. Flag `reasoning.intent_classification_via_llm_enabled` (default true). Terminal cleanup wired. 22 new tests. The chain is now live in production.
+- **PR #86 (this PR)** — Stages 5+6: telemetry + KB + plan archive. `ClientResponse.intentClassificationSource` + `intentClassificationParagraphs` fields; CLI captures source into `RunSummary` (writes to `usage.jsonl`) and emits a `reasoning_brief` event with the chain paragraphs so `<ReasoningPeek>`'s plain-prose render path (PR #83) surfaces them. Two more flags (`intent_classification_max_iterations` default 6, `intent_classification_fast_path_regex_enabled` default true). 4 new usage-log tests.
+
+**Deviations from the plan:**
+
+- Stage 4 missed the flag registration for `reasoning.intent_classification_via_llm_enabled` in `flags.ts` (the classifier read it via `getFlag` wrapped in try/catch defaulting to true, so the system worked, but the flag wasn't visible to operators via `listFlags`). Caught + fixed in this PR (Stage 5) along with the new flags.
+- Original plan had per-stage gates (Stage 1 always / Stage 2 on MEDIUM / Stage 3 free-tier). Refined during planning to **self-directing depth** — the LLM owns the `done` flag instead of hand-coded gates. Mirrors `runIterativeChain` for preflight. Better fit because the LLM decides per-prompt whether it needs another pass.
+- The plan suggested putting `intentClassificationBriefSchema` in `reasoning-schema.ts` discriminated union. Instead kept the schema local to `intent-classifier.ts` — intent classification doesn't flow through the same `reasoningBrief` surface as preflight pipelines (the chain's paragraphs go on a separate `intentClassificationParagraphs[]` field on `ClientResponse`, surfaced via its own `reasoning_brief` event with `kind: "intent_classification"`).
+- Cli surfacing of the chain paragraphs reuses the existing `reasoning_brief` event mechanism rather than introducing a new event type. `<ReasoningPeek>`'s `formatBriefSummary` already prefers `briefData.reasoningChain[]` paragraphs (PR #83) — the chain paragraphs surface for free.
+
+**Knowledge entries captured:**
+
+- `architecture.md: ## LLM-driven intent classification` — diagram + flow + senior-engineer rubric + per-run cache + ReasoningPeek surfacing + key files
+- `decisions.md: ## Why LLM intent classification beats regex + what the fallback looks like` — pre-plan failure modes + why iterative chain over single-shot LLM / regex / ML classifier + the fallback rule + rejected alternatives + when to revisit
+
+**Numbers:** server **733/733** + cli **373/373** passing across all three PRs. Three flags registered, fully wired into `classifyIntentSmart`. Compound-noun trap (the originally-reported POS-app misclassification) is now structurally impossible — telemetry will confirm `intentClassificationSource: "chain"` for the affected prompts.

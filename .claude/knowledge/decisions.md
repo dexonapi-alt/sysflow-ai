@@ -256,6 +256,43 @@ We chose (2). `confidence-tracker.ts` re-exports `isFreeTierModel` and `FREE_MOD
 
 The discipline: when a future stage wants to adapt for free-tier, it adds either a constant or a pure helper to `free-tier-policy.ts` and the call site reads from there. No raw `isFreeTierModel(...)` checks in handlers — they should always be inside a policy helper.
 
+## Why LLM intent classification beats regex + what the fallback looks like
+
+- **Source:** plan `applied/2026-05-15-llm-iterative-intent-classification.md`
+
+Intent classification is the single most-load-bearing routing decision in the system — it drives the preflight pipeline pick, Phase 18's taskPlan emission gate, and Phase 19's cli render gate. A misclassification cascades. The pre-plan synchronous regex hit the same failure repeatedly:
+
+- Feature-list nouns containing `error` / `fail` / `exception` / `crash` tripped the BUG_PATTERNS regex on build prompts that mentioned *"error handling"*, *"failure recovery"*, *"exception middleware"*. PR #82's implement-anchor regex band-aided this for prompts that START with a build verb, but compound nouns inside the prompt body kept biting.
+- The regex has no understanding of CONTEXT: *"explain why this throws an error"* (summary) vs *"the auth service throws an error on login"* (bug) both look the same to `\berror\b`.
+
+The LLM with iterative paragraph reasoning fixes the underlying problem instead of patching specific cases:
+
+**Why the iterative chain beats both single-shot LLM and the regex:**
+
+1. **Single-shot LLM**: one call per classification. Burns Flash on every prompt — including obvious ones. No revisitation.
+2. **Iterative paragraph chain (chosen)**: LLM owns its own depth via `done` flag. Trivial prompts settle in 1 iteration. Genuinely ambiguous prompts (mixed verbs, *"make this faster"* could be optimisation or regression) trigger 2-3 iterations where each paragraph addresses the open question from the prior one. Senior-engineer rubric forces structured thinking (restate / why this vs alternatives / trade-offs / end-to-end / double-check / decide). Same pattern that already proved out for preflight reasoning (`runIterativeChain` in `task-reasoner.ts`).
+3. **Regex (kept as fast-path + fallback)**: still cheap, still synchronous, still correct for the easy cases (`/continue`, `ls src`). The regex catches obvious classes; the LLM catches everything else.
+
+**The fallback rule: regex is the safety net, not the primary path.**
+
+When the chain returns `null` — no reasoner backend available, parse failure, chain ran to the cap without committing — the smart classifier returns the regex's result with `source: "regex_fallback"`. The system NEVER blocks on intent classification; the regex is the last-resort default that ALWAYS yields some hint. This is the same defense-in-depth shape Phase 16 used (`pickReasonerBackend` returns null → legacy single-turn flow).
+
+**Per-run cache makes the LLM cost bounded.**
+
+Classification fires ONCE per run. The first turn goes through the smart classifier (potentially 1-6 Flash iterations); every subsequent turn (tool-result responses, pickPipeline calls) reads from the cache. Total Flash spend per run for classification: ~1 call on average, capped at 6 on the ambiguous tail. Telemetry (`intentClassificationSource` in usage.jsonl) shows the distribution so operators can tune the depth cap or fast-path flag.
+
+**Rejected alternatives:**
+
+1. **Drop the regex entirely.** Tempting for simplicity but breaks every existing sync caller (`pickPipeline` in `task-reasoner.ts` is invoked from many places inside the reasoning module and going async would cascade). Also kills the fallback path — runs with no API keys would have no classification at all.
+2. **Stack two regexes (current + a "secondary" one that catches the compound-noun trap).** That's exactly what PR #82's implement-anchor regex did. It works for SOME cases but each new trap requires a new regex; the trap surface grows with each new compound-noun construction the user uses. The LLM closes the surface structurally.
+3. **Train a small ML classifier (fastText / equivalent) for intent.** More accurate than regex, but adds a new dependency + training pipeline + model file. The LLM is already in the system; reusing it for one more decision is leaner.
+4. **Make the chain mandatory (no fallback).** Bricks every install without a configured API key, including the test suite that runs without env. Fallback is non-negotiable.
+
+**When to revisit:**
+
+- If `intentClassificationSource` telemetry shows `regex_fallback` rate > 10% of runs, the LLM path is degrading more often than it should. Investigate which backend is failing.
+- If `intent_classification_max_iterations` flag value gets bumped above 6 by an operator, the LLM is iterating too long — the rubric needs tightening to push more aggressive commits in paragraph 1.
+
 ## TaskPlan emission gates on intent + complexity (server-side companion to the cli render gate)
 
 - **Source:** plan `applied/2026-05-07-phase-18-pre-task-deep-reasoning-and-complexity.md` (Stage 5)

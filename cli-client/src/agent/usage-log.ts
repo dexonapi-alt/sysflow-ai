@@ -60,6 +60,13 @@ export interface RunSummary {
    *  plan: ≥ 2 for non-trivial implement/bug runs, ~0 for trivial
    *  one-line fixes (the LLM should skip investigation for obvious work). */
   investigationCommandsCount?: number
+  /** Stage 5 of llm-iterative-intent-classification: which
+   *  classification path resolved the run's intent. See
+   *  `server/src/types.ts: ClientResponse.intentClassificationSource`
+   *  for the value semantics. Captured on the first response that
+   *  carries it (constant for the run); null on legacy runs where
+   *  the server hasn't shipped the field yet. */
+  intentClassificationSource?: "cache" | "regex_simple" | "regex_fallback" | "chain" | null
 }
 
 const PROMPT_PREVIEW_CHARS = 200
@@ -99,6 +106,11 @@ export async function recordRunSummary(sysbasePath: string | undefined | null, s
     // → no investigation observed) since the cli always counts when
     // the field flows.
     investigationCommandsCount: summary.investigationCommandsCount ?? 0,
+    // Stage 5 of llm-iterative-intent-classification. Null sentinel
+    // on runs where the server didn't ship the field (legacy or pre-
+    // Stage-4) so jq / analysis tools can distinguish "no signal"
+    // from "field not logged".
+    intentClassificationSource: summary.intentClassificationSource ?? null,
   }
   try {
     await fs.appendFile(file, JSON.stringify(entry) + "\n", "utf8")
