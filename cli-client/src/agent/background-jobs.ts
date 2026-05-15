@@ -13,6 +13,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process"
+import { getShellInvocation } from "./shell.js"
 import crypto from "node:crypto"
 
 export type JobStatus = "running" | "done" | "failed"
@@ -85,9 +86,7 @@ export function start(args: StartArgs): JobState {
     throw new Error(`Too many concurrent background jobs for this run (${running.length}/${MAX_CONCURRENT_PER_RUN}). Wait for one to finish or call check_jobs to see them.`)
   }
 
-  const isWindows = process.platform === "win32"
-  const shell = isWindows ? "cmd.exe" : "/bin/sh"
-  const shellArgs = isWindows ? ["/c", args.command] : ["-c", args.command]
+  const { shell, args: shellArgs } = getShellInvocation(args.command)
 
   const child = spawn(shell, shellArgs, {
     cwd: args.cwd,
