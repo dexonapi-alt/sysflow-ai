@@ -489,3 +489,68 @@ Free-tier runs use tighter chunk caps: `max_chunks_per_run` × 0.7 (12 → 8 chu
 - The cap is a runaway-loop guard, not a quality dial. 8 chunks of 4 files each = 32 files in flight, which matches what a free-tier run typically completes within the affordability ceiling (~15k tokens — see existing *Free-tier OpenRouter affordability ceiling is ~15k tokens* in `gotchas.md`).
 
 When this needs to evolve: if telemetry shows free-tier runs frequently hitting the 8-chunk cap with incomplete output, the right move is splitting via more aggressive chunk_plan boundaries, not raising the cap.
+
+## Error reasoning is an iterative chain, not a single-shot LLM call
+
+- **Source:** plan `applied/2026-05-15-forced-error-reasoning-and-recovery.md` (Stage 1+2)
+
+When a tool errors, the error reasoner runs an iterative paragraph chain (1-4 Flash calls, LLM owns the `done` flag) — not the single-shot `bugBrief` Phase 5 produces. The structured `bugBrief` shape (`symptom / suspectedBoundary / proposedFix`) stays for downstream consumers (divergence detector, bug_pattern memory) but is no longer the primary recovery artifact.
+
+**Why iterative:**
+
+1. **Errors are ambiguous on the first read.** `'ls' is not recognized` could be platform (cmd.exe vs PowerShell), missing PATH, wrong cwd, or a typo. Single-shot forces the model to commit on one hypothesis; iterative lets it surface the question another iteration would answer (`done: false` + the specific follow-up).
+2. **Paragraphs surface in `<ReasoningPeek>`.** PR #83's plain-prose render path takes `reasoningChain[]` and shows it above the next command. Senior-engineer paragraphs are readable; a structured `bugBrief` is operational metadata, not deliberation. The user feedback that prompted this plan was about the agent NOT REASONING; surfacing paragraphs directly addresses that.
+3. **Composes with `priorRecall`.** When `error_pattern` memory has a match, the chain's first iteration sees the prior fix and can confirm or revise. A single-shot LLM would either always trust the memory (overfitting) or never see it (uncomposed).
+
+**Alternatives rejected:**
+
+- *Single-shot structured `bugBrief` only* — what Phase 5 shipped. The user-reported failure mode is exactly that the brief was ignored. More forceful injection didn't help; the underlying problem is the model needs to deliberate, not consume a verdict.
+- *Retry with the same prompt + nudge* — the agent's prompt is already the same; nudging doesn't change the deliberation. We needed a separate Flash-class call that ONLY thinks about the error.
+- *Restructure the on_error bug pipeline to be iterative* — would have entangled error reasoning with the existing chunk_reflect / divergence pipelines. Keeping `error_reasoning` as its own pipeline kind lets it evolve independently.
+
+The structured `bugBrief` stays because the divergence detector + bug_pattern memory need stable fields. Iterative paragraphs are the new live-recovery artifact; bug_pattern persistence happens via the existing path (`recordBugPattern`) when consecutive errors hit ≥ 2.
+
+## INJECT + REJECT pairs replace prompt-level "please reason about errors"
+
+- **Source:** plan `applied/2026-05-15-forced-error-reasoning-and-recovery.md` (Stage 3+4)
+
+Forcing the agent to acknowledge a tool error is a two-step mechanical pattern, not a prompt rewrite. Stage 3 INJECTS the `═══ ERROR — REASON THROUGH THIS ═══` block at the END of the tool-result body (last thing the model reads before its response window). Stage 4 REJECTS responses that ignore it via `validateErrorAcknowledgement` + a reject-prompt re-call loop capped at 3 rejections per error.
+
+**Why INJECT alone isn't enough:**
+
+The block is the *most attention-relevant position* in the prompt, but free-tier models still skim past it ~25-30% of the time in observed runs. The block tells the agent what to do; the validator catches the case where the agent didn't do it. Same shape as Phase 15's confirmation gate (PR #75) — soft pressure + hard veto, composing.
+
+**Why the validator is token-overlap, not LLM-judged:**
+
+A second LLM call to judge whether the response engaged with the error would double-fire cost on every error turn AND introduce a different failure mode (judge model hallucinating that engagement happened). The 25% token-overlap threshold against the error vocab + rootCause is cheap, deterministic, and tuned conservatively — false-positive rejections (validator says "no ack" when there was) are caught by the 3-rejection cap. False-negative passes (validator says "ack happened" when it didn't) are caught by Phase 11 awareness's `same_action_repeated_in_session` heuristic on the next turn.
+
+**Why 3 rejections, not 1 or 10:**
+
+- 1 is too brittle — a one-paragraph reasoning chain can fail the overlap check by chance.
+- 10 livelocks the run on a model that can't recover (free-tier sometimes hits a confidence cliff).
+- 3 matches the existing `MAX_COMPLETION_REJECTIONS` cap (Phase 15) so operators have one number to internalise.
+
+**Why the validator is server-side, not in the model adapter:**
+
+The adapter is provider-agnostic plumbing. The validator needs the prior error context, the chain's `rootCause`, and the per-run rejection state — all server-side concerns. Keeping it in `tool-result.ts` colocates the soft pressure (inject) and hard veto (reject) so they evolve together.
+
+## Error pattern memory records `run_command` only for v1
+
+- **Source:** plan `applied/2026-05-15-forced-error-reasoning-and-recovery.md` (Stage 5)
+
+`recordErrorPattern` only mines `run_command` failures-and-recoveries. `write_file`, `edit_file`, and `batch_write` recoveries are NOT recorded even though they could fail and recover similarly.
+
+**Why:**
+
+1. **`run_command` is the canonical case.** The user-reported failure (`ls -R` on Windows) is a shell-command portability issue. The fix (Windows equivalent vs Unix) is reusable across runs because shell flavour is stable per-machine. Recording it pays off immediately.
+2. **File-write recoveries are too heterogeneous.** `write_file('src/foo.ts', ...)` failed → `write_file('src/foo/index.ts', ...)` worked is rarely "the same pattern next time" — paths are project-specific. Recording each one is noise.
+3. **The recall scoring assumes one platform per signature.** Shell signatures are stable across runs on the same OS; file-system signatures (EACCES, ENOENT) vary too much by absolute path to score reliably.
+4. **Memory entries cost space + recall time.** Phase 8's compaction caps the file at 100 KB. Filling it with low-signal write-recoveries pushes useful entries (preferences, decisions, original_intent) toward eviction.
+
+Future stages can expand the recorder per tool kind when telemetry shows a class of recoveries that recurs (e.g. `npm install` failures with a specific node version → workaround). The schema doesn't need changing — `failedTool` + `errorClass` are already discriminators in the entry's content.
+
+**Alternatives rejected:**
+
+- *Record every tool failure regardless of recovery* — defeats the purpose. The signal is "this fix worked", not "this thing failed".
+- *Auto-execute the recalled fix* — too risky. The model decides; the recall just surfaces the prior fix to the reasoner. Removing model agency on retries would compound a stale memory into a wrong action.
+- *Cross-machine memory sync* — explicitly out of scope. Per-platform signatures are inherently per-machine; cross-syncing would require a normalisation layer that has no obvious right answer (PowerShell vs cmd.exe semantics differ even within Windows).

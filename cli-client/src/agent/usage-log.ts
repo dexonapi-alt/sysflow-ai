@@ -75,6 +75,19 @@ export interface RunSummary {
    *    `null`            — no error fired this run, OR the run is
    *                        from before this telemetry field shipped. */
   errorReasoningSource?: "chain" | "bug_fallback" | null
+  /** Stage 6 of forced-error-reasoning plan: per-run count of error-
+   *  reasoning chain invocations. Each tool error that fires the
+   *  chain (whether the chain commits or falls back) increments this.
+   *  Defaults to 0 on runs without errors so jq distributions don't
+   *  need a null check. */
+  errorReasoningEvents?: number
+  /** Stage 6: peak per-run count of Stage 4 error-acknowledgement
+   *  rejections. Reflects how often the model needed a stronger
+   *  reject-prompt to engage with a prior tool error. Capped at
+   *  `MAX_ERROR_ACK_REJECTIONS` (3) per error; sustained high values
+   *  here on free-tier runs suggest the Stage 3 inject block isn't
+   *  carrying enough weight. Defaults to 0. */
+  errorAcknowledgementRejections?: number
 }
 
 const PROMPT_PREVIEW_CHARS = 200
@@ -123,6 +136,11 @@ export async function recordRunSummary(sysbasePath: string | undefined | null, s
     // where no error fired (most runs) so the distribution of `chain`
     // vs `bug_fallback` is countable.
     errorReasoningSource: summary.errorReasoningSource ?? null,
+    // Stage 6 of forced-error-reasoning plan. Defaults to 0 (omitted
+    // → no error reasoner fired this run) since a chain invocation
+    // always increments client-side when observed.
+    errorReasoningEvents: summary.errorReasoningEvents ?? 0,
+    errorAcknowledgementRejections: summary.errorAcknowledgementRejections ?? 0,
   }
   try {
     await fs.appendFile(file, JSON.stringify(entry) + "\n", "utf8")

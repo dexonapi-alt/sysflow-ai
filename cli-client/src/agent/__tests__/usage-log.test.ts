@@ -341,6 +341,47 @@ describe("recordRunSummary", () => {
     expect(entry.errorReasoningSource).toBeNull()
   })
 
+  // ─── Stage 6 of forced-error-reasoning-and-recovery: per-run counters ───
+
+  it("persists errorReasoningEvents + errorAcknowledgementRejections when supplied", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-er6-1",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1_000,
+      stepCount: 4,
+      toolCount: 6,
+      errorCount: 2,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      errorReasoningSource: "chain",
+      errorReasoningEvents: 2,
+      errorAcknowledgementRejections: 1,
+    })
+    const [entry] = await readEntries()
+    expect(entry.errorReasoningEvents).toBe(2)
+    expect(entry.errorAcknowledgementRejections).toBe(1)
+  })
+
+  it("defaults errorReasoningEvents + errorAcknowledgementRejections to 0 when omitted", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-er6-2",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+    })
+    const [entry] = await readEntries()
+    expect(entry.errorReasoningEvents).toBe(0)
+    expect(entry.errorAcknowledgementRejections).toBe(0)
+  })
+
   it("emits divergenceConfidenceAvg=null when no snapshots were observed but other counters are present", async () => {
     await recordRunSummary(tmp, {
       runId: "r-aw3",

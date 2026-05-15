@@ -1448,6 +1448,13 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
   if (errorReasoningSource) {
     response.errorReasoningSource = errorReasoningSource
   }
+  // Stage 6: surface the running rejection count so the CLI can
+  // capture max-observed in RunSummary.errorAcknowledgementRejections.
+  // Only set when a chain brief was produced this turn — otherwise the
+  // ack loop didn't run and the count is meaningless for this response.
+  if (errorReasoningChainBrief && incomingErrors.length > 0) {
+    response.errorAckRejectionCount = errorAcknowledgementRejections.get(body.runId) ?? 0
+  }
   // Phase 10: surface the chunk briefs so the CLI can render the boundary.
   if (chunkPlanBrief) (response as unknown as Record<string, unknown>).chunkPlanBrief = chunkPlanBrief
   if (chunkReflectionBrief) (response as unknown as Record<string, unknown>).chunkReflectionBrief = chunkReflectionBrief

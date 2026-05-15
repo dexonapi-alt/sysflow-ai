@@ -456,6 +456,18 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   if (initialErrorSource === "chain" || initialErrorSource === "bug_fallback") {
     errorReasoningSourceLatest = initialErrorSource
   }
+  // Stage 6: per-run counters surfaced in RunSummary so usage.jsonl
+  // reflects how often error-reasoning fired and the peak number of
+  // ack-rejections any single error triggered.
+  let errorReasoningEventsThisRun = 0
+  if (initialErrorSource === "chain" || initialErrorSource === "bug_fallback") {
+    errorReasoningEventsThisRun = 1
+  }
+  let errorAckRejectionsPeak = 0
+  const initialAckCount = (response as Record<string, unknown>).errorAckRejectionCount
+  if (typeof initialAckCount === "number" && initialAckCount > 0) {
+    errorAckRejectionsPeak = initialAckCount
+  }
   // Resolve the task-display-selective flag once for the run — toggling
   // mid-run isn't a supported flow.
   const taskDisplaySelective = await getTaskDisplaySelective()
@@ -591,6 +603,8 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       investigationCommandsCount,
       intentClassificationSource,
       errorReasoningSource: errorReasoningSourceLatest,
+      errorReasoningEvents: errorReasoningEventsThisRun,
+      errorAcknowledgementRejections: errorAckRejectionsPeak,
     })
     unregisterSpinner()
   }
@@ -789,6 +803,17 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         const ers = (response as Record<string, unknown>).errorReasoningSource
         if (ers === "chain" || ers === "bug_fallback") {
           errorReasoningSourceLatest = ers
+          // Stage 6: count every observation as one "error reasoning
+          // event" — captures both chain commits and bug-fallback paths
+          // for the per-run RunSummary.
+          errorReasoningEventsThisRun += 1
+        }
+        // Stage 6: capture peak Stage 4 rejection count for telemetry.
+        // Server surfaces a running count; we keep the max so a brief
+        // server hiccup that resets the counter doesn't undercount.
+        const ackCount = (response as Record<string, unknown>).errorAckRejectionCount
+        if (typeof ackCount === "number" && ackCount > errorAckRejectionsPeak) {
+          errorAckRejectionsPeak = ackCount
         }
         // Stage E of model-lock-and-portable-reasoning: capture the
         // backend if it wasn't surfaced on the very first response
