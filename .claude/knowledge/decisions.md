@@ -554,3 +554,68 @@ Future stages can expand the recorder per tool kind when telemetry shows a class
 - *Record every tool failure regardless of recovery* — defeats the purpose. The signal is "this fix worked", not "this thing failed".
 - *Auto-execute the recalled fix* — too risky. The model decides; the recall just surfaces the prior fix to the reasoner. Removing model agency on retries would compound a stale memory into a wrong action.
 - *Cross-machine memory sync* — explicitly out of scope. Per-platform signatures are inherently per-machine; cross-syncing would require a normalisation layer that has no obvious right answer (PowerShell vs cmd.exe semantics differ even within Windows).
+
+## Project-init reasoning is a separate pipeline, not folded into preflight
+
+- **Source:** plan `applied/2026-05-15-agent-runtime-fixes-and-project-init-reasoning.md` (Stage 1)
+
+Repo-shape classification (`empty / small / existing-small / existing-large`) lives in its own `project_init` pipeline that fires BEFORE the preflight reasoner. It is NOT a sub-step of preflight, NOT extracted from the implement-brief's metadata, and NOT inferred from the directory tree at prompt-build time.
+
+**Why:**
+
+1. **Different concerns.** Preflight asks *"what should we build and how"*. Project-init asks *"what is on disk RIGHT NOW"*. Mixing them dilutes each — preflight's iterative chain currently has six rubric steps, none of which classify the repo. Adding a seventh step would push the chain past the cap on most runs.
+2. **Different consumers.** Preflight feeds the main model's prompt. Project-init feeds *both* the main model's prompt (via the PROJECT STATE block) AND the action-planner's skip list (via `setConfigSkipList`). Two distinct downstream wirings.
+3. **Different cache shape.** Preflight cache keys on `(prompt, model, sysbasePath)`. Project-init cache keys on `sha256(sortedFileList)` — same prompt + same repo state → same brief, even across different prompts. Merging the cache logic would force one cache to do two jobs.
+4. **Different default action on null.** Preflight null falls through to the legacy single-pass code path. Project-init null falls through to *no skip list* (action-planner still hijacks). The fallback semantics differ; embedding in preflight would entangle them.
+
+**Alternatives rejected:**
+
+- *Add a `repoState` field to the existing implement brief* — would have meant teaching every implement-brief consumer (recordImplementSummary, divergence detector, etc.) about the new field. Net loss vs a clean new pipeline.
+- *Detect repo state purely from heuristics (file count threshold + manifest presence)* — heuristics work for the obvious cases but miss monorepos (root looks empty, packages/ has everything) and stub projects (a single README + .gitignore could be either). The LLM call lets the rare case get the right answer.
+- *Defer until the agent encounters confusion* — too late. The action-planner's config-search hijack fires on the FIRST tool call. The classification has to be available before any tool runs.
+
+## 0-hit web search is a recovery situation, not a success
+
+- **Source:** plan `applied/2026-05-15-agent-runtime-fixes-and-project-init-reasoning.md` (Stage 2)
+
+A `web_search` returning an empty `results: []` array is now treated as a tool error with category `web_search_empty` — not a success. The cli executor stamps `_errorCategory: "web_search_empty"` + a recovery hint on the result, and the existing Stage 3/4 error-reasoning chain catches retries.
+
+**Why:**
+
+The user's failure repro:
+
+> ▸ search web "tsconfig.json configuration 2026"
+> ● WebSearch — 0 hits
+> │ No tsconfig.json configuration data was found in the search results. Please provide the desired configuration details or a source link.
+
+Treating 0 hits as a success leaves the agent reading an empty `results` array and synthesising its own conclusion (here: "halt with a 'please provide' message"). The agent didn't know that 0 hits is a recoverable situation — it had no hint that *"use best-practice defaults"* or *"reformulate"* were valid pivots.
+
+**Alternatives rejected:**
+
+- *Silent 0 hits as a success the agent has to interpret* — what we shipped before. Demonstrated to dead-end.
+- *Retry-with-fallback-query automatically* — too magic. The model might want to retry, or to skip, or to give up on the verification entirely (best-practice defaults often suffice). Hardcoding a retry removes that agency.
+- *Suppress `web_search` entirely on empty results* — would mean the cli silently fails the tool call, which is worse than surfacing the 0-hit and letting the model decide.
+- *Add a new tool category `web_search_recovery`* — over-engineered. The existing error-classification taxonomy already has the `_errorCategory` mechanism; adding one more enum value with one more hint reuses all the existing plumbing.
+
+The hint surfaces THREE recovery options (reformulate / use defaults / NEVER halt) so the model has to pick one. The Stage 4 ack-validator catches same-query retries and rejects them — the model can't satisfy the gate by repeating the failed query verbatim.
+
+## Reasoning peek truncates by default; `r` toggles full view
+
+- **Source:** plan `applied/2026-05-15-agent-runtime-fixes-and-project-init-reasoning.md` (Stage 3)
+
+ReasoningPeek renders at most `MAX_PARAGRAPH_LINES = 3` paragraphs, each capped at `MAX_PARAGRAPH_CHARS = 180`. The user can press `r` (or `Ctrl+R`) to expand to the full chain.
+
+**Why not show everything by default:**
+
+1. **Screen real estate.** A 5-paragraph chain at full length pushes 20+ lines of muted text above the spinner. The peek is meant to be a glance, not a wall.
+2. **Tool cards + reasoning peek + spinner together** already eat a meaningful chunk of the visible region. Truncated by default keeps the active turn visible.
+3. **Power-user signal.** Expanding the peek is a tell that the user is actively debugging. Telemetry on `RunSummary.reasoningPeekExpansions` over time tells us whether the truncation cap is right — high values = users need more context per glance.
+
+**Why `r` instead of `Tab` / `Space` / `Enter`:**
+
+- `Tab` / `Enter` are reserved by the text input field for autocompletion and submission.
+- `Space` would conflict with normal typing.
+- `r` is mnemonic for "reasoning" and doesn't collide with anything else Ink-side.
+- `Ctrl+R` is added as an alias because the user explicitly asked for it. Some terminals capture `Ctrl+R` for reverse-search-history but in Ink mode the cli owns the input loop.
+
+**State resets on new brief emissions** so a fresh chain doesn't open in expanded mode unexpectedly. The user re-presses `r` if they want to see the new one. Tracked via `useRef(brief.key)` to avoid React's stale-closure trap.

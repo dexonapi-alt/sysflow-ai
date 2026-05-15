@@ -871,3 +871,65 @@ The four nets are **additive, not alternative**: chain produces the reasoning, i
   - `reasoning.error_reasoning_max_iterations` (default `4`) — chain depth cap
   - `quality.error_acknowledgement_rejection_enabled` (default `true`) — Stage 4 reject loop kill switch
   - `memory.error_pattern_recall_enabled` (default `true`) — Stage 5 recall + recorder kill switch
+
+## Project-init reasoning
+
+- **Source:** plan `applied/2026-05-15-agent-runtime-fixes-and-project-init-reasoning.md`
+
+Every implement-class run starts with a project-init iterative reasoner that classifies the working directory and emits guidance for the agent's FIRST move. Fires **before** the preflight reasoner — the rest of the run reads against the classified repo shape. Cures the user-reported behaviour where the agent demanded `tsconfig.json` in an empty directory and hard-stopped on a 0-hit web search.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  user_message                                                    │
+│       │                                                          │
+│       ▼                                                          │
+│  ingestDirectoryTree           (server context-manager)          │
+│       │                                                          │
+│       ▼                                                          │
+│  runProjectInitChain           (1-3 Flash iterations)            │
+│       │   classifies → { repoState, fileCount, keyMarkers,       │
+│       │                  investigationPlan[],                    │
+│       │                  skipConfigVerificationFor[],            │
+│       │                  confidence }                            │
+│       │   on null → falls back to today's behaviour              │
+│       ▼                                                          │
+│  setConfigSkipList             (when HIGH/MEDIUM + empty/small)  │
+│       │   action-planner's config-search hijack now skips        │
+│       │   the listed files (fresh scaffold = no verification)    │
+│       ▼                                                          │
+│  ═══ PROJECT STATE ═══         (prompt section, priority 104)    │
+│       │   repoState-specific guidance:                           │
+│       │     empty           → do NOT web-search authored configs │
+│       │     small           → read README + obvious config       │
+│       │     existing-small  → READ THE MANIFEST + relevant src   │
+│       │     existing-large  → MANDATORY: investigate before write│
+│       ▼                                                          │
+│  runReasoning (preflight)      (reads against PROJECT STATE)     │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Classification table:**
+
+| repoState | criteria | first-move expectation |
+|---|---|---|
+| `empty` | 0-1 entries OR only `.git/` | scaffold from scratch, no investigation reads of non-existent files |
+| `small` | 2-15 entries, no package manifest | read README + obvious config first |
+| `existing-small` | has manifest + < 50 source files | read manifest + relevant source before edits |
+| `existing-large` | has manifest + ≥ 50 source files OR monorepo | mandatory investigation; greenfield prompt = confirm via `_user_response` |
+
+**Files & flags:**
+
+- Pipeline + schema + orchestrator: `server/src/reasoning/project-init-reasoner.ts` + `pipelines/project-init-pipeline.ts`
+- Skip list machinery: `server/src/services/setup-intelligence.ts` (`setConfigSkipList` / `isConfigSkipped` / `detectConfigFile(path, runId)`)
+- Wiring: `server/src/handlers/user-message.ts` (fires AFTER `ingestDirectoryTree`, BEFORE preflight)
+- Prompt section: `server/src/providers/prompt/sections/project-state.ts`
+- Cli surface: `ClientResponse.projectInitParagraphs / projectInitRepoState / projectInitConfidence`
+- Telemetry: `RunSummary.projectInitRepoState / projectInitConfidence`
+- Flags:
+  - `quality.project_init_reasoning_enabled` (default `true`) — kill switch
+  - `reasoning.project_init_max_iterations` (default `3`) — chain depth cap
+
+**Composes with:**
+
+- Stage 2 (web search gating + 0-hit recovery): the project-init brief tells the agent which configs are being authored; the web_search tool description repeats the rule; the action-planner skip list mechanically enforces it. Three layers of pressure.
+- Stage 4 (per-turn directory refresh): when the agent later deletes files, the refreshed tree surfaces stale references via the `═══ DIRECTORY STATE CHANGED ═══` inject — the agent's mental model of the project shape stays current across turns.

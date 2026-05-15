@@ -286,6 +286,29 @@ function truncate(s: string, max: number): string {
   return s.slice(0, Math.max(0, max - 1)) + "…"
 }
 
+// ─── Stage 5 of agent-runtime-fixes plan: per-run expansion counter ───
+//
+// ReasoningPeek bumps this when the user toggles the expand state.
+// `agent.ts` reads it at terminal exit to thread into RunSummary, then
+// resets it for the next run via `resetReasoningPeekExpansions`. A
+// module-level counter is the cheapest way to bubble a component-local
+// signal up to the run-level telemetry without prop drilling through
+// the entire Ink tree.
+
+let _reasoningPeekExpansionsThisRun = 0
+
+export function getReasoningPeekExpansions(): number {
+  return _reasoningPeekExpansionsThisRun
+}
+
+export function resetReasoningPeekExpansions(): void {
+  _reasoningPeekExpansionsThisRun = 0
+}
+
+function bumpReasoningPeekExpansions(): void {
+  _reasoningPeekExpansionsThisRun += 1
+}
+
 export function ReasoningPeek({ brief }: Props): React.ReactElement {
   // Stage 3 of agent-runtime-fixes plan: expand toggle. Closes bug 7
   // (truncated reasoning with no way to see full context).
@@ -308,6 +331,10 @@ export function ReasoningPeek({ brief }: Props): React.ReactElement {
     // when focused, so this only fires while the input is empty / blurred.
     if ((input === "r" || input === "R") || (key.ctrl && input === "r")) {
       setExpanded((v) => !v)
+      // Stage 5 of agent-runtime-fixes plan: telemetry counter for
+      // RunSummary.reasoningPeekExpansions. Bumps on every toggle
+      // (expand AND collapse) since each is one user interaction.
+      bumpReasoningPeekExpansions()
     }
   })
 

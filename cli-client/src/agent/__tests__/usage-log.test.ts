@@ -402,4 +402,103 @@ describe("recordRunSummary", () => {
     const [entry] = await readEntries()
     expect(entry.divergenceConfidenceAvg).toBeNull()
   })
+
+  // ─── Stage 5 of agent-runtime-fixes plan: project-init + 0-hit + peek expansion telemetry ───
+
+  it("persists projectInitRepoState + projectInitConfidence when supplied", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-pi-1",
+      prompt: "build a node API",
+      model: "openrouter-auto",
+      durationMs: 1_500,
+      stepCount: 3,
+      toolCount: 5,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      projectInitRepoState: "empty",
+      projectInitConfidence: "HIGH",
+    })
+    const [entry] = await readEntries()
+    expect(entry.projectInitRepoState).toBe("empty")
+    expect(entry.projectInitConfidence).toBe("HIGH")
+  })
+
+  it("persists each known projectInitRepoState value", async () => {
+    for (const state of ["empty", "small", "existing-small", "existing-large"] as const) {
+      await recordRunSummary(tmp, {
+        runId: `r-pi-${state}`,
+        prompt: "x",
+        model: "openrouter-auto",
+        durationMs: 1,
+        stepCount: 0,
+        toolCount: 0,
+        errorCount: 0,
+        estimatedInputTokens: 0,
+        estimatedOutputTokens: 0,
+        terminalReason: "completed",
+        projectInitRepoState: state,
+        projectInitConfidence: "MEDIUM",
+      })
+    }
+    const entries = await readEntries()
+    expect(entries.map((e) => e.projectInitRepoState)).toEqual(["empty", "small", "existing-small", "existing-large"])
+  })
+
+  it("emits projectInitRepoState=null on legacy runs (field omitted)", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-pi-legacy",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+    })
+    const [entry] = await readEntries()
+    expect(entry.projectInitRepoState).toBeNull()
+    expect(entry.projectInitConfidence).toBeNull()
+  })
+
+  it("persists webSearchEmptyCount + reasoningPeekExpansions when supplied", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-ts-1",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1_000,
+      stepCount: 4,
+      toolCount: 6,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      webSearchEmptyCount: 2,
+      reasoningPeekExpansions: 5,
+    })
+    const [entry] = await readEntries()
+    expect(entry.webSearchEmptyCount).toBe(2)
+    expect(entry.reasoningPeekExpansions).toBe(5)
+  })
+
+  it("defaults webSearchEmptyCount + reasoningPeekExpansions to 0 when omitted", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-ts-2",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+    })
+    const [entry] = await readEntries()
+    expect(entry.webSearchEmptyCount).toBe(0)
+    expect(entry.reasoningPeekExpansions).toBe(0)
+  })
 })
