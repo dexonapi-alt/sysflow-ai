@@ -37,6 +37,7 @@ import { getFlag } from "../services/flags.js"
 import { detectDivergence, pickDivergenceAnchor, type DetectorInput } from "../services/divergence-detector.js"
 import { isSafeReadOnlyCommand } from "../services/safe-commands.js"
 import { applyLedgerUpdates, clearLedger } from "../services/task-ledger.js"
+import { clearReviewState } from "../services/self-review-scheduler.js"
 import { shouldRunDivergenceSecondLook, resolveMaxChunksPerRun, resolveMaxFilesPerChunk } from "../services/free-tier-policy.js"
 import { recordSignals as recordConfidenceSignals, clearConfidence, getConfidence, getConfidenceState, getThresholdState } from "../services/confidence-tracker.js"
 import { runVerificationGate, gateSignals } from "../services/verification-gate.js"
@@ -1174,6 +1175,11 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     // ledger on the same terminal path so a stale ledger doesn't bleed
     // into the next run from the same chat.
     clearLedger(body.runId)
+    // Stage 3 of free-tier quality enforcement: tear down per-run review
+    // cadence state too. Without this, the lastReviewAtChunk from the
+    // prior run would persist and the first review of the next run
+    // would fire at the wrong cadence.
+    clearReviewState(body.runId)
     lastLlmDivergenceCheckedChunk.delete(body.runId)
     awarenessCooldownChunks.delete(body.runId)
     lastDivergenceVerdict.delete(body.runId)

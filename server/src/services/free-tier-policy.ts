@@ -208,6 +208,22 @@ export function shouldForceVerifyAfterWrite(input: VerifyAfterWriteGateInput): b
 }
 
 /**
+ * Stage 3 of free-tier quality enforcement: how often should the agent
+ * pause for a forced self-review turn?
+ *
+ * Free-tier: every 2 chunks. Free models accumulate errors faster, so
+ * shorter cadence catches drift earlier.
+ *
+ * Paid: every 4 chunks. Less aggressive — paid models drift less but
+ * still benefit from periodic read-back.
+ *
+ * Pure helper.
+ */
+export function getSelfReviewCadence(model: string | null | undefined): number {
+  return isFreeTierModel(model) ? 2 : 4
+}
+
+/**
  * Iterative paragraph chain mode (paragraph-by-paragraph reasoning).
  *
  * User feedback that drove this: *"reason it one by one → call llm →

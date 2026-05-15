@@ -159,6 +159,18 @@ defineFlag("reasoning.iterative_refine_enabled", true, parseBool)
 // specific run.
 defineFlag("quality.force_verify_after_write", true, parseBool)
 
+// ─── Stage 3 of free-tier quality enforcement plan ───
+// When true (default), every N chunks the system injects a
+// `═══ REVIEW REQUIRED ═══` block forcing the agent to pause and
+// read-back-and-reason about the recently-written files. Cadence:
+// free-tier=2, paid=4 (see `getSelfReviewCadence` in
+// free-tier-policy.ts). User feedback: *"lacks checking every
+// iteration"* — without a forced pause, free models implement →
+// implement → implement without ever verifying their own work
+// landed coherently. Kill switch if cadence over-fires for a specific
+// task pattern.
+defineFlag("quality.mandatory_self_review_enabled", true, parseBool)
+
 // ─── Iterative paragraph chain (follow-up to Stage C model-lock) ───
 // When true (default), the preflight reasoner builds its reasoningChain
 // paragraph-by-paragraph across N sequential Flash calls — each call

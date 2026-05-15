@@ -6,9 +6,11 @@ import { getFrontendPatternsCompact } from "../knowledge/frontend-patterns.js"
 import { getPipeline } from "../services/task-pipeline.js"
 import { buildSystemPrompt, type PromptCtx } from "./prompt/build.js"
 import { buildVerifyAfterWriteBlock, extractWritesFromToolResults } from "../services/post-write-verifier.js"
-import { shouldForceVerifyAfterWrite } from "../services/free-tier-policy.js"
+import { shouldForceVerifyAfterWrite, getSelfReviewCadence } from "../services/free-tier-policy.js"
 import { getFlag } from "../services/flags.js"
 import { getLedger } from "../services/task-ledger.js"
+import { shouldForceSelfReview, markReviewFired, buildReviewBlock } from "../services/self-review-scheduler.js"
+import { getChunkHistory } from "../services/chunk-state.js"
 export { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from "./prompt/build.js"
 
 /**
@@ -649,6 +651,13 @@ export abstract class BaseProvider {
     // didn't notice / created an empty folder and moved on" failure mode.
     toolMsg += this.renderVerifyAfterWriteBlock(payload, tools)
 
+    // Stage 3 of free-tier quality enforcement: every N chunks, inject a
+    // forced self-review block. Agent must batch_read recent files and
+    // reason about completeness in `reasoningChain` BEFORE writing more.
+    // Cadence: free-tier=2, paid=4 (see `getSelfReviewCadence`). Closes
+    // the "lacks checking every iteration" failure mode.
+    toolMsg += this.renderMandatoryReviewBlock(payload, tools)
+
     // Phase 10: chunk plan injection. Each turn that has a fresh planner
     // verdict gets the file list re-stamped at the bottom so the model sees
     // it last (closest to its response window).
@@ -696,6 +705,61 @@ export abstract class BaseProvider {
       dirsCreated,
       platform: process.platform,
     })
+  }
+
+  /**
+   * Stage 3 of free-tier quality enforcement plan: protected helper that
+   * builds the mandatory self-review block when the cadence fires.
+   *
+   * Cadence is per-run (free-tier=2, paid=4); the scheduler tracks
+   * `lastReviewAtChunk` so reviews don't fire every turn. Files to
+   * review come from the prior chunk(s)'s writes (we surface the most
+   * recently-written paths from runFilePaths). Marks the review fired
+   * AFTER successful injection — caller doesn't need to do bookkeeping.
+   *
+   * Returns empty string when:
+   *   - Flag off, OR
+   *   - No chunks executed yet, OR
+   *   - Cadence not met
+   */
+  protected renderMandatoryReviewBlock(
+    payload: ProviderPayload,
+    _tools: Array<{ tool: string; result: Record<string, unknown> }>,
+  ): string {
+    const flagEnabled = (() => {
+      try { return getFlag<boolean>("quality.mandatory_self_review_enabled") } catch { return true }
+    })()
+    if (!flagEnabled) return ""
+
+    const chunkHistory = getChunkHistory(payload.runId)
+    if (chunkHistory.length === 0) return ""
+
+    // chunkHistory is 0-indexed; the latest chunk's `index` is the
+    // current chunk index. For scheduling, "have at least N chunks
+    // happened?" maps to chunkIndex >= cadence - 1.
+    const latestChunk = chunkHistory[chunkHistory.length - 1]
+    const chunkIndex = latestChunk.index
+    const cadence = getSelfReviewCadence(payload.model)
+
+    if (!shouldForceSelfReview({
+      runId: payload.runId,
+      chunkIndex,
+      cadence,
+      flagEnabled,
+    })) {
+      return ""
+    }
+
+    // Files to review: recent writes from this run, capped at 6.
+    // runFilePaths tracks every path written this run; we surface the
+    // tail so the agent reviews the most recent chunks.
+    const allPaths = this.runFilePaths.get(payload.runId) ?? []
+    const filesToReview = allPaths.slice(-6)
+
+    const block = buildReviewBlock({ filesToReview, chunkIndex })
+    markReviewFired(payload.runId, chunkIndex)
+    console.log(`[self-review] forced review at chunk ${chunkIndex} (cadence=${cadence}, files=${filesToReview.length})`)
+    return block
   }
 
 
