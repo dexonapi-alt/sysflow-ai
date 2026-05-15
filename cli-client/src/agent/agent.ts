@@ -33,6 +33,7 @@ import { renderToolResultPreview } from "../cli/tool-result-preview.js"
 import { renderReasoningBrief, renderDecisionBrief } from "../cli/reasoning-display.js"
 import { classifyResponse, makeRetryBudget, noteSuccess, type RetryBudget } from "./state-machine.js"
 import { recordRunSummary } from "./usage-log.js"
+import { getReasoningPeekExpansions, resetReasoningPeekExpansions } from "../ui/components/ReasoningPeek.js"
 import { estimateTokens as cliEstimateTokens } from "./token-estimate.js"
 import { startJobStatusBar, stopJobStatusBar } from "../cli/job-status.js"
 import { list as listBackgroundJobs, cleanupRun as cleanupBackgroundJobs } from "./background-jobs.js"
@@ -481,6 +482,27 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   if (typeof initialAckCount === "number" && initialAckCount > 0) {
     errorAckRejectionsPeak = initialAckCount
   }
+  // Stage 5 of agent-runtime-fixes plan: capture the project-init
+  // classification from the initial response (constant for the run).
+  // Surface the brief + confidence + repoState — three RunSummary
+  // fields. Null sentinel when the chain didn't fire (legacy / flag
+  // off / no reasoner backend).
+  let projectInitRepoState: "empty" | "small" | "existing-small" | "existing-large" | null = null
+  let projectInitConfidence: "HIGH" | "MEDIUM" | "LOW" | null = null
+  {
+    const repo = (response as Record<string, unknown>).projectInitRepoState
+    if (repo === "empty" || repo === "small" || repo === "existing-small" || repo === "existing-large") {
+      projectInitRepoState = repo
+    }
+    const conf = (response as Record<string, unknown>).projectInitConfidence
+    if (conf === "HIGH" || conf === "MEDIUM" || conf === "LOW") {
+      projectInitConfidence = conf
+    }
+  }
+  // Stage 5: per-run count of 0-hit web_search results. Bumped each
+  // time the cli observes a tool_result with `_errorCategory:
+  // "web_search_empty"`.
+  let webSearchEmptyCount = 0
   // Resolve the task-display-selective flag once for the run — toggling
   // mid-run isn't a supported flow.
   const taskDisplaySelective = await getTaskDisplaySelective()
@@ -618,7 +640,12 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       errorReasoningSource: errorReasoningSourceLatest,
       errorReasoningEvents: errorReasoningEventsThisRun,
       errorAcknowledgementRejections: errorAckRejectionsPeak,
+      projectInitRepoState,
+      projectInitConfidence,
+      webSearchEmptyCount,
+      reasoningPeekExpansions: getReasoningPeekExpansions(),
     })
+    resetReasoningPeekExpansions()
     unregisterSpinner()
   }
 
@@ -779,6 +806,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         chunkIndex = result.chunkIndex
         flashCallsCount += result.flashCallsThisTurn
         investigationCommandsCount += result.investigationCommandsThisTurn
+        webSearchEmptyCount += result.webSearchEmptyThisTurn
         // Phase 19: defensive capture of runIntent from subsequent
         // responses in case the initial response didn't carry it.
         // Once set, stays set — the value is run-constant.
@@ -1189,6 +1217,10 @@ interface NeedsToolResult {
    *  calls observed at dispatch this turn. Caller accumulates into the
    *  per-run total recorded in RunSummary. */
   investigationCommandsThisTurn: number
+  /** Stage 5 of agent-runtime-fixes plan: 0-hit web_search results
+   *  observed this turn (0 or 1 — only one tool result per handleNeedsTool
+   *  invocation). Caller accumulates into RunSummary.webSearchEmptyCount. */
+  webSearchEmptyThisTurn: number
 }
 
 async function handleNeedsTool(
@@ -1202,6 +1234,9 @@ async function handleNeedsTool(
   // Stage 5 of command-first-investigation: local tally returned via
   // NeedsToolResult so runAgent can accumulate the per-run total.
   let investigationCommandsThisTurn = 0
+  // Stage 5 of agent-runtime-fixes plan: 0-hit web_search tally for
+  // RunSummary.webSearchEmptyCount.
+  let webSearchEmptyThisTurn = 0
 
   // Step transition handling
   const stepTransition = response.stepTransition as { complete?: string; start?: string } | undefined
@@ -1307,12 +1342,12 @@ async function handleNeedsTool(
           tool: "_recovery",
           result: { error: (batchError as Error).message, success: false }
         })
-        return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn }
+        return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn, webSearchEmptyThisTurn }
       }
       console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.success("done")}`)
       console.log("")
       spinner.start(colors.muted("thinking..."))
-      return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn }
+      return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn, webSearchEmptyThisTurn }
     }
 
     spinner.start(colors.muted(`  executing ${toolCalls!.length} tools...`))
@@ -1364,7 +1399,7 @@ async function handleNeedsTool(
         result: { error: (batchError as Error).message, success: false }
       })
     }
-    return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn }
+    return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn, webSearchEmptyThisTurn }
   }
 
   // ── SINGLE TOOL PATH ──
@@ -1488,6 +1523,17 @@ async function handleNeedsTool(
         spinner.text = colors.muted(suppressGenericPhaseLabel(label))
       }),
     )
+
+    // Stage 5 of agent-runtime-fixes plan: count 0-hit web_search
+    // results so RunSummary captures how often the prompt-level gating
+    // missed. Reads the same `_errorCategory` the executor stamped.
+    // Local counter returned via NeedsToolResult — runAgent accumulates.
+    {
+      const tr = response.lastToolResult as Record<string, unknown> | undefined
+      if (currentTool === "web_search" && tr && tr._errorCategory === "web_search_empty") {
+        webSearchEmptyThisTurn = 1
+      }
+    }
 
     // ─── Tool-result preview: replace the silent spinner gap with a one-liner ───
     // Skip the preview on consecutive reads — the ▸ read X line is enough.
@@ -1658,5 +1704,5 @@ async function handleNeedsTool(
     })
   }
 
-  return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn }
+  return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn, webSearchEmptyThisTurn }
 }

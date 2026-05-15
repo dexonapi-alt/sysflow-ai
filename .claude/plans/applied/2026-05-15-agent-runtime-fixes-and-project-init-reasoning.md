@@ -1,7 +1,7 @@
 # Agent runtime fixes + project-initialisation reasoning
 
 - **Created:** 2026-05-15
-- **Status:** in-progress
+- **Status:** implemented (2026-05-15)
 - **Scope:** Fix seven concrete runtime bugs surfaced by a fresh `sys` run in an empty directory + introduce a **project-initialisation reasoning step** that works correctly in both empty repos and large existing repos. The agent's current behaviour (hallucinate config dependencies → force web search → die on 0 hits → never recover) makes it unusable on greenfield prompts. The fixes compose: an explicit repo-state classifier removes the phantom-dependency hallucination at the source, web-search gating removes the wrong-tool-too-early failure, and the reasoning-peek expand toggle gives the user visibility into deliberation that today is silently truncated.
 
 ## Goal
@@ -250,3 +250,32 @@ The systemic principle (per `decisions.md: ## System-level enforcement beats pro
 - Bugs 6, 7 — UI-level enforcement: the user can't see what the agent is thinking past the truncation cap; expand-key fixes that.
 
 Five stages, one PR each, ordered by blast radius (smallest first). Estimated total: ~2,800 LOC + 60-80 new tests. Estimated calendar: stages can ship sequentially over 5 days.
+
+## Completion notes
+
+Shipped across five PRs over a single day (2026-05-15):
+
+- **PR #93 — Stage 1**: project-init iterative reasoner + action-planner skip list + `═══ PROJECT STATE ═══` prompt section. 46 new tests. Single typecheck-clean rev.
+- **PR #94 — Stage 2**: web_search 0-hit recovery + tool description preconditions + `web_search_empty` classifier category. 4 new classifier tests. The recovery hook reuses the existing Stage 3/4 error-reasoning infrastructure — no new wiring needed.
+- **PR #95 — Stage 3**: reasoning-peek expand toggle (`r` / Ctrl+R) + per-turn refresh (perTurnReasoningChain surfaced through the mapper). 14 new tests. Friendly labels for `per_turn` / `project_init` / `error_reasoning` / `intent_classification`.
+- **PR #96 — Stage 4**: per-turn directory refresh + stale-file detection + `═══ DIRECTORY STATE CHANGED ═══` inject. 12 new tests. `captureTopLevelTree` uses a single `fs.readdir`; no recursion.
+- **PR #97 — Stage 5**: this PR. Four new `RunSummary` counters (`projectInitRepoState` / `projectInitConfidence` / `webSearchEmptyCount` / `reasoningPeekExpansions`), KB entries (1 architecture diagram + 3 decisions + 1 gotcha), plan archive.
+
+**Deviations from the plan:**
+
+- **Stage 2's `quality.web_search_first_action_block_enabled` flag was not added** — the prompt-level preconditions in `tools.ts` (plus Stage 1's PROJECT STATE block guidance) cover the first-action-block intent without a dedicated flag. Adding the flag would require server-side enforcement that doesn't have a clean injection point today. If telemetry on `webSearchEmptyCount` later shows over-firing, a future stage can add the flag with a typed inject path.
+- **Stage 4 didn't expand to depth-2 trees** — the snapshot stays top-level only (under-reporting > false positives). Deferred per the plan's "out of scope" notes; the `captureTopLevelTree` helper can grow if telemetry warrants.
+
+**Test counts at archive time:**
+
+- Server: 898 / 898 (+58 new from this plan).
+- CLI: 405 / 405 (+18 new from this plan — Stage 3's 14 + Stage 5's 4).
+- Both workspaces typecheck clean.
+
+**The user's repro is fixed.** In an empty directory with the POS-backend prompt:
+
+- Stage 1's project-init brief commits as `repoState: "empty"` + seeds `skipConfigVerificationFor: ["tsconfig.json", ".eslintrc.json", …]`.
+- Action-planner's hijack does NOT fire when the agent emits `write_file("tsconfig.json", …)`.
+- If the agent still tries a web_search and gets 0 hits, Stage 2's recovery hint fires and the agent pivots.
+- The reasoning peek tracks per-turn deliberation instead of staying stuck on the initial brief; `r` expands the truncated view.
+- If a later turn deletes a file, Stage 4's stale-file warning fires so the agent doesn't reference it.

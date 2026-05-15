@@ -178,3 +178,24 @@ Past bugs and non-obvious constraints worth preserving so the next contributor d
 - **Root cause:** `cli-client/src/agent/agent.ts: createSpinner` initialised the Ink shim with `let current = "thinking..."` and emitted `{type:"spinner", text:"thinking..."}` immediately. `<RichSpinner>` only runs the verb cycle when no `text` prop is supplied — a non-empty default text override blocks it from the very first frame. Server phase events that update `spinner.text` later kept it overridden through the rest of the wait, but during the long initial pause before any phase event arrives, the verb cycle never got a chance to run.
 - **Fix:** initial text is now `""` (empty). `<AgentStream>` passes `text={spinnerText || undefined}` so empty becomes `undefined`, which lets the cycle take over until a real label arrives.
 - **What to do:** when adding a new spinner-driving codepath that needs to surface a specific label, set the text to that label only when you have one. Don't pre-fill with a placeholder ("thinking…", "loading…", "working…") that you intend the cycle to replace — the cycle is contractually disabled while a `text` prop is set.
+
+## Agent demanded tsconfig.json in empty directory and hard-stopped on 0-hit web search
+
+- **Source:** plan `applied/2026-05-15-agent-runtime-fixes-and-project-init-reasoning.md` (the canonical trigger)
+- **Symptom:** running `sys` in `C:\Users\DevAPI\Documents\test` (empty dir) with the prompt *"build a Node.js Express PostgreSQL backend for a simple POS system"* produced:
+  ```
+  ● List(.)
+  │ Need to verify current typescript configuration before writing files
+  ▸ search web "tsconfig.json configuration 2026"
+  ● WebSearch — 0 hits
+  │ No tsconfig.json configuration data was found. Please provide…
+  ```
+  Agent halted. Empty dir, prompt didn't mention TypeScript, but the agent demanded a tsconfig that didn't exist and dead-ended on a 0-hit search.
+- **Root cause:** TWO compounding mechanisms.
+  1. `action-planner.ts: buildConfigSearchOverride` fires on any first `write_file` call whose path matches a recognised config pattern (`tsconfig` / `vite.config` / `tailwind.config` / `.eslintrc` / etc.). The hijack forces a `web_search` for current setup docs BEFORE the write. Correct for EXISTING projects; wrong for FRESH SCAFFOLDS where the file is being authored from scratch.
+  2. The `web_search` tool result for 0 hits was returning `{ results: [] }` with no error — the agent had no recovery hint and no signal that 0 hits is recoverable.
+- **Fix:** plan `applied/2026-05-15-agent-runtime-fixes-and-project-init-reasoning.md`:
+  - Stage 1 added a `project_init` iterative reasoner that classifies the repo as `empty / small / existing-small / existing-large` BEFORE preflight and seeds a per-run `skipConfigVerificationFor` list on empty/small classifications. The action-planner's hijack now skips authored configs on fresh scaffolds.
+  - Stage 2 tagged 0-hit `web_search` results with `_errorCategory: "web_search_empty"` + a recovery hint. The existing error-reasoning chain catches retries.
+- **Prevention:** when adding new action-planner hijacks or new tool results that could be no-signal-but-valid, ASK: "what happens in a fresh repo where the precondition isn't met?" and "what's the recovery action if this call returns nothing useful?" The default should never be "agent halts with a 'please provide' message".
+- **Test guards:** `server/src/reasoning/__tests__/project-init-reasoner.test.ts` covers the empty-repo classification → skip-list seeding. `server/src/services/__tests__/setup-intelligence-skip.test.ts` covers `detectConfigFile(path, runId)` honouring the skip list. `server/src/services/__tests__/tool-error-classifier.test.ts` covers the `web_search_empty` category.

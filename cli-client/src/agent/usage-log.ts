@@ -88,6 +88,27 @@ export interface RunSummary {
    *  here on free-tier runs suggest the Stage 3 inject block isn't
    *  carrying enough weight. Defaults to 0. */
   errorAcknowledgementRejections?: number
+  /** Stage 5 of agent-runtime-fixes plan: the project-init reasoner's
+   *  repoState verdict (constant for the run). Null on runs that
+   *  didn't fire project-init (flag off, no reasoner backend, or
+   *  legacy pre-Stage-1 runs). */
+  projectInitRepoState?: "empty" | "small" | "existing-small" | "existing-large" | null
+  /** Stage 5: the project-init reasoner's confidence. Null sentinel
+   *  on runs without a project-init brief. Useful for jq /
+   *  distribution analysis: HIGH proportion ≈ classification is
+   *  unambiguous most of the time; spikes in MEDIUM / LOW mean the
+   *  tree-shape rubric needs tuning. */
+  projectInitConfidence?: "HIGH" | "MEDIUM" | "LOW" | null
+  /** Stage 5: per-run count of web_search calls that returned 0 hits.
+   *  Defaults to 0. Sustained nonzero values mean Stage 2's prompt-
+   *  level gating isn't tight enough; the agent is still issuing
+   *  premature / over-specific queries. */
+  webSearchEmptyCount?: number
+  /** Stage 5: per-run count of times the user pressed `r` to expand
+   *  the reasoning peek. Defaults to 0. High values mean the
+   *  truncation cap (MAX_PARAGRAPH_LINES=3, MAX_PARAGRAPH_CHARS=180)
+   *  is too tight for typical chains; low/zero values mean it's fine. */
+  reasoningPeekExpansions?: number
 }
 
 const PROMPT_PREVIEW_CHARS = 200
@@ -141,6 +162,13 @@ export async function recordRunSummary(sysbasePath: string | undefined | null, s
     // always increments client-side when observed.
     errorReasoningEvents: summary.errorReasoningEvents ?? 0,
     errorAcknowledgementRejections: summary.errorAcknowledgementRejections ?? 0,
+    // Stage 5 of agent-runtime-fixes plan. Null sentinels on runs
+    // without a project-init brief so jq / analysis tools can
+    // distinguish "no signal" from "field not logged".
+    projectInitRepoState: summary.projectInitRepoState ?? null,
+    projectInitConfidence: summary.projectInitConfidence ?? null,
+    webSearchEmptyCount: summary.webSearchEmptyCount ?? 0,
+    reasoningPeekExpansions: summary.reasoningPeekExpansions ?? 0,
   }
   try {
     await fs.appendFile(file, JSON.stringify(entry) + "\n", "utf8")
