@@ -71,3 +71,15 @@ export {
   recordChunkSummary,
   recordOriginalIntent,
 } from "./recorder.js"
+
+export {
+  recordErrorPattern,
+  recallErrorPatterns,
+  formatErrorPatternContent,
+  parseErrorPatternContent,
+  formatRecallForReasoner,
+  type ErrorPatternFields,
+  type RecordErrorPatternArgs,
+  type RecallErrorPatternsArgs,
+  type ErrorPatternMatch,
+} from "./error-pattern.js"
