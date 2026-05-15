@@ -205,6 +205,17 @@ defineFlag("quality.reasoning_action_cross_check_enabled", true, parseBool)
 const parseString: Parser<string> = (raw) => raw
 defineFlag("reasoning.backend", "auto", parseString)
 
+// ─── Stage 5 of command-first-investigation plan ───
+// When true (default), the tool-result handler injects a one-shot
+// `[BUDGET]` reminder telling the agent to switch from investigation
+// to action when the count of safe-read-only `run_command` calls in
+// the run so far exceeds `getInvestigationBudget(...)`. The reminder
+// fires once per run (latched by an in-memory flag) so the agent
+// isn't spammed if it keeps investigating; the divergence detector's
+// existing `scope_creep` heuristic catches sustained over-investigation
+// via the confidence tracker if the reminder is ignored.
+defineFlag("quality.investigation_budget_reminder_enabled", true, parseBool)
+
 // ─── Iterative paragraph chain (follow-up to Stage C model-lock) ───
 // When true (default), the preflight reasoner builds its reasoningChain
 // paragraph-by-paragraph across N sequential Flash calls — each call

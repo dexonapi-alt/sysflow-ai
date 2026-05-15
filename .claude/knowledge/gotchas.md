@@ -109,6 +109,16 @@ Past bugs and non-obvious constraints worth preserving so the next contributor d
 - **Fix:** every raw cursor-up / clear-line write is gated behind `shouldRenderInlineForLegacy()` (`agent/events.ts`). In Ink mode the visible representation of "running tools" is the live `<ActionCard>` set in `<AgentStream>` — re-printing rows is unnecessary AND breaks layout.
 - **What to do:** never call `process.stdout.write` with VT100 cursor escapes from a code path that might run with Ink active. If the path needs both modes, use the `shouldRenderInlineForLegacy()` gate. If it's Ink-only, emit a structured event and let the reducer drive the visual transition.
 
+## Read-only commands used to require approval per call — agent gave up on investigation
+
+- **Source:** plan `applied/2026-05-13-command-first-investigation.md` (Stage 2)
+- **Symptom:** with the new command-first directive in place (Stage 1), the agent dutifully tried to investigate first — `git status`, `ls`, `grep -rn Foo src/`, `find . -name '*.config.*'` — but EVERY one of those commands hit the permission prompt. Users in `default` permission mode (the default) saw a wall of `Allow?` questions on the very first turn. The session became unusable: either the user spammed `y` 10 times to let investigation proceed, or the agent gave up after 2 deny-by-default timeouts and fell back to `read_file` — silently undoing the prompt directive.
+- **Root cause:** `cli-client/src/agent/permissions.ts` treated every `run_command` as `ask` regardless of what the command actually did. The permission gate had no notion of "safe read-only investigation" vs "actually destructive shell command". `git status` was rated the same risk level as `rm -rf /`.
+- **Fix:** Stage 2 introduced `cli-client/src/agent/safe-commands.ts: isSafeReadOnlyCommand(cmd)` — a regex-based whitelist of canonical investigation commands (`git status|log|diff|branch|remote|show`, `ls|dir`, `find`, `grep|rg|Select-String`, `cat|type|head|tail|Get-Content`, `which|where`, `whoami|pwd|Get-Location`, `npm list|outdated|ls`, `node -v`, etc.). Conservative on chained / piped / sub-shelled commands (`&&` / `||` / `;` / backticks immediately fail the check). `permissions.ts` consults the function BEFORE returning `ask`; if safe, returns `allow` and logs `[permissions] safe-command auto-approved: <cmd>`.
+- **Setting:** `cli-client/src/lib/sysbase.ts: commands.auto_approve_safe` (default `true`). Users who want to see every command can flip to `false`.
+- **Test guard:** `cli-client/src/agent/__tests__/safe-commands.test.ts` covers (a) positive cases for every command in the whitelist, both bash and PowerShell forms; (b) negative cases for write variants, chained writes, and suspicious patterns (backticks, command substitution wrapping a write).
+- **What to do when adding a new safe command:** add to the regex in `safe-commands.ts`; add a positive case in the test file; if the command can chain something destructive (e.g. `xargs rm`), make sure the existing chain-detection regex rejects it. Default to NOT safe — false positives ruin the pattern.
+
 ## Anthropic + OpenRouter providers used to skip the ctx-aware system prompt — briefs never reached the model
 
 - **Source:** plan `applied/2026-05-07-model-lock-and-portable-reasoning.md` (Stage B, PR #64)

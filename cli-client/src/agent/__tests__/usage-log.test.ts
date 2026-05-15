@@ -156,6 +156,43 @@ describe("recordRunSummary", () => {
     expect(entry.reasonerBackend).toBeNull()
   })
 
+  // ─── Stage 5 of command-first-investigation: investigationCommandsCount ───
+
+  it("persists investigationCommandsCount when supplied", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-ic1",
+      prompt: "fix the broken import",
+      model: "openrouter-auto",
+      durationMs: 4_000,
+      stepCount: 6,
+      toolCount: 8,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      investigationCommandsCount: 3,
+    })
+    const [entry] = await readEntries()
+    expect(entry.investigationCommandsCount).toBe(3)
+  })
+
+  it("defaults investigationCommandsCount to 0 when omitted", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-ic2",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+    })
+    const [entry] = await readEntries()
+    expect(entry.investigationCommandsCount).toBe(0)
+  })
+
   it("preserves explicit reasonerBackend=null (no brief produced this run)", async () => {
     await recordRunSummary(tmp, {
       runId: "r-rb3",

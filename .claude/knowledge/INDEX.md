@@ -7,7 +7,7 @@ Project-level knowledge that travels with the repo. Edit these files directly; d
 - [architecture.md](architecture.md) — system shape, services, data flow, cross-cutting loops
 - [decisions.md](decisions.md) — non-obvious choices and their rationale
 - [gotchas.md](gotchas.md) — past bugs and non-obvious constraints
-- [patterns.md](patterns.md) — reusable code patterns _(not yet populated)_
+- [patterns.md](patterns.md) — reusable code patterns
 - [glossary.md](glossary.md) — project-specific terminology _(not yet populated)_
 
 ## Conventions

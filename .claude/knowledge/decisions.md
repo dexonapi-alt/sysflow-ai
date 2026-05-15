@@ -256,6 +256,34 @@ We chose (2). `confidence-tracker.ts` re-exports `isFreeTierModel` and `FREE_MOD
 
 The discipline: when a future stage wants to adapt for free-tier, it adds either a constant or a pure helper to `free-tier-policy.ts` and the call site reads from there. No raw `isFreeTierModel(...)` checks in handlers — they should always be inside a policy helper.
 
+## Why investigate via commands, not file reads
+
+- **Source:** plan `applied/2026-05-13-command-first-investigation.md`
+
+The pre-Stage-1 default was *"batched `read_file` for exploration"*. Stage 1 flipped it to *"`run_command` first, `read_file` only when about to edit."* The user's framing: *"claude code doesn't just read files, it uses command line heavily with reasoning thats why claude code is accurate."* Three reasons the command-first default wins on accuracy, even when reading more files would feel safer:
+
+**1. Commands return SHORT factual output the model can reason about; reads return long files the model skims and hallucinates against.**
+
+`git status` returns 4 lines. `ls` returns 20. `grep -r symbol src/` returns 5-15 matches. The model holds the full output in attention and reasons about it directly. By contrast, a full `read_file` on a 400-line module forces the model to summarise mentally — which is exactly where hallucination shows up. The model "knows" the file imports `foo` from `./bar` even when it actually imports it from `./baz`, because the import line wasn't in the attention window the model used to form the mental model.
+
+Empirically: the bugs that the Phase 11 awareness loop was designed to catch (`completion_claims_unwritten_files`, `intent_keyword_absent`, same-file thrashing) all show the same shape — the model formed a mental model from skimming long files and then operated against the mental model instead of the disk. Commands collapse that surface area.
+
+**2. Commands are EXPLORATORY by design; reads are commit-shaped.**
+
+`grep -r 'class Foo'` says "tell me everywhere Foo appears." `find . -name '*.config.*'` says "what config files exist?" The output drives the next question — *what does this mean? what alternative just got ruled out?* — and reasoning happens between commands. A `read_file` says "show me this exact file" — which presupposes the model already knows WHICH file is relevant. If the model picks the wrong file (or the most-recently-mentioned one, which isn't always the right one), the read returns confident wrong context. Reads reward correct-on-the-first-guess; commands reward iterative refinement.
+
+**3. Commands expose the SYSTEM, not just the file.**
+
+`git log -10 --oneline` shows recent intent. `npm list <pkg>` reveals version. `which node`, `node -v` answers env questions. `find . -name '*.test.*' | head` maps the test surface. None of those questions are answerable by `read_file` — they require the SYSTEM, not just text. The pre-Stage-1 default could only ever see files the model already knew about. The new default sees the project shape.
+
+**The rules we keep from this discipline:**
+
+- `read_file` is still in the tool list — kept, not removed. It's the right tool when *the file is identified and you're about to edit it*. The shift was prompt-level (default), not surface-level.
+- Trivial tasks skip investigation entirely. *"Add a `console.log` to line 42"* doesn't need `git status`. The LLM is instructed to gauge depth (same pattern as `DEEP_REASONING_PROMPT`'s depth-awareness clause); the system caps via `getInvestigationBudget(complexity === "simple") = 1`.
+- The safe-command allowlist (`isSafeReadOnlyCommand`) is the operational unlock — without it, every investigation command prompted the user for approval and the new default would have been unusable. The allowlist is regex-based and conservative; unknown commands fall through to the existing `ask` gate.
+
+When to revisit: if telemetry (`investigationCommandsCount` in `usage.jsonl`) shows the average non-trivial run hitting <2 commands, the prompt directive isn't sticking. The lever is `task-guidelines.ts` + `investigation.ts` — the next pass should strengthen the framing rather than relax the budget. The budget is the safety net; the prompt is the steering wheel.
+
 ## Reasoner backend follows the main model, not the user's preference flag
 
 - **Source:** plan `applied/2026-05-07-model-lock-and-portable-reasoning.md` (Stage D)
