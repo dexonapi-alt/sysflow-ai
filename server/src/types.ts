@@ -315,6 +315,16 @@ export interface ClientResponse {
    * analysis tools to slice telemetry by how sure the classifier was.
    */
   projectInitConfidence?: "HIGH" | "MEDIUM" | "LOW" | null
+  /**
+   * Stage 3 of agent-runtime-fixes plan: the per-turn senior-engineer
+   * `reasoningChain[]` paragraphs the main model emitted on this response.
+   * Surfaced so the cli can emit a fresh `reasoning_brief` event with
+   * `kind: "per_turn"` — closes bug 6 (the peek was stuck on the FIRST
+   * brief because no later events surfaced the per-turn deliberation).
+   * Absent on turns where the model didn't emit a chain (most trivial
+   * turns).
+   */
+  perTurnReasoningChain?: string[]
 }
 
 // ─── Database ───

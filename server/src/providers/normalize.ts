@@ -25,7 +25,13 @@ export function mapNormalizedResponseToClient(runId: string, normalized: Normali
         reasoning: normalized.reasoning || null,
         task: normalized.task || null,
         taskStep: normalized.taskStep || null,
-        stepTransition: normalized.stepTransition || undefined
+        stepTransition: normalized.stepTransition || undefined,
+        // Stage 3 of agent-runtime-fixes plan: surface the per-turn
+        // reasoning chain so the cli's <ReasoningPeek> refreshes on
+        // each turn instead of staying stuck on the FIRST brief.
+        perTurnReasoningChain: Array.isArray(normalized.reasoningChain) && normalized.reasoningChain.length > 0
+          ? normalized.reasoningChain
+          : undefined
       }
 
     case "waiting_for_user":
@@ -42,7 +48,10 @@ export function mapNormalizedResponseToClient(runId: string, normalized: Normali
         runId,
         message: normalized.content,
         summary: normalized.summary || null,
-        reasoning: normalized.reasoning || null
+        reasoning: normalized.reasoning || null,
+        perTurnReasoningChain: Array.isArray(normalized.reasoningChain) && normalized.reasoningChain.length > 0
+          ? normalized.reasoningChain
+          : undefined
       }
 
     case "failed":
