@@ -27,6 +27,11 @@ export const entryKindSchema = z.enum([
   // they can compare implementation against the LITERAL ask, not against
   // the preflight brief's interpretation.
   "original_intent",
+  // Plan `2026-05-15-forced-error-reasoning-and-recovery.md` Stage 5:
+  // a recovered-from tool error and the command that worked. Recorded
+  // after an error → reasoner → retry → success sequence so the next
+  // similar error short-circuits to a known fix via recallErrorPatterns.
+  "error_pattern",
 ])
 export type EntryKind = z.infer<typeof entryKindSchema>
 

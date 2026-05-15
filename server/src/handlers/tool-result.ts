@@ -25,7 +25,7 @@ import { persistLargeToolResult } from "../store/tool-result-persistence.js"
 import { runReasoning, getReasonerBackendForRun, clearReasonerBackendForRun } from "../reasoning/task-reasoner.js"
 import { runErrorReasoningChain } from "../reasoning/error-reasoner.js"
 import { validateErrorAcknowledgement, buildErrorAcknowledgementRejectPrompt, primaryArg } from "../services/error-acknowledgement-guard.js"
-import { recordImplementSummary, recordBugPattern, recordChunkSummary, recordUserCorrection, applyMemoryFeedback, recallForReasoning } from "../memory-store/index.js"
+import { recordImplementSummary, recordBugPattern, recordChunkSummary, recordUserCorrection, applyMemoryFeedback, recallForReasoning, recallErrorPatterns, recordErrorPattern, formatRecallForReasoner } from "../memory-store/index.js"
 import {
   attachReflection,
   recordChunkStart,
@@ -64,6 +64,26 @@ const MAX_ON_ERROR_REASONING_PER_RUN = 2
  *  completionRejections shape. */
 const errorAcknowledgementRejections = new Map<string, number>()
 const MAX_ERROR_ACK_REJECTIONS = 3
+
+/** Stage 5: per-run state tracking an in-flight error → recovery
+ *  sequence. Set when a tool errors, then consumed on the NEXT
+ *  tool-result call: if that call has no error AND the agent's most
+ *  recent attempt used the same tool kind with different args, the
+ *  recovery is recorded as an `error_pattern` memory entry. Cleared on
+ *  successful recording OR on terminal run exit. */
+interface PendingErrorRecovery {
+  errorText: string
+  errorClass: string
+  platform: string
+  failedTool: string
+  failedCommand: string
+  /** Args the agent emitted in response to the error — captured at the
+   *  end of THIS handler call so the next call (which sees success)
+   *  knows what the agent attempted. */
+  attemptedTool?: string
+  attemptedArgs?: Record<string, unknown>
+}
+const pendingErrorRecovery = new Map<string, PendingErrorRecovery>()
 
 /** Track frontend quality rejections per run (separate from structural completion guard) */
 const frontendQualityRejections = new Map<string, number>()
@@ -535,6 +555,49 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
           try { return getFlag<number>("reasoning.error_reasoning_max_iterations", run.sysbasePath as string | undefined) }
           catch { return 4 }
         })()
+        // ─── Stage 5: error_pattern recall ───
+        // Before firing the chain, surface any prior recorded fix for
+        // a similar error on this platform. The reasoner's user turn
+        // then carries it as `priorRecall`, letting the chain confirm
+        // or revise rather than re-deriving from scratch.
+        let priorRecall: string | null = null
+        const recallEnabled = (() => {
+          try { return getFlag<boolean>("memory.error_pattern_recall_enabled", run.sysbasePath as string | undefined) }
+          catch { return true }
+        })()
+        if (recallEnabled && run.cwd) {
+          try {
+            const matches = await recallErrorPatterns({
+              cwd: run.cwd as string,
+              errorSignature: errText,
+              platform: process.platform,
+              maxEntries: 3,
+            })
+            priorRecall = formatRecallForReasoner(matches)
+            if (priorRecall) {
+              console.log(`[error-pattern] recall surfaced ${matches.length} prior pattern(s) for ${process.platform}`)
+            }
+          } catch (recallErr) {
+            console.warn(`[error-pattern] recall failed:`, (recallErr as Error).message)
+          }
+        }
+        // Stash the failed command for the recovery recorder (consumed
+        // on the NEXT tool-result call when no error fires). Only
+        // run_command is tracked for v1 — write_file/edit_file paths
+        // are too heterogeneous to mine reliably yet.
+        if (lastError.tool === "run_command") {
+          const failedArgs = (errResultRecord.args as Record<string, unknown> | undefined) ?? undefined
+          const failedCommand = failedArgs && typeof failedArgs.command === "string" ? failedArgs.command : ""
+          if (failedCommand) {
+            pendingErrorRecovery.set(body.runId, {
+              errorText: errText,
+              errorClass: classifyToolError(lastError.tool, errText).category,
+              platform: process.platform,
+              failedTool: lastError.tool,
+              failedCommand,
+            })
+          }
+        }
         const chainBrief = await runErrorReasoningChain({
           errorText: errText,
           tool: lastError.tool,
@@ -542,6 +605,7 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
           platform: process.platform,
           model: run.model,
           maxIterations: maxIters,
+          priorRecall,
         })
         if (chainBrief) {
           errorReasoningChainBrief = chainBrief
@@ -613,6 +677,40 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     }
   } else {
     consecutiveToolErrors.set(body.runId, 0)
+    // ─── Stage 5: record error_pattern on successful recovery ───
+    // If the prior tool-result call stashed a failed-command and the
+    // agent's NEXT response (whose results we're processing now) ran
+    // the SAME tool kind with DIFFERENT args, that's a recovered-from
+    // error. Persist it so the next similar error short-circuits.
+    const pending = pendingErrorRecovery.get(body.runId)
+    if (pending && pending.attemptedTool === pending.failedTool && pending.attemptedArgs && run.cwd) {
+      const workingCommand = typeof pending.attemptedArgs.command === "string" ? pending.attemptedArgs.command : ""
+      // Only when the success had no error AND the working command
+      // actually differs from the failed one (i.e. the agent CHANGED
+      // approach, not retried verbatim).
+      const successResults = isBatch ? body.toolResults! : [{ id: "single", tool: body.tool, result: body.result }]
+      const matchingSuccess = successResults.find((tr) => tr.tool === pending.failedTool && !(tr.result as Record<string, unknown>).error && (tr.result as Record<string, unknown>).success !== false)
+      if (workingCommand && matchingSuccess && workingCommand.trim() !== pending.failedCommand.trim()) {
+        const recallEnabled = (() => {
+          try { return getFlag<boolean>("memory.error_pattern_recall_enabled", run.sysbasePath as string | undefined) }
+          catch { return true }
+        })()
+        if (recallEnabled) {
+          recordErrorPattern({
+            cwd: run.cwd as string,
+            errorClass: pending.errorClass,
+            platform: pending.platform,
+            failedCommand: pending.failedCommand,
+            workingCommand,
+            errorSignature: pending.errorText,
+            runId: body.runId,
+          }).then((entry) => {
+            if (entry) console.log(`[error-pattern] recorded recovery: ${pending.failedCommand} → ${workingCommand}`)
+          }).catch(() => { /* best-effort */ })
+        }
+      }
+    }
+    pendingErrorRecovery.delete(body.runId)
   }
 
   // ─── Pre-API token guard ───
@@ -1049,6 +1147,23 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     }
   }
 
+  // ─── Stage 5: capture the agent's attempted recovery ───
+  // If this call processed an error AND the model just emitted a
+  // tool-call response, that response IS the agent's recovery attempt.
+  // Stash its args alongside the pending failed-command so the NEXT
+  // handler call (which sees whether the recovery worked) can record
+  // a complete `error_pattern` entry.
+  if (incomingErrors.length > 0 && normalized.kind === "needs_tool") {
+    const pending = pendingErrorRecovery.get(body.runId)
+    if (pending) {
+      const attemptedTool = typeof normalized.tool === "string" ? normalized.tool : undefined
+      const attemptedArgs = (normalized.args as Record<string, unknown> | undefined) ?? undefined
+      if (attemptedTool) {
+        pendingErrorRecovery.set(body.runId, { ...pending, attemptedTool, attemptedArgs })
+      }
+    }
+  }
+
   await persistModelUsage({
     runId: body.runId,
     projectId: run.projectId,
@@ -1418,6 +1533,9 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     // Stage 4 of forced-error-reasoning plan: drop the per-run
     // rejection counter so a subsequent run starts fresh.
     errorAcknowledgementRejections.delete(body.runId)
+    // Stage 5: drop any in-flight error-recovery state so a subsequent
+    // run doesn't think the prior run's failed command was its own.
+    pendingErrorRecovery.delete(body.runId)
     // Stage 5 of command-first-investigation: drop the per-run latch
     // so a subsequent run starts with a fresh reminder budget.
     investigationBudgetReminderFired.delete(body.runId)

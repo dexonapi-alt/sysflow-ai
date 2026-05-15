@@ -276,6 +276,15 @@ defineFlag("reasoning.error_reasoning_max_iterations", 4, parseNumber)
 // surface in real telemetry.
 defineFlag("quality.error_acknowledgement_rejection_enabled", true, parseBool)
 
+// Stage 5: when true (default), tool errors recall matching prior
+// `error_pattern` memory entries (platform + signature overlap) and
+// surface them to the error-reasoning chain as `priorRecall`, AND
+// successful recoveries (error → next-same-tool success) are recorded
+// as new `error_pattern` entries for future runs to short-circuit on.
+// Off-switch in case the recall surfaces stale fixes that wrong-foot
+// the reasoner.
+defineFlag("memory.error_pattern_recall_enabled", true, parseBool)
+
 // ─── Iterative paragraph chain (follow-up to Stage C model-lock) ───
 // When true (default), the preflight reasoner builds its reasoningChain
 // paragraph-by-paragraph across N sequential Flash calls — each call
