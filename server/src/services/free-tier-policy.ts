@@ -224,6 +224,22 @@ export function getSelfReviewCadence(model: string | null | undefined): number {
 }
 
 /**
+ * Stage 4 of free-tier quality enforcement: should the lightweight
+ * heuristic divergence detector run after EVERY tool result (not just
+ * at chunk boundaries)?
+ *
+ * Free-tier only. The cost is essentially zero (pure function over
+ * the snapshot — no LLM, no I/O), but firing on every turn for paid
+ * models would produce more log noise than signal given paid models
+ * drift less and the chunk-boundary cadence catches them.
+ *
+ * Pure helper — exported for testing.
+ */
+export function shouldRunPerStepDivergence(model: string | null | undefined): boolean {
+  return isFreeTierModel(model)
+}
+
+/**
  * Iterative paragraph chain mode (paragraph-by-paragraph reasoning).
  *
  * User feedback that drove this: *"reason it one by one → call llm →

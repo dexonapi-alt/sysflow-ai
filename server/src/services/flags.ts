@@ -171,6 +171,16 @@ defineFlag("quality.force_verify_after_write", true, parseBool)
 // task pattern.
 defineFlag("quality.mandatory_self_review_enabled", true, parseBool)
 
+// ─── Stage 4 of free-tier quality enforcement plan ───
+// When true (default), the heuristic divergence detector runs after
+// EVERY tool result on free-tier runs — not just at chunk boundaries.
+// Catches drift WITHIN a chunk (3-4 turns of bad direction before the
+// boundary fires) and the new `same_action_repeated_in_session`
+// heuristic which spots stuck-loops mid-chunk. Free-tier only (see
+// `shouldRunPerStepDivergence` in free-tier-policy.ts). Kill switch if
+// per-step firing produces too much log noise.
+defineFlag("quality.per_step_divergence_for_free_tier", true, parseBool)
+
 // ─── Iterative paragraph chain (follow-up to Stage C model-lock) ───
 // When true (default), the preflight reasoner builds its reasoningChain
 // paragraph-by-paragraph across N sequential Flash calls — each call
