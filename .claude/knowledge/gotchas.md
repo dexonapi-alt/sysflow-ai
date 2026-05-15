@@ -119,6 +119,18 @@ Past bugs and non-obvious constraints worth preserving so the next contributor d
 - **Test guard:** `cli-client/src/agent/__tests__/safe-commands.test.ts` covers (a) positive cases for every command in the whitelist, both bash and PowerShell forms; (b) negative cases for write variants, chained writes, and suspicious patterns (backticks, command substitution wrapping a write).
 - **What to do when adding a new safe command:** add to the regex in `safe-commands.ts`; add a positive case in the test file; if the command can chain something destructive (e.g. `xargs rm`), make sure the existing chain-detection regex rejects it. Default to NOT safe — false positives ruin the pattern.
 
+## "error handling" in a feature list mis-classified build prompts as bug reports
+
+- **Source:** PR fixing user-reported regression (2026-05-15)
+- **Symptom:** User sent the prompt *"build a Node.js Express PostgreSQL backend ... validation middleware, error handling, pagination, search, and Docker Compose ..."* — a clear implement request. The agent responded as if it were a bug report, asking for *symptom / boundary / fix* context for an app that didn't exist. The reasoning peek confirmed `Reasoning(bug)`.
+- **Root cause:** `server/src/reasoning/intent-classifier.ts: BUG_PATTERNS` includes `\b(fix|debug|broken|...|error|...)\b`. The regex matched the word **"error"** inside the feature-list phrase *"error handling"* — a noun, not a verb / not a bug report. Bug-classification ran before the implement default, so it won the routing.
+- **Fix:** new `IMPLEMENT_LEAD_PATTERNS` regex that matches a strong build verb at the very START of the prompt (`build`, `create`, `implement`, `make`, `add`, `set up`, `scaffold`, `construct`, `develop`, `generate`, `design`, `write`, `spin up`, `stand up`, `bootstrap`, `produce`, `craft`, `put together`) followed by at least some content. When this anchor matches, the classifier returns `implement` BEFORE the bug check. Bug-reports open with different verbs (`fix`, `debug`, `why is X failing`) and a stack-trace shape; none trip the anchor.
+- **Test guards:**
+  - `server/src/reasoning/__tests__/intent-classifier.test.ts` — the verbatim user prompt is now a regression test under `## implement-anchor overrides bug-keyword false positives`
+  - Same file's `## bug-report prompts still classify as bug` block asserts `fix the broken auth flow with error handling`, `debug why X throws an error`, and stack-trace prompts still route to the bug pipeline
+- **What to do when adding a bug pattern:** the bug regexes should match terms that USUALLY appear in bug-report verbs / phrasings (e.g. `\bfailing\b` is fine because *"failing"* almost always means broken; `\berror\b` is risky because of compound nouns like `error handling`, `error logging`, `error middleware`, `error boundaries`, `error events`). When in doubt, add a positive test case for the new pattern AND a negative case for a feature-list compound that contains the same word.
+- **What to do when adding an implement-lead verb:** keep the list small and specific. Adding catch-alls like `do` or `handle` would let bug-reports through (e.g. *"do something about this crash"* would start matching the anchor and skip the bug check). The current list is curated for prompts that read like build requests, not action requests.
+
 ## Anthropic + OpenRouter providers used to skip the ctx-aware system prompt — briefs never reached the model
 
 - **Source:** plan `applied/2026-05-07-model-lock-and-portable-reasoning.md` (Stage B, PR #64)
