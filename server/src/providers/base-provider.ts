@@ -495,12 +495,19 @@ export abstract class BaseProvider {
       console.log(`[${this.name}] WEAK COMPLETION DETECTED: ${filesWritten} files, ${toolCalls} tools, content: "${(normalized.content || "").slice(0, 80)}"`)
       console.log(`[${this.name}] Overriding to needs_tool — forcing continuation`)
 
+      // Stage 3 of reasoning-chain-provider-parity plan: preserve the
+      // model's reasoningChain through the override so the cli's live
+      // peek doesn't lose this turn's deliberation. The override is
+      // mechanical (the server decided to continue) — the model's prior
+      // reasoning about why it thought it was done is still
+      // user-visible signal worth keeping.
       return {
         kind: "needs_tool",
         tool: "list_directory",
         args: { path: "." },
         content: "Checking project state to continue implementation...",
         reasoning: "My previous response was premature. I need to continue creating all required files.",
+        reasoningChain: normalized.reasoningChain,
         usage: normalized.usage
       }
     }
@@ -1153,12 +1160,18 @@ export abstract class BaseProvider {
       if (hasInvalidTool) {
         const validList = Array.from(VALID_TOOLS).join(", ")
         console.error(`[tool-gate] BLOCKED unknown tool(s): ${rejectedTools.join(", ")} — forcing retry with valid tools`)
+        // Stage 3 of reasoning-chain-provider-parity plan: preserve
+        // the model's reasoningChain even when the tool gate fires.
+        // The model's deliberation about WHY it picked the invalid
+        // tool is exactly what the user wants to see in the peek —
+        // it explains the mistake the override is correcting.
         return {
           kind: "needs_tool",
           tool: "list_directory",
           args: { path: "." },
           content: `⛔ TOOL REJECTED: You used unknown tool(s): ${rejectedTools.join(", ")}. These do NOT exist.\n\nYou may ONLY use these tools:\n${validList}\n\nPick the correct tool and try again. Do NOT invent tool names.`,
           reasoning: null,
+          reasoningChain: normalized.reasoningChain,
           usage: { inputTokens: 0, outputTokens: 0 }
         }
       }
