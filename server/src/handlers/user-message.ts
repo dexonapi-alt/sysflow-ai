@@ -12,7 +12,7 @@ import { actionPlanner } from "../services/action-planner.js"
 import { initRunContext, ingestDirectoryTree } from "../services/context-manager.js"
 import { isFrontendTask, detectFrontendStack, getFrontendPatterns } from "../knowledge/frontend-patterns.js"
 import { accumulateFrontendContent } from "../services/frontend-quality-guard.js"
-import { detectErrorForSearch, buildErrorSearchOverride, setConfigSkipList } from "../services/setup-intelligence.js"
+import { detectErrorForSearch, buildErrorSearchOverride, setConfigSkipList, setExpectedArtifacts } from "../services/setup-intelligence.js"
 import { runProjectInitChain } from "../reasoning/project-init-reasoner.js"
 import { detectErrorContext, setPendingError, detectAllErrors, setPendingErrorQueue } from "../services/error-autofix.js"
 import { createPipelineFromAiPlan, createFallbackPipeline, pipelineToTaskMeta } from "../services/task-pipeline.js"
@@ -206,6 +206,21 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
         ) {
           setConfigSkipList(runId, projectInitBrief.skipConfigVerificationFor)
           console.log(`[project-init] seeded action-planner skip list (${projectInitBrief.skipConfigVerificationFor.length} entries)`)
+        }
+        // Stage 4 follow-up of agent-code-correctness plan: seed the
+        // completion-artifact gate's per-run list from the brief's
+        // expectedArtifacts. The LLM decides which artifacts are
+        // required; the gate enforces against the disk at completion
+        // time. Confidence-aware: LOW-confidence verdicts don't seed
+        // (gate falls back to hardcoded keyword classifier as safety
+        // net). Always set (even empty list) so the gate knows the
+        // LLM ran and decided — empty list = no artifacts required,
+        // skip enforcement.
+        if (projectInitBrief.confidence !== "LOW") {
+          setExpectedArtifacts(runId, projectInitBrief.expectedArtifacts)
+          if (projectInitBrief.expectedArtifacts.length > 0) {
+            console.log(`[project-init] LLM committed expectedArtifacts: ${projectInitBrief.expectedArtifacts.join(", ")}`)
+          }
         }
       }
     } catch (err) {

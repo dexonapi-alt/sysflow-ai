@@ -114,13 +114,60 @@ You reason ONE paragraph at a time. Each paragraph MUST cover, in flowing prose 
      or \`existing-large\`, leave the list EMPTY — the action-planner
      should still verify against current docs for existing projects.
 
-  6. DECIDE — set \`done: true\` and commit \`repoState\` +
+  6. EXPECTED ARTIFACTS — what files MUST exist when the agent
+     declares the run complete? The completion gate enforces these,
+     so be deliberate. Pick from this fixed list (empty array = no
+     enforced artifacts):
+
+       • \`"db_schema"\`     — set when the user explicitly asks to
+                              build / scaffold / create a backend
+                              that uses Postgres / MySQL / SQLite /
+                              Mongo / MariaDB. The agent will need
+                              to write \`schema.sql\` or
+                              \`migrations/001_initial.sql\`. Do NOT
+                              set this when:
+                                - The user is just asking how a DB
+                                  works (Q&A, not implementation).
+                                - The DB is referenced as INPUT
+                                  (e.g. *"read connection from PG
+                                  env"*) not as something to build.
+                                - The repo already has a schema
+                                  and the prompt is adding a feature
+                                  to an existing app.
+
+       • \`"prisma_schema"\` — set when the user explicitly asks
+                              for Prisma scaffolding. The agent
+                              will need to write
+                              \`prisma/schema.prisma\`. Same caveats
+                              as \`db_schema\` — don't set on Q&A
+                              or input-only references.
+
+       • \`"tests"\`         — set when the user explicitly asks
+                              for tests / a test suite / unit tests
+                              / integration tests as part of the
+                              deliverable. Do NOT set when:
+                                - The word "test" is used casually
+                                  (e.g. *"test the implementation"*
+                                  / *"a test runner"* / *"automation,
+                                  test, CLI"* as category list).
+                                - The user is asking about how to
+                                  test (Q&A).
+                                - Tests are nice-to-have implied
+                                  best-practice, not explicitly asked.
+
+     Default to EMPTY ARRAY when the prompt doesn't unambiguously
+     require any of these. The enforcement is one-directional: the
+     gate will block completion when the artifact is missing, so
+     false positives waste the user's time. Conservative wins.
+
+  7. DECIDE — set \`done: true\` and commit \`repoState\` +
      \`fileCount\` + \`keyMarkers\` + \`investigationPlan\` +
-     \`skipConfigVerificationFor\` + \`confidence\`, OR set
-     \`done: false\` and end the paragraph with the specific
-     question another pass should answer (e.g. *"the tree has 12
-     files but no package.json — is this a stub of a fresh project
-     or a scripts folder? Investigating README + .gitignore next."*).
+     \`skipConfigVerificationFor\` + \`expectedArtifacts\` +
+     \`confidence\`, OR set \`done: false\` and end the paragraph
+     with the specific question another pass should answer (e.g.
+     *"the tree has 12 files but no package.json — is this a stub
+     of a fresh project or a scripts folder? Investigating README +
+     .gitignore next."*).
 
      Commit when you can — most repos are unambiguous after one
      pass. Iterating is for the rare edge cases.
@@ -161,13 +208,21 @@ outside the JSON.
   "keyMarkers": ["<marker 1>", "<marker 2>"],
   "investigationPlan": ["<concrete command 1>", "<command 2>", "<command 3>"],
   "skipConfigVerificationFor": ["<config filename 1>", "<filename 2>"],
+  "expectedArtifacts": ["db_schema"] | ["prisma_schema"] | ["tests"] | [],
   "confidence": "HIGH" | "MEDIUM" | "LOW",
   "supersedes": null
 }
 
-If \`done\` is true, ALL fields must be set (\`skipConfigVerificationFor\`
-may be empty when repoState is existing-*; \`investigationPlan\` may be a
-single entry like \`["ls -la"]\` for empty repos).
+If \`done\` is true, ALL fields must be set:
+  - \`skipConfigVerificationFor\` may be empty when repoState is
+    existing-*.
+  - \`investigationPlan\` may be a single entry like \`["ls -la"]\`
+    for empty repos.
+  - \`expectedArtifacts\` MUST be \`[]\` for prompts that don't
+    unambiguously require a DB schema / prisma schema / explicit
+    test suite. Conservative — the gate blocks completion on
+    missing artifacts, so false positives waste user time.
+
 If \`done\` is false, the typed fields MAY be null — you're flagging
 that another pass is needed.
 

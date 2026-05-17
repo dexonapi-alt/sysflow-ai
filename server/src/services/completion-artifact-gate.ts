@@ -28,6 +28,7 @@
 
 import fs from "node:fs/promises"
 import path from "node:path"
+import { getExpectedArtifacts } from "./setup-intelligence.js"
 
 export type ArtifactKind = "db_schema" | "prisma_schema" | "tests"
 
@@ -170,11 +171,72 @@ export interface ArtifactCheckResult {
 }
 
 /**
- * Top-level orchestrator: classify the prompt, scan the cwd for each
- * implied artifact, and return the missing ones. Caller decides
- * whether to block completion or just warn.
+ * Pure: rehydrate ImpliedArtifact metadata (description / trigger /
+ * examples) from a list of bare ArtifactKind values. Used when the
+ * LLM-driven `expectedArtifacts` list is the source of truth instead
+ * of the keyword classifier.
  */
-export async function checkImpliedArtifacts(prompt: string, cwd: string): Promise<ArtifactCheckResult> {
+export function impliedArtifactFromKind(kind: ArtifactKind): ImpliedArtifact {
+  if (kind === "prisma_schema") {
+    return {
+      kind: "prisma_schema",
+      expected: "a Prisma schema file at `prisma/schema.prisma`",
+      trigger: "the project-init reasoner committed expectedArtifacts: ['prisma_schema']",
+      examples: ["prisma/schema.prisma"],
+    }
+  }
+  if (kind === "db_schema") {
+    return {
+      kind: "db_schema",
+      expected: "a SQL schema file (e.g. `schema.sql`) or a migration directory (e.g. `migrations/001_initial.sql`)",
+      trigger: "the project-init reasoner committed expectedArtifacts: ['db_schema']",
+      examples: ["schema.sql", "migrations/001_initial.sql", "src/db/schema.sql"],
+    }
+  }
+  return {
+    kind: "tests",
+    expected: "at least one test file (e.g. `*.test.ts`, `*.test.js`, `*.spec.ts`, `*.spec.js`)",
+    trigger: "the project-init reasoner committed expectedArtifacts: ['tests']",
+    examples: ["src/routes/auth.test.ts", "tests/integration.spec.ts"],
+  }
+}
+
+/**
+ * Top-level orchestrator. Two-tier:
+ *
+ *   1. LLM-driven (preferred): when the project-init reasoner
+ *      committed `expectedArtifacts` for this run, use that list.
+ *      Empty list = LLM decided no artifacts required → skip
+ *      enforcement entirely (no false positives on "CLI calculator"
+ *      type prompts).
+ *
+ *   2. Hardcoded keyword fallback: only used when project-init didn't
+ *      fire (legacy / no reasoner backend / chain returned null).
+ *      Conservative but blunt — kept as the safety net.
+ *
+ * The LLM-driven path is the design contract: the model decides
+ * WHETHER each artifact is required; this gate enforces THAT
+ * decision against the disk.
+ */
+export async function checkImpliedArtifacts(prompt: string, cwd: string, runId?: string): Promise<ArtifactCheckResult> {
+  // Tier 1: LLM-driven verdict from project-init.
+  if (runId) {
+    const llmVerdict = getExpectedArtifacts(runId)
+    if (llmVerdict !== undefined) {
+      // LLM ran — trust its decision (empty array = no artifacts required).
+      const expected = llmVerdict
+        .filter((k): k is ArtifactKind => k === "db_schema" || k === "prisma_schema" || k === "tests")
+        .map(impliedArtifactFromKind)
+      if (expected.length === 0) return { ok: true, expected: [], missing: [] }
+      const missing: ImpliedArtifact[] = []
+      for (const a of expected) {
+        const exists = await artifactExists(cwd, a.kind)
+        if (!exists) missing.push(a)
+      }
+      return { ok: missing.length === 0, expected, missing }
+    }
+  }
+  // Tier 2: hardcoded keyword fallback (legacy / no reasoner).
   const expected = classifyImpliedArtifacts(prompt)
   if (expected.length === 0) return { ok: true, expected: [], missing: [] }
   const missing: ImpliedArtifact[] = []
