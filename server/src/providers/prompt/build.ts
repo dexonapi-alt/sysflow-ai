@@ -63,7 +63,14 @@ export function buildSystemPrompt(ctx: PromptCtx = {}): BuiltPrompt {
     // task_guidelines (general workflow) and before output_efficiency
     // (formatting) so the model reads the IMPORT semantics before
     // any per-turn output considerations.
-    { id: "node_esm_rules", priority: 35, cacheable: true, content: getNodeEsmRulesSection() },
+    //
+    // Language-gated via the project-init brief's keyMarkers — skips
+    // entirely on existing Python / Rust / Go / etc. repos to avoid
+    // ~2000 tokens of irrelevant rules. Empty / small repos render
+    // (we don't know the stack yet; Node is the dominant scaffold
+    // target). Section file returns null when the gate decides skip;
+    // the section filter at the bottom of buildSystemPrompt drops it.
+    { id: "node_esm_rules", priority: 35, cacheable: true, content: getNodeEsmRulesSection(ctx) },
     { id: "output_efficiency", priority: 40, cacheable: true, content: getOutputEfficiencySection() },
     // Stage 1 of command-first-investigation: investigation patterns
     // section. Non-cacheable because it reads ctx.platform to render
