@@ -59,6 +59,47 @@ interface WorkingContext {
 
 const runContexts = new Map<string, WorkingContext>()
 
+// ─── Top-level noise filter (Stage 1 of awareness-and-verification-correctness) ───
+
+/**
+ * Top-level entries the server treats as noise — kept in sync with
+ * cli-client/src/agent/executor.ts NOISE_TOP_LEVEL_ENTRIES.
+ *
+ * Both sides MUST agree: the cli filters at capture time; the server
+ * filters again at ingest time so that (a) project_structure fact
+ * stays clean even when a different cli sends a raw tree, and
+ * (b) the staleness comparison only considers tracked files that
+ * SHOULD appear in a noise-filtered tree.
+ *
+ * Excluded from this set on purpose: legitimate top-level dotfiles
+ * (.env*, .gitignore, .eslintrc*, .npmrc, .prettierrc, .editorconfig,
+ * .nvmrc, .dockerignore) — these are real top-level files the agent
+ * authors and the user expects to see. Filtering them caused the
+ * .env.example false-positive that Stage 1 fixes.
+ */
+export const NOISE_TOP_LEVEL_ENTRIES: ReadonlySet<string> = new Set([
+  ".git",
+  ".DS_Store",
+  ".vscode",
+  ".idea",
+  "node_modules",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".next",
+  ".nuxt",
+  "dist",
+  "build",
+  ".turbo",
+  ".cache",
+])
+
+export function isNoiseTopLevelEntry(name: string): boolean {
+  if (NOISE_TOP_LEVEL_ENTRIES.has(name)) return true
+  if (name.startsWith("sysbase")) return true
+  return false
+}
+
 /** Maximum context entries before we start pruning oldest unverified */
 const MAX_FILE_ENTRIES = 80
 const MAX_FACT_ENTRIES = 30
@@ -162,10 +203,16 @@ export function ingestDirectoryTree(
   const ctx = runContexts.get(runId)
   if (!ctx) return { staleFiles: [] }
 
+  // Stage 1 of awareness-and-verification-correctness: apply the
+  // shared noise filter so project_structure stays clean even if a
+  // raw tree (with .git / node_modules / etc.) reaches the server,
+  // AND so the staleness comparison only considers tracked files
+  // that SHOULD appear in a noise-filtered tree.
+  const filteredTree = tree.filter((e) => !isNoiseTopLevelEntry(e.name))
+
   ctx.facts.set("project_structure", {
     key: "project_structure",
-    value: tree
-      .filter((e) => !e.name.startsWith("sysbase"))
+    value: filteredTree
       .map((e) => `${e.type === "directory" ? "[dir]" : "[file]"} ${e.name}`)
       .join(", "),
     source: "directory_tree",
@@ -179,13 +226,21 @@ export function ingestDirectoryTree(
   // refreshed tree are flagged stale. Sub-directory files can't be
   // checked from a top-level snapshot, so we don't include them in
   // the stale list — under-reporting is safer than false positives.
-  const currentTopLevel = new Set(tree.map((e) => e.name))
+  //
+  // Stage 1 of awareness-and-verification-correctness: skip noise
+  // entries on BOTH the tree side (filteredTree above) AND the
+  // tracked-files side (the `continue` below). Otherwise a tracked
+  // file named e.g. "dist" would be flagged stale on every refresh
+  // even though we deliberately stripped it from the tree.
+  const currentTopLevel = new Set(filteredTree.map((e) => e.name))
   const staleFiles: string[] = []
   for (const [path, knowledge] of ctx.files) {
     // Skip files already known to be deleted.
     if (knowledge.action === "deleted") continue
     // Skip sub-directory files — we can't verify them from this snapshot.
     if (path.includes("/") || path.includes("\\")) continue
+    // Skip noise entries — never expected in the filtered tree.
+    if (isNoiseTopLevelEntry(path)) continue
     if (!currentTopLevel.has(path)) {
       staleFiles.push(path)
       // Mark the file knowledge as deleted so the warning only fires
