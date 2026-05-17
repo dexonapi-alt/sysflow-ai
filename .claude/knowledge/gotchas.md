@@ -258,3 +258,29 @@ Past bugs and non-obvious constraints worth preserving so the next contributor d
 - **Prevention:** when adding a new failure path or error envelope, ASK: "could the AGENT interpret this error as something to fix from inside the user's project?" If yes, tag with `errorSource: "sysflow_infra"`. The discriminator is the safety contract; message-pattern matching is fragile and provider-dependent.
 
 - **Test guards:** `cli-client/src/agent/__tests__/state-machine-sysflow-infra.test.ts` (terminal classification), `server/src/providers/__tests__/error-source-propagation.test.ts` (failedResponse + mapper propagation), `cli-client/src/lib/__tests__/server-non-retryable.test.ts` (cli retry classifier), `server/src/providers/__tests__/openrouter-402.test.ts: classify402Terminal` (provider-side bail-out).
+
+## Agent shipped a POS backend with cascading ESM import failures + no database schema
+
+- **Source:** plan `applied/2026-05-16-agent-code-correctness-and-completion-artifacts.md` (canonical trigger)
+- **Symptom:** user ran `sys` against `C:\Users\DevAPI\Documents\test` with prompt *"Build a clean and scalable Express.js POS backend"*. Agent scaffolded files + declared "completed". User ran `npm run dev` and hit:
+  ```
+  ReferenceError: authRoutes is not defined  at src/index.ts:17:22
+  Error: Cannot find module 'C:\...\src\config\db' (ESM .ts extension required)
+  SyntaxError: Named export 'NextFunction' not found (Express is CJS)
+  SyntaxError: The requested module './middleware/errorHandler.ts' does not provide an export named 'default'
+  ```
+  Plus the completion summary said: *"## Notes — Database schema creation is a manual step for the user."* User had to manually create schema.sql AND fix every TS import.
+- **Root causes (FIVE compounding mechanisms):**
+  1. System prompt had ZERO Node-ESM rules — model emitted bare relative imports (no `.ts` extension), default-imported a file with only named exports, named-imported a TypeScript type from a CommonJS package.
+  2. The cli's `sanitizeImports` SILENTLY stripped bad imports — file landed with unimported names, never reported back to the model.
+  3. No pre-completion `tsc --noEmit` gate — model declared done without compilation check; runtime errors only surfaced at `npm run dev`.
+  4. No prompt-implied artifact verification — agent claimed completion despite the prompt explicitly mentioning Postgres + no schema file written.
+  5. Completion summary disclaimer culture: agent shipped *"manual step for the user"* whenever in doubt, treating schema creation as out-of-scope when the prompt said otherwise.
+- **Fix:** plan `applied/2026-05-16-agent-code-correctness-and-completion-artifacts.md` — five stages + LLM-driven follow-up:
+  - Stage 1: NODE-ESM + TS IMPORT RULES section in `tools.ts`, gated on Node/TS via project-init `keyMarkers` (skips on Python/Rust/Go).
+  - Stage 2: cli `sanitizeImports` now surfaces `_strippedImports` on results; server injects `═══ IMPORTS STRIPPED ═══` block via `actionPlanner.injectContext`.
+  - Stage 3: pre-completion `tsc --noEmit` gate via `runTscGate()`. Overrides `completed` → `needs_tool` + injects `═══ TYPECHECK FAILED ═══` block with diagnostics.
+  - Stage 4: prompt-implied artifact gate. Initially hardcoded keyword matching; immediately replaced with LLM-driven `expectedArtifacts` from project-init reasoner (PR #112) to avoid false positives on Q&A / casual-mention prompts.
+  - Stage 5: telemetry counters (`importsStrippedCount` / `tscErrorCount` / `completionBlockedReason`) + KB.
+- **Prevention:** when authoring new completion paths or extending the completion guard, ASK: "what's the runtime check that would catch the agent shipping broken code?" If `tsc --noEmit` / `node --check` / `npm test` would catch it, add it as a gate. The cost is one process invocation; the benefit is no broken shipments. Also: never let the agent ship a "manual step for the user" disclaimer for work the prompt explicitly named (DB schema when prompt mentions Postgres, tests when prompt mentions testing).
+- **Test guards:** `server/src/providers/prompt/sections/__tests__/node-esm-rules.test.ts` (33 tests: rules + language gate), `server/src/services/__tests__/import-stripped-inject.test.ts` (15 tests: pure helpers), `server/src/services/__tests__/tsc-completion-gate.test.ts` (23 tests: orchestrator + skip paths + error extraction), `server/src/services/__tests__/completion-artifact-gate.test.ts` (41 tests: keyword classifier + fs walker + LLM-driven tier), `server/src/reasoning/__tests__/project-init-reasoner.test.ts` (`expectedArtifacts` schema + LLM commit path).

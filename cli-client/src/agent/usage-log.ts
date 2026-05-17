@@ -134,6 +134,21 @@ export interface RunSummary {
    *  emitting more validation / constraint-violation 5xx than normal —
    *  signal to investigate the request-shaping path. */
   nonRetryable5xxCount?: number
+  /** Stage 5 of plan 2026-05-16-agent-code-correctness-and-completion-artifacts.md.
+   *  Per-run total of imports stripped by Stage 2's loud sanitizer.
+   *  Spike = the model is writing forward references regularly =
+   *  Stage 1's rules not landing OR batching/ordering needs Plan 4. */
+  importsStrippedCount?: number
+  /** Stage 5: peak tsc error count when Stage 3's gate fired. 0
+   *  when the gate didn't fire OR typecheck passed. */
+  tscErrorCount?: number
+  /** Stage 5: which completion-time gate blocked the run, if any.
+   *  Last-write-wins across multiple completion attempts in a run.
+   *    "tsc"              — Stage 3 tsc gate fired
+   *    "artifact_missing" — Stage 4 artifact gate fired
+   *    null               — neither fired; completion succeeded
+   *                         (or run terminated for a different reason) */
+  completionBlockedReason?: "tsc" | "artifact_missing" | null
 }
 
 const PROMPT_PREVIEW_CHARS = 200
@@ -202,6 +217,11 @@ export async function recordRunSummary(sysbasePath: string | undefined | null, s
     sysflowInfraErrorCount: summary.sysflowInfraErrorCount ?? 0,
     nullToolRejectionCount: summary.nullToolRejectionCount ?? 0,
     nonRetryable5xxCount: summary.nonRetryable5xxCount ?? 0,
+    // Stage 5 of code-correctness plan. Defaults to 0 / null so
+    // jq distributions stay null-free + sentinel-clean.
+    importsStrippedCount: summary.importsStrippedCount ?? 0,
+    tscErrorCount: summary.tscErrorCount ?? 0,
+    completionBlockedReason: summary.completionBlockedReason ?? null,
   }
   try {
     await fs.appendFile(file, JSON.stringify(entry) + "\n", "utf8")

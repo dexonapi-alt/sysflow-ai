@@ -373,6 +373,17 @@ export interface ClientResponse {
    *     (preserves legacy behaviour).
    */
   errorSource?: "sysflow_infra" | "user_machine" | "unknown"
+  /**
+   * Stage 5 of plan 2026-05-16-agent-code-correctness-and-completion-artifacts.md.
+   *
+   * Surfaced when a completion-time gate (Stage 3 tsc / Stage 4
+   * artifact) overrode a `completed` envelope to `needs_tool`. The
+   * cli reads this to increment per-run RunSummary counters.
+   */
+  completionBlockedBy?: "tsc" | "artifact_missing" | null
+  /** Stage 5: when `completionBlockedBy === "tsc"`, the number of
+   *  typecheck errors `tsc --noEmit` reported. */
+  completionTscErrorCount?: number
 }
 
 // ─── Database ───
