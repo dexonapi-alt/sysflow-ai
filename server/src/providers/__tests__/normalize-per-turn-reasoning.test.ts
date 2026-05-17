@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect } from "vitest"
-import { resolvePerTurnReasoningChain, mapNormalizedResponseToClient } from "../normalize.js"
+import { resolvePerTurnReasoningChain, classifyPerTurnReasoningSource, mapNormalizedResponseToClient } from "../normalize.js"
 import type { NormalizedResponse } from "../../types.js"
 
 const baseUsage = { inputTokens: 0, outputTokens: 0 }
@@ -143,6 +143,92 @@ describe("mapNormalizedResponseToClient — needs_tool envelope wiring", () => {
       usage: baseUsage,
     } as unknown as NormalizedResponse)
     expect(out.perTurnReasoningChain).toBeUndefined()
+  })
+})
+
+// ─── Stage 4 of reasoning-chain-provider-parity plan: source classifier ───
+
+describe("classifyPerTurnReasoningSource", () => {
+  it("returns 'structured' when reasoningChain is non-empty array", () => {
+    expect(classifyPerTurnReasoningSource({
+      kind: "needs_tool",
+      reasoningChain: ["one", "two"],
+      usage: baseUsage,
+    } as unknown as NormalizedResponse)).toBe("structured")
+  })
+
+  it("returns 'synthesised' when only singular reasoning is present", () => {
+    expect(classifyPerTurnReasoningSource({
+      kind: "needs_tool",
+      reasoning: "fallback paragraph",
+      usage: baseUsage,
+    } as unknown as NormalizedResponse)).toBe("synthesised")
+  })
+
+  it("returns 'structured' when BOTH are present (array wins)", () => {
+    expect(classifyPerTurnReasoningSource({
+      kind: "needs_tool",
+      reasoning: "fallback",
+      reasoningChain: ["structured"],
+      usage: baseUsage,
+    } as unknown as NormalizedResponse)).toBe("structured")
+  })
+
+  it("returns null when neither is present", () => {
+    expect(classifyPerTurnReasoningSource({
+      kind: "needs_tool",
+      usage: baseUsage,
+    } as unknown as NormalizedResponse)).toBeNull()
+  })
+
+  it("returns null when reasoning is whitespace-only", () => {
+    expect(classifyPerTurnReasoningSource({
+      kind: "needs_tool",
+      reasoning: "   ",
+      usage: baseUsage,
+    } as unknown as NormalizedResponse)).toBeNull()
+  })
+
+  it("returns null when reasoningChain is empty array AND no reasoning", () => {
+    expect(classifyPerTurnReasoningSource({
+      kind: "needs_tool",
+      reasoningChain: [],
+      usage: baseUsage,
+    } as unknown as NormalizedResponse)).toBeNull()
+  })
+})
+
+describe("mapNormalizedResponseToClient — perTurnReasoningSource on needs_tool", () => {
+  it("sets perTurnReasoningSource='structured' when array is populated", () => {
+    const out = mapNormalizedResponseToClient("r-src-1", {
+      kind: "needs_tool",
+      tool: "read_file",
+      args: { path: "x" },
+      reasoningChain: ["p1"],
+      usage: baseUsage,
+    } as unknown as NormalizedResponse)
+    expect(out.perTurnReasoningSource).toBe("structured")
+  })
+
+  it("sets perTurnReasoningSource='synthesised' when only singular reasoning is set", () => {
+    const out = mapNormalizedResponseToClient("r-src-2", {
+      kind: "needs_tool",
+      tool: "read_file",
+      args: { path: "x" },
+      reasoning: "singular",
+      usage: baseUsage,
+    } as unknown as NormalizedResponse)
+    expect(out.perTurnReasoningSource).toBe("synthesised")
+  })
+
+  it("sets perTurnReasoningSource=null when neither is set", () => {
+    const out = mapNormalizedResponseToClient("r-src-3", {
+      kind: "needs_tool",
+      tool: "read_file",
+      args: { path: "x" },
+      usage: baseUsage,
+    } as unknown as NormalizedResponse)
+    expect(out.perTurnReasoningSource).toBeNull()
   })
 })
 

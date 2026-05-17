@@ -109,6 +109,16 @@ export interface RunSummary {
    *  truncation cap (MAX_PARAGRAPH_LINES=3, MAX_PARAGRAPH_CHARS=180)
    *  is too tight for typical chains; low/zero values mean it's fine. */
   reasoningPeekExpansions?: number
+  /** Stage 4 of reasoning-chain-provider-parity plan: per-run count
+   *  of turns where the model emitted `reasoningChain[]` as a
+   *  non-empty array (the post-Stage-2 directive working as intended).
+   *  Defaults to 0. */
+  reasoningChainEmittedTurns?: number
+  /** Stage 4: per-run count of turns where only singular `reasoning`
+   *  was present and Stage 1's normaliser fallback synthesised the
+   *  chain. Distribution-wise, spike here = MANDATORY directive being
+   *  ignored = need to tighten further or model-specific shim. */
+  reasoningChainSynthesisedTurns?: number
 }
 
 const PROMPT_PREVIEW_CHARS = 200
@@ -169,6 +179,10 @@ export async function recordRunSummary(sysbasePath: string | undefined | null, s
     projectInitConfidence: summary.projectInitConfidence ?? null,
     webSearchEmptyCount: summary.webSearchEmptyCount ?? 0,
     reasoningPeekExpansions: summary.reasoningPeekExpansions ?? 0,
+    // Stage 4 of reasoning-chain-provider-parity. Defaults to 0 so
+    // jq distributions stay null-free.
+    reasoningChainEmittedTurns: summary.reasoningChainEmittedTurns ?? 0,
+    reasoningChainSynthesisedTurns: summary.reasoningChainSynthesisedTurns ?? 0,
   }
   try {
     await fs.appendFile(file, JSON.stringify(entry) + "\n", "utf8")

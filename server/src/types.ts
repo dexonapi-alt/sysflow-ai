@@ -325,6 +325,17 @@ export interface ClientResponse {
    * turns).
    */
   perTurnReasoningChain?: string[]
+  /**
+   * Stage 4 of reasoning-chain-provider-parity plan: classifies the
+   * source of `perTurnReasoningChain` so cli telemetry can distinguish
+   * structured-chain emissions from singular-reasoning fallbacks.
+   *   - `"structured"` — model emitted a non-empty `reasoningChain[]`.
+   *   - `"synthesised"` — only singular `reasoning` present; Stage 1's
+   *     fallback synthesised a one-element chain.
+   *   - `null` — neither path produced anything.
+   * Cli accumulates per-run counts into RunSummary.
+   */
+  perTurnReasoningSource?: "structured" | "synthesised" | null
 }
 
 // ─── Database ───

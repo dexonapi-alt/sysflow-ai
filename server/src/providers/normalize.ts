@@ -32,6 +32,34 @@ export function resolvePerTurnReasoningChain(normalized: NormalizedResponse): st
   return undefined
 }
 
+/**
+ * Stage 4 of plan 2026-05-16-reasoning-chain-provider-parity.md.
+ *
+ * Telemetry-side classifier: tells the caller WHICH path
+ * `resolvePerTurnReasoningChain` would take if called.
+ *   - "structured" — the model emitted a non-empty `reasoningChain[]`
+ *     (post-Stage-2 directive working as intended).
+ *   - "synthesised" — only singular `reasoning` was present; Stage 1's
+ *     fallback synthesised a one-element chain. Distribution-wise,
+ *     spikes here mean the directive is being ignored by the model.
+ *   - null — neither path produced anything. Either a non-corporeal
+ *     turn (e.g. waiting_for_user) or the model emitted no
+ *     deliberation at all.
+ *
+ * Pure; exported for tests.
+ */
+export type PerTurnReasoningSource = "structured" | "synthesised" | null
+
+export function classifyPerTurnReasoningSource(normalized: NormalizedResponse): PerTurnReasoningSource {
+  if (Array.isArray(normalized.reasoningChain) && normalized.reasoningChain.length > 0) {
+    return "structured"
+  }
+  if (typeof normalized.reasoning === "string" && normalized.reasoning.trim().length > 0) {
+    return "synthesised"
+  }
+  return null
+}
+
 function classifyFailureErrorCode(error: string | undefined): ServerErrorCode {
   if (!error) return "unknown"
   const lower = error.toLowerCase()
@@ -64,6 +92,11 @@ export function mapNormalizedResponseToClient(runId: string, normalized: Normali
         // its output. Closes the provider-parity gap where openrouter /
         // anthropic models often emit only the legacy `reasoning` field.
         perTurnReasoningChain: resolvePerTurnReasoningChain(normalized),
+        // Stage 4: surface the source for telemetry. The cli increments
+        // `structured` vs `synthesised` counters in RunSummary to track
+        // whether Stage 2's MANDATORY directive is shifting the
+        // distribution toward structured chains.
+        perTurnReasoningSource: classifyPerTurnReasoningSource(normalized),
       }
 
     case "waiting_for_user":
@@ -82,6 +115,7 @@ export function mapNormalizedResponseToClient(runId: string, normalized: Normali
         summary: normalized.summary || null,
         reasoning: normalized.reasoning || null,
         perTurnReasoningChain: resolvePerTurnReasoningChain(normalized),
+        perTurnReasoningSource: classifyPerTurnReasoningSource(normalized),
       }
 
     case "failed":

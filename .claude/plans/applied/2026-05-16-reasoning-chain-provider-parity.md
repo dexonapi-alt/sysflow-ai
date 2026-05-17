@@ -1,7 +1,7 @@
 # Reasoning-chain provider parity (peek refresh on all backends)
 
 - **Created:** 2026-05-16
-- **Status:** in-progress
+- **Status:** implemented (2026-05-16)
 - **Scope:** Make the reasoning peek refresh on EVERY turn regardless of which model / provider is serving the run. Today the peek only refreshes when `response.reasoningChain[]` (array) is populated, which on `openrouter-auto` and other CJS-shaped models is almost never — those models emit `response.reasoning` (singular string) instead. The peek stays stuck on the initial brief (project_init or intent_classification) for the entire run.
 
 ## Goal
@@ -171,3 +171,16 @@ Each stage = one PR off `main`. ~500-700 LOC + 16-20 new tests across four stage
 - **Agent-runtime-fixes plan Stage 3** (applied 2026-05-15) — this plan completes that one's provider-parity gap. After this lands, the user-visible behaviour of "peek refreshes per turn" actually holds on all backends.
 - **Code-correctness plan** (sibling, `2026-05-16-agent-code-correctness-and-completion-artifacts.md`) — when the tsc gate (Stage 3 there) blocks completion + injects diagnostics, the model's response to that inject will have `reasoningChain[]` that reaches the peek. Today it would stay stuck on project_init and the user wouldn't see what the model is thinking about the typecheck failure.
 - **Accountability plan** (sibling) — when batches are capped at 3 tools requiring reasoning per file, the per-file reasoning needs to surface visibly. This plan's per-turn refresh makes that visible.
+
+## Completion notes
+
+Shipped across four PRs (#98-#101) on 2026-05-16:
+
+- **PR #98 (Stage 1)** — `resolvePerTurnReasoningChain` helper: array wins; falls back to synthesising single-element chain from singular `reasoning`. 15 tests.
+- **PR #99 (Stage 2)** — strengthened the `reasoningChain` directive in `tools.ts`: removed the "Skip on trivial turns" escape hatch; made the array MANDATORY on every needs_tool/completed response; added per-file reasoning sub-rule for batched responses. 9 tests.
+- **PR #100 (Stage 3)** — audit found NO per-provider parser gap (all three providers route through `parseJsonResponse`) but DID find two server-side overrides that silently dropped the chain. Fixed: weak-completion override + tool-gate override now both carry `reasoningChain` forward. 6 tests.
+- **PR #101 (this)** — `classifyPerTurnReasoningSource` + `perTurnReasoningSource` on `ClientResponse` + per-run cli counters `reasoningChainEmittedTurns` / `reasoningChainSynthesisedTurns` in `RunSummary`. KB entries (1 architecture extension + 1 decision + 1 gotcha). Plan archived.
+
+**Deviation:** Stage 3 was framed as a "per-provider parser parity audit" expecting to find gaps. The audit found instead that all providers route through one parser — the actual gaps were the server-side overrides discovered by reading the parser closely. Net work was simpler than the plan suggested.
+
+The user's repro is fixed: the cli's `<ReasoningPeek>` now refreshes on every turn regardless of provider, with the chain preserved through server-side overrides.
