@@ -124,7 +124,15 @@ export function formatToolLabel(tool: string, args: Record<string, unknown>): st
       return colors.tool("batch write") + " " + colors.muted(`${files.length} files`)
     }
     default:
-      return colors.tool(tool || "unknown") + " " + colors.muted(JSON.stringify(args))
+      // Stage 1 of plan 2026-05-16-server-hardening-and-error-source-distinction.md:
+      // render explicitly-flagged invalid tools so the user sees the
+      // failure mode clearly. Previously rendered as "unknown {}" which
+      // looked like a real tool — masked the bug + made the DB-constraint
+      // 500 traceback confusing.
+      if (!tool || tool.length === 0) {
+        return colors.tool("<invalid tool>") + " " + colors.muted(JSON.stringify(args))
+      }
+      return colors.tool(tool) + " " + colors.muted(JSON.stringify(args))
   }
 }
 

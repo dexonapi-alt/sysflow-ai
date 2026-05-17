@@ -59,6 +59,26 @@ export function getToolMeta(tool: string): ToolMeta {
   return TOOL_META[tool] ?? DEFAULT_META
 }
 
+/**
+ * Stage 1 of plan 2026-05-16-server-hardening-and-error-source-distinction.md.
+ *
+ * Canonical set of tool names the cli executor knows how to dispatch.
+ * Derived from TOOL_META keys so the set stays in sync with the
+ * registry. Used by the validation gate (`isKnownTool`) before any
+ * tool call leaves the cli — closes the bug where the agent emitted
+ * a null/hallucinated tool name, the cli rendered `▸ unknown {}`, and
+ * the server crashed with a Postgres NOT NULL violation on `tool`.
+ */
+export const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set(Object.keys(TOOL_META))
+
+/**
+ * Pure: returns true when `tool` is a non-empty string in
+ * `KNOWN_TOOL_NAMES`. Null / undefined / empty / unknown → false.
+ */
+export function isKnownTool(tool: unknown): tool is string {
+  return typeof tool === "string" && tool.length > 0 && KNOWN_TOOL_NAMES.has(tool)
+}
+
 export interface ToolCallEntry {
   id: string
   tool: string
