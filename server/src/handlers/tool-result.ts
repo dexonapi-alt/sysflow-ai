@@ -4,6 +4,7 @@ import { getRun, finalizeRun } from "../store/runs.js"
 import { getTask, finalizeTask } from "../store/tasks.js"
 import { saveToolResult } from "../store/tool-results.js"
 import { collectStrippedImports, buildImportStrippedInject } from "../services/import-stripped-inject.js"
+import { runTscGate, buildTscFailedInject } from "../services/tsc-completion-gate.js"
 import { persistModelUsage } from "../store/usage.js"
 import { maybeUpdateProjectMemory } from "../store/memory.js"
 import { recordRunAction, saveSessionEntry, getRunActions, clearRunActions } from "../store/sessions.js"
@@ -1377,6 +1378,52 @@ Do NOT reference these files in your next action. Do NOT try to read or edit the
       }
     } else {
       frontendQualityRejections.delete(body.runId)
+    }
+  }
+
+  // ─── Stage 3 of agent-code-correctness plan: pre-completion tsc gate ───
+  // When the run authored .ts/.tsx files AND tsconfig.json exists,
+  // run `tsc --noEmit` BEFORE accepting completion. If typecheck has
+  // errors, override the response to needs_tool + inject the
+  // diagnostics so the agent fixes them before re-declaring done.
+  // Gracefully skips when tsc isn't installed / no tsconfig. Closes
+  // the user-reported repro where the agent shipped a POS backend
+  // with cascading TS errors that only surfaced at `npm run dev`.
+  if (normalized.kind === "completed" && !isFatal && run.cwd) {
+    const tscGateOn = (() => {
+      try { return getFlag<boolean>("quality.precompletion_tsc_gate_enabled", run.sysbasePath as string | undefined) }
+      catch { return true }
+    })()
+    if (tscGateOn) {
+      const tscTimeout = (() => {
+        try { return getFlag<number>("quality.precompletion_tsc_timeout_ms", run.sysbasePath as string | undefined) }
+        catch { return 30_000 }
+      })()
+      const filesAuthored = getRunActions(body.runId).filesModified
+      try {
+        const tscResult = await runTscGate({
+          cwd: run.cwd as string,
+          filesWritten: filesAuthored,
+          timeoutMs: tscTimeout,
+        })
+        if (tscResult.ran && !tscResult.ok) {
+          console.log(`[tsc-gate] BLOCKED completion: ${tscResult.errorCount} typecheck error(s) — injecting diagnostics + overriding to needs_tool`)
+          actionPlanner.injectContext(body.runId, buildTscFailedInject(tscResult))
+          normalized = {
+            kind: "needs_tool",
+            tool: "list_directory",
+            args: { path: "." },
+            content: `Completion blocked: ${tscResult.errorCount} typecheck error${tscResult.errorCount === 1 ? "" : "s"} detected. Read the inject block and fix before declaring done again.`,
+            reasoning: "tsc --noEmit reported errors — overriding completion to force fix.",
+            reasoningChain: normalized.reasoningChain,
+            usage: normalized.usage,
+          }
+        } else if (tscResult.skippedReason) {
+          console.log(`[tsc-gate] skipped: ${tscResult.skippedReason}`)
+        }
+      } catch (err) {
+        console.warn(`[tsc-gate] gate threw — degrading to accept completion: ${(err as Error).message}`)
+      }
     }
   }
 
