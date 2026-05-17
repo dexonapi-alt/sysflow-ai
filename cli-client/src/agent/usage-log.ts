@@ -149,6 +149,31 @@ export interface RunSummary {
    *    null               — neither fired; completion succeeded
    *                         (or run terminated for a different reason) */
   completionBlockedReason?: "tsc" | "artifact_missing" | null
+  /** Stage 5 of plan 2026-05-16-awareness-and-verification-correctness.md.
+   *  Per-run count of legitimate top-level dotfiles (.env*, .gitignore,
+   *  .eslintrc*, etc.) the Stage 1 conservative filter preserved that
+   *  the pre-Stage-1 strip-all-dots filter would have dropped. Spike =
+   *  Stage 1 is doing useful work on this scaffold style. 0 = no
+   *  dotfiles authored (also fine — no false stale signals to suppress). */
+  dotfileFilterCorrections?: number
+  /** Stage 5: peak cumulative count of intent-keyword satisfactions
+   *  satisfied via Stage 2's broader haystack (Tier 2 structural OR
+   *  Tier 3 content). Tier 1 path hits don't count — those passed the
+   *  pre-Stage-2 detector too. Captured from `response.intentKeyword-
+   *  ContentMatches`; cli takes the peak across turns since the server-
+   *  side counter is monotonic. */
+  intentKeywordContentMatches?: number
+  /** Stage 5: true if Stage 3's blocked-state off-course modal actually
+   *  rendered to the user this run. Latched once-true and stays true
+   *  for the run's remaining turns. Defaults to false. */
+  awarenessModalShown?: boolean
+  /** Stage 5: per-run count of Stage 4 PowerShell-error catches —
+   *  times the cli's stderr scanner flagged a cmdlet-binding failure
+   *  (FullyQualifiedErrorId etc.) that would otherwise have been
+   *  reported as success. Spike on Windows runs = the model is still
+   *  emitting bash forms PowerShell rejects = Stage 4.1's platform-
+   *  aware prompt isn't fully landing yet. */
+  windowsShellErrorsCaught?: number
 }
 
 const PROMPT_PREVIEW_CHARS = 200
@@ -222,6 +247,11 @@ export async function recordRunSummary(sysbasePath: string | undefined | null, s
     importsStrippedCount: summary.importsStrippedCount ?? 0,
     tscErrorCount: summary.tscErrorCount ?? 0,
     completionBlockedReason: summary.completionBlockedReason ?? null,
+    // Stage 5 of awareness-and-verification-correctness plan.
+    dotfileFilterCorrections: summary.dotfileFilterCorrections ?? 0,
+    intentKeywordContentMatches: summary.intentKeywordContentMatches ?? 0,
+    awarenessModalShown: summary.awarenessModalShown ?? false,
+    windowsShellErrorsCaught: summary.windowsShellErrorsCaught ?? 0,
   }
   try {
     await fs.appendFile(file, JSON.stringify(entry) + "\n", "utf8")

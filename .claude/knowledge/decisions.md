@@ -728,3 +728,46 @@ PR #112 replaced the keyword classifier with **LLM-driven `expectedArtifacts`**:
 - Gate ENFORCES that decision against the disk (mechanical check).
 
 Both halves matter. Without the LLM verdict, the gate over-fires. Without the gate, the model can claim done without writing the file (the original user bug).
+
+## intent_keyword_absent searches file content + structural signals, not just paths
+
+- **Source:** plan `applied/2026-05-16-awareness-and-verification-correctness.md` (Stage 2)
+
+The `intent_keyword_absent` heuristic (one of six in `divergence-detector.ts`) flags when a prompt-derived keyword has no trace in the run's output. Pre-Stage-2 the haystack was file PATHS + completion message ONLY — which false-flagged on a legitimately-built Express + PostgreSQL POS backend because `"express"` only appeared in `package.json` deps and `"pg"` only in `src/db.ts` imports, neither of which the path haystack saw. Confidence dropped 75 → 50 → 25 across three turns, the awareness loop wanted to halt, the implementation was actually correct.
+
+Stage 2 extends the satisfaction check with two tiers:
+
+- **Tier 2 — structural signals.** Data-driven table of 30+ keywords → `package.json` deps OR framework-specific file paths. `"express"` satisfied when `package.json` content contains `"express"`. `"prisma"` satisfied when `prisma/schema.prisma` exists. `"react"` satisfied when package.json has `"react"` OR a `.tsx` file exists.
+- **Tier 3 — content scan.** Word-boundary regex (`(?:^|[^a-z0-9])kw(?:[^a-z0-9]|$)`) over the first 1KB of every newly-written file. Word boundary prevents `"reactor"` from satisfying `"react"` and `"package"` from satisfying `"pg"`.
+
+The detector returns `IntentKeywordSatisfactionTier` (`"path" | "structural" | "content" | null`) so Stage 5's telemetry can count Tier 2/3 hits — those are the ones Stage 2 rescued from false-positive land. Tier 1 path hits don't count because they would have passed the pre-Stage-2 detector too.
+
+**Why not just LLM-judge satisfaction?**
+
+- Pre-Stage-2 heuristic ran per-step (free-tier) — adding a Flash call per turn was expensive.
+- Structural signals are deterministic and tunable. The table is the contract; future drift on a keyword adds one row.
+- The LLM divergence pipeline (Phase 11 Stage 3) still runs at chunk boundaries with a richer model verdict. The heuristic is the cheap layer; the LLM is the second opinion.
+
+The cost: a 30+ keyword structural-signals table that must be maintained when a new framework gets popular. Acceptable — additions are one line, and the test suite pins every entry. Better than the false-flag burning user trust on every PG backend.
+
+## Top-level directory snapshot keeps dotfiles, drops .git + heavy build dirs
+
+- **Source:** plan `applied/2026-05-16-awareness-and-verification-correctness.md` (Stage 1)
+
+The per-turn directory refresh (Phase 11 / Stage 4 of agent-runtime-fixes) compares the cli's freshly-captured top-level tree against the server's tracked file context. Files tracked in `ctx.files` but missing from the tree get flagged as stale.
+
+The original `captureTopLevelTree` filter was `!name.startsWith(".") && name !== "node_modules" && !name.startsWith("sysbase")`. The leading `startsWith(".")` stripped EVERY dotfile, including the legitimate ones the agent commonly authors: `.env`, `.env.example`, `.gitignore`, `.eslintrc.json`, `.npmrc`, `.prettierrc`, `.editorconfig`, `.nvmrc`, `.dockerignore`. So when the agent wrote `.env.example` and the next turn refreshed the tree, the cli stripped it, the server still saw it in `ctx.files`, and the staleness check reported `[directory-refresh] 1 stale top-level file(s): .env.example` — false positive, fires immediately after the write.
+
+Stage 1 replaces the broad filter with `NOISE_TOP_LEVEL_ENTRIES` — a narrow set:
+
+```
+.git, .DS_Store, .vscode, .idea, node_modules,
+__pycache__, .pytest_cache, .mypy_cache, .next, .nuxt,
+dist, build, .turbo, .cache
+```
+
+Plus the `sysbase*` prefix rule (kept from the original filter). Anything starting with `.` and NOT in this set survives.
+
+**Mirrored on both sides.** The cli filters at capture time (`cli-client/src/agent/executor.ts`); the server filters again at ingest time (`server/src/services/context-manager.ts`). A literal-sync test in each suite asserts the lists match — if either side drifts the staleness desync returns. Both files export `NOISE_TOP_LEVEL_ENTRIES` + `isNoiseTopLevelEntry(name)` from the same constant.
+
+**Why not auto-discover noise?** A `.gitignore`-aware filter would be cleaner but adds I/O on every turn (.gitignore could change mid-run); the hard-coded set is a per-build snapshot of what the agent doesn't author at the top level. New noise entries are a one-line addition; the cost of the list growing slightly stale is far less than a false-stale signal eroding agent confidence.

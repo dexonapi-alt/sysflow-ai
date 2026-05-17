@@ -1,7 +1,7 @@
 # Awareness heuristics + verification correctness
 
 - **Created:** 2026-05-16
-- **Status:** draft
+- **Status:** implemented (2026-05-16)
 - **Scope:** Fix the false-positives + missing-halts in the existing awareness layer that surfaced once the prior runtime-fixes plan shipped. (a) Stage 4's per-turn directory refresh false-flagged `.env.example` as stale because of an overly aggressive dotfile filter. (b) `intent_keyword_absent` over-fires by matching against file PATHS only, so a legitimate POS-PG backend without "POS" / "postgres" in filenames triggers `state=blocked`. (c) When awareness DOES reach `blocked`, the modal that should halt the agent doesn't actually fire. (d) Windows `ls -la` reports `✔ success` even when PowerShell internal errors emit on stderr.
 
 ## Goal
@@ -168,3 +168,18 @@ Each stage = one PR off `main`. ~900 LOC + 32-36 new tests across five stages.
 - **Agent-runtime-fixes plan** (applied 2026-05-15) — this plan's Stage 1 is a follow-up patch to that plan's Stage 4.
 - **Reasoning-chain provider parity plan** — Stage 3's modal halt depends on the cli's `waiting_for_user` render path which is unchanged.
 - **Accountability plan** — Stage 1 batch caps reduce the rate of awareness false-positives (fewer simultaneous unrelated changes per turn = less likely to confuse the keyword detector).
+
+## Completion notes
+
+Shipped in original stage ordering plus one follow-up (Stage 4.1) discovered mid-plan:
+
+- **PR #114 — Stage 1 — Dotfile filter fix.** `NOISE_TOP_LEVEL_ENTRIES` narrow noise set on both cli (`captureTopLevelTree`) and server (`ingestDirectoryTree`); legitimate top-level dotfiles preserved; cli/server filter-parity literal-sync test prevents future drift. 21 new tests.
+- **PR #115 — Stage 4 — Windows shell `ls -la` exit-code semantics.** New `win-shell-aliases.ts` module with `remapWindowsShellCommand` (Unix-form → PowerShell) + `detectPowerShellError` (stderr marker scan). Wired into `tools.ts` close handler. 22 new tests.
+- **PR #116 — Stage 4.1 — Client-platform threading (follow-up discovered during Stage 4).** User asked: "is the agent aware of what terminal it's running on?" — answer was NO. The cli sent `body.client.platform`, the server used `process.platform`. New `run-platform-store.ts` per-run map; thread `clientPlatform` into Anthropic + OpenRouter + Gemini prompt builders. Stage 4's remap layer became belt-and-suspenders; the prompt now tells the model the right OS so it emits PowerShell directly. 20 new tests.
+- **PR #117 — Stage 2 — `intent_keyword_absent` content search.** Three-tier satisfaction (path / structural / content); 30+ keyword structural-signals table; 1KB-per-file content snippet index in `context-manager.ts`. POS PG backend repro no longer false-flags. Genuinely-missing keywords still flag. 33 new tests.
+- **PR #118 — Stage 3 — Per-step blocked state halts the agent.** Found the gap: per-step detector only LOGGED `state=blocked`; only the chunk-boundary path produced the modal envelope. New `awareness-halt-synthesis.ts` helper centralises the synthesis; both paths now fire identically. 21 new tests.
+- **PR #119 — Stage 5 — Telemetry + KB + plan archive.** Four `RunSummary` fields (`dotfileFilterCorrections` cli-side / `intentKeywordContentMatches` server-side cumulative / `awarenessModalShown` latched / `windowsShellErrorsCaught` cli-side). New `intent-match-telemetry.ts` per-run store; `classifyIntentKeywordSatisfaction` returns tier name; cli captures peak. KB entries in architecture.md (## Awareness loop — Stage 2/3 + Stage 5 telemetry sections), decisions.md (## intent_keyword_absent searches content + structural signals, ## Top-level directory snapshot keeps dotfiles), gotchas.md (## .env.example flagged stale immediately after creation, ## Windows ls -la reported success despite PowerShell rejecting -la). Plan archived to `applied/`. 19 new tests.
+
+**Stage 4.1 was an unplanned add.** When Stage 4 shipped, the user observed that the agent kept emitting `ls -la` despite the remap layer — because the prompt was telling it `platform: linux + bash`. Threading `body.client.platform` into the prompt-builder was the proactive fix; Stage 4 became the safety net. Together they compose: prompt-aware emission catches most cases, remap catches the remainder, stderr-inspection catches anything that still leaks through.
+
+**Net diff across the six PRs:** +136 tests (1009 → 1145 on server / cli combined new), +1 new helper module per stage, +1 module-level counter pattern repeated cleanly across 4 telemetry fields, zero breaking changes to any existing API. All six PRs merged 2026-05-16.

@@ -658,6 +658,29 @@ export const INTERACTIVE_PATTERNS = [
 
 const COMMAND_TIMEOUT_MS = 30_000
 
+// ─── Stage 5 of awareness-and-verification-correctness plan: Windows shell error counter ───
+//
+// Bumped each time runCommandTool's close handler detects a PowerShell
+// cmdlet-binding error on stderr (FullyQualifiedErrorId, ParameterBinding-
+// Exception, etc.). Spike on the per-run total = the model is reaching
+// for bash forms PowerShell rejects = Stage 4 + Stage 4.1's command
+// rewrite + platform-aware prompt are doing useful work but the model
+// still leaks bash. Zero on a Unix run is expected.
+
+let _windowsShellErrorsCaughtThisRun = 0
+
+export function getWindowsShellErrorsCaught(): number {
+  return _windowsShellErrorsCaughtThisRun
+}
+
+export function resetWindowsShellErrorsCaught(): void {
+  _windowsShellErrorsCaughtThisRun = 0
+}
+
+function bumpWindowsShellErrorsCaught(): void {
+  _windowsShellErrorsCaughtThisRun += 1
+}
+
 interface CommandResult {
   stdout: string
   stderr: string
@@ -949,6 +972,9 @@ export async function runCommandTool(
       if (code !== 0 && !stdout) {
         reject(new Error(stderr.slice(-500) || `Command exited with code ${code}`))
       } else if (psError.isError) {
+        // Stage 5: per-run telemetry — count PowerShell-error catches
+        // so we can track Stage 4's safety net firing frequency.
+        bumpWindowsShellErrorsCaught()
         resolve({
           stdout: stdout.slice(-4000),
           stderr: stderr.slice(-2000),

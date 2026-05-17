@@ -400,6 +400,14 @@ export interface ClientResponse {
   /** Stage 5: when `completionBlockedBy === "tsc"`, the number of
    *  typecheck errors `tsc --noEmit` reported. */
   completionTscErrorCount?: number
+  /** Stage 5 of awareness-and-verification-correctness plan:
+   *  cumulative count of intent-keyword satisfactions that came
+   *  from Stage 2's broader haystack (structural signal OR content
+   *  snippet) rather than Tier 1 file paths. Monotonic per run;
+   *  cli RunSummary records the peak. Tier 1 hits (existing
+   *  behaviour) don't count — they would have passed the
+   *  pre-Stage-2 detector. */
+  intentKeywordContentMatches?: number
 }
 
 // ─── Database ───

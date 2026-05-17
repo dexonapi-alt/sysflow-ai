@@ -154,6 +154,57 @@ Free-tier models (`openrouter-auto` / `llama` / `mistral` / `gemini-flash-or`) a
 - Kill switch: `awareness.enabled` (default `true`); thresholds `awareness.threshold_off_course` (60), `awareness.threshold_blocked` (30)
 - CLI badge: `cli-client/src/cli/render.ts: renderConfidenceBadge`
 
+### Intent-keyword satisfaction is three-tier (Stage 2 of awareness-correctness plan)
+
+The `intent_keyword_absent` heuristic (one of the six heuristic detectors) checks each prompt-derived keyword against three escalating haystacks:
+
+```
+classifyIntentKeywordSatisfaction(keyword, pathHaystack, filesModified, contentSnippets)
+   │
+   ├── Tier 1 — pathHaystack literal substring          → "path"
+   │      (file paths + completion message — pre-Stage-2 behaviour)
+   │
+   ├── Tier 2 — STRUCTURAL_SIGNALS table                → "structural"
+   │      package.json deps OR framework file path
+   │      30+ keywords: express/fastify/nest/koa/next/nuxt/react/vue/svelte/
+   │      angular/postgres/pg/mysql/sqlite/mongodb/redis/prisma/drizzle/
+   │      tailwind/bootstrap/mui/stripe/supabase/firebase/trpc/graphql/...
+   │
+   └── Tier 3 — word-boundary regex over contentSnippets → "content"
+          (first 1KB per newly-written file, captured by context-manager)
+          conservative: standalone word boundary prevents "reactor" satisfying "react"
+```
+
+Returns `null` if no tier hits → heuristic fires. Pre-Stage-2 the haystack was Tier 1 only, which false-flagged Express + PG backends because `"express"` only appeared in `package.json` deps and `"pg"` only in `src/db.ts` imports.
+
+### Per-step blocked-state halt (Stage 3 of awareness-correctness plan)
+
+The Phase 11 design had TWO detector paths: per-step (after every tool result, free-tier only) and chunk-boundary (at chunk completion, all tiers). Originally only the chunk-boundary path synthesised the off-course-modal envelope; per-step `state=blocked` was log-only. Stage 3 added a shared synthesis helper (`server/src/services/awareness-halt-synthesis.ts`) and wired both paths through it:
+
+```
+detectDivergence() → state === "blocked"
+   │
+   ▼
+synthesizeAwarenessHaltResponse({ source: "per_step" | "chunk_boundary", ... })
+   │   produces identical ClientResponse envelope regardless of which detector fired:
+   │     status: "waiting_for_user"
+   │     awarenessChoice: true
+   │     awarenessEvidence: { confidence, signals[6], lastLlmVerdict, lastGoodChunkIndex, source }
+   ▼
+cli agent.ts:967  if (response.awarenessChoice === true)  →  askOffCourse(evidence)
+```
+
+The `source` field on the envelope is plumbed but unused on the cli today — reserved for telemetry distinguishing per-step (fires inside a chunk, lastGoodChunkIndex may be -1) from chunk-boundary (fires after a chunk completes, lastGoodChunkIndex = current chunk).
+
+### Stage 5 telemetry — observable signals (awareness-correctness plan)
+
+`RunSummary` (in `cli-client/src/agent/usage-log.ts`) carries four awareness-loop diagnostics:
+
+- `dotfileFilterCorrections` — count of legitimate top-level dotfiles preserved by the Stage 1 conservative filter (cli-side, executor.ts).
+- `intentKeywordContentMatches` — cumulative count of Tier 2 + Tier 3 intent-keyword satisfactions (server-side, intent-match-telemetry.ts; surfaced via `ClientResponse.intentKeywordContentMatches`).
+- `awarenessModalShown` — true if Stage 3's off-course modal rendered (latched once-true on `awarenessChoice` detection).
+- `windowsShellErrorsCaught` — count of Stage 4 PowerShell-error catches (cli-side, tools.ts).
+
 ## Active memory loop (Phase 15)
 
 - **Source:** plan `applied/2026-05-07-phase-15-memory-handling-anti-staleness.md`
