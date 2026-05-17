@@ -38,6 +38,7 @@ import { persistLargeToolResult } from "../store/tool-result-persistence.js"
 import { runReasoning, getReasonerBackendForRun, clearReasonerBackendForRun } from "../reasoning/task-reasoner.js"
 import { runErrorReasoningChain } from "../reasoning/error-reasoner.js"
 import { validateErrorAcknowledgement, buildErrorAcknowledgementRejectPrompt, primaryArg } from "../services/error-acknowledgement-guard.js"
+import { validatePerFileReasoning, buildInsufficientReasoningPrompt, MAX_PER_FILE_REASONING_REJECTIONS } from "../services/per-file-reasoning-guard.js"
 import { recordImplementSummary, recordBugPattern, recordChunkSummary, recordUserCorrection, applyMemoryFeedback, recallForReasoning, recallErrorPatterns, recordErrorPattern, formatRecallForReasoner } from "../memory-store/index.js"
 import {
   attachReflection,
@@ -78,6 +79,17 @@ const MAX_ON_ERROR_REASONING_PER_RUN = 2
  *  completionRejections shape. */
 const errorAcknowledgementRejections = new Map<string, number>()
 const MAX_ERROR_ACK_REJECTIONS = 3
+
+/**
+ * Stage 5 of accountability-and-parallel-execution-sequencing plan:
+ * per-run counter tracking how many times the per-file-reasoning gate
+ * rejected the model's response. Mirrors the errorAcknowledgement
+ * shape; capped at MAX_PER_FILE_REASONING_REJECTIONS per run so a
+ * stuck model can't hold the handler forever.
+ *
+ * Peak value surfaced in RunSummary by Stage 6.
+ */
+const perFileReasoningRejections = new Map<string, number>()
 
 /** Stage 5: per-run state tracking an in-flight error → recovery
  *  sequence. Set when a tool errors, then consumed on the NEXT
@@ -1305,6 +1317,49 @@ Do NOT reference these files in your next action. Do NOT try to read or edit the
     }
   }
 
+  // ─── Stage 5 of accountability-and-parallel-execution-sequencing plan ───
+  // Per-file reasoning gate. When the model's response is a tool
+  // batch larger than the threshold (default 3) AND the
+  // reasoningChain[] has fewer paragraphs than tools.length, reject
+  // the response with an inject + re-call the adapter. Mirrors the
+  // ack-rejection loop above. Bounded at 3 rejections per run.
+  //
+  // This fires AFTER the error-ack loop because a recovery response
+  // is allowed to be tight on reasoning — the agent's first concern
+  // is acknowledging the error, not justifying every tool. Once the
+  // recovery converges, the next batch enforces per-file reasoning.
+  const perFileFlagOn = (() => {
+    try { return getFlag<boolean>("quality.per_file_reasoning_required_enabled", run.sysbasePath as string | undefined) }
+    catch { return true }
+  })()
+  if (perFileFlagOn) {
+    const perFileThreshold = (() => {
+      try { return getFlag<number>("quality.per_file_reasoning_threshold", run.sysbasePath as string | undefined) }
+      catch { return 3 }
+    })()
+    let pfRejections = perFileReasoningRejections.get(body.runId) ?? 0
+    while (pfRejections < MAX_PER_FILE_REASONING_REJECTIONS) {
+      const check = validatePerFileReasoning({
+        responseKind: normalized.kind,
+        tools: normalized.tools,
+        reasoningChain: normalized.reasoningChain,
+        threshold: perFileThreshold,
+      })
+      if (check.ok) break
+      pfRejections += 1
+      perFileReasoningRejections.set(body.runId, pfRejections)
+      console.log(`[per-file-reasoning] rejection ${pfRejections}/${MAX_PER_FILE_REASONING_REJECTIONS}: ${check.reason}`)
+      actionPlanner.injectContext(
+        body.runId,
+        buildInsufficientReasoningPrompt(check, perFileThreshold, pfRejections, MAX_PER_FILE_REASONING_REJECTIONS),
+      )
+      normalized = await callModelAdapter(providerPayload as never)
+    }
+    if (pfRejections >= MAX_PER_FILE_REASONING_REJECTIONS) {
+      console.warn(`[per-file-reasoning] hit rejection cap (${MAX_PER_FILE_REASONING_REJECTIONS}); proceeding — Stage 1's cli-side cap still bounds the actual batch`)
+    }
+  }
+
   // ─── Stage 5: capture the agent's attempted recovery ───
   // If this call processed an error AND the model just emitted a
   // tool-call response, that response IS the agent's recovery attempt.
@@ -1618,6 +1673,9 @@ Do NOT reference these files in your next action. Do NOT try to read or edit the
     // plan: drop the read-after-write latch + the repoState store.
     clearReadAfterWriteState(body.runId)
     clearRepoState(body.runId)
+    // Stage 5 of accountability-and-parallel-execution-sequencing
+    // plan: drop the per-file-reasoning rejection counter.
+    perFileReasoningRejections.delete(body.runId)
   }
 
   // ─── Task Pipeline: track progress only if the AI created a plan on turn one.

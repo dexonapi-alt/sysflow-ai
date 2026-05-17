@@ -11,6 +11,7 @@ import { analyzeTaskComplexity } from "../services/completion-guard.js"
 import { actionPlanner } from "../services/action-planner.js"
 import { initRunContext, ingestDirectoryTree } from "../services/context-manager.js"
 import { setRunPlatform } from "../services/run-platform-store.js"
+import { validatePerFileReasoning, buildInsufficientReasoningPrompt, MAX_PER_FILE_REASONING_REJECTIONS } from "../services/per-file-reasoning-guard.js"
 import { isFrontendTask, detectFrontendStack, getFrontendPatterns } from "../knowledge/frontend-patterns.js"
 import { accumulateFrontendContent } from "../services/frontend-quality-guard.js"
 import { detectErrorForSearch, buildErrorSearchOverride, setConfigSkipList, setExpectedArtifacts, setRepoState } from "../services/setup-intelligence.js"
@@ -640,6 +641,61 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     // Stage 4.1 of awareness-and-verification-correctness plan.
     clientPlatform,
   } as never)
+
+  // Stage 5 of accountability-and-parallel-execution-sequencing
+  // plan: per-file-reasoning gate on the INITIAL turn too. The
+  // user-reported 11-tool blast originated here — pre-Stage-5
+  // the first response could ship tools.length=11 with one
+  // brief paragraph. Now: if tools > threshold AND paragraphs <
+  // tools, inject the reject prompt and re-call the adapter.
+  // Capped at MAX_PER_FILE_REASONING_REJECTIONS.
+  const pfFlagOn = (() => {
+    try { return getFlag<boolean>("quality.per_file_reasoning_required_enabled", body.sysbasePath as string | undefined) }
+    catch { return true }
+  })()
+  if (pfFlagOn) {
+    const pfThreshold = (() => {
+      try { return getFlag<number>("quality.per_file_reasoning_threshold", body.sysbasePath as string | undefined) }
+      catch { return 3 }
+    })()
+    let pfRejections = 0
+    while (pfRejections < MAX_PER_FILE_REASONING_REJECTIONS) {
+      const check = validatePerFileReasoning({
+        responseKind: normalized.kind,
+        tools: normalized.tools,
+        reasoningChain: normalized.reasoningChain,
+        threshold: pfThreshold,
+      })
+      if (check.ok) break
+      pfRejections += 1
+      console.log(`[per-file-reasoning] initial-turn rejection ${pfRejections}/${MAX_PER_FILE_REASONING_REJECTIONS}: ${check.reason}`)
+      actionPlanner.injectContext(
+        runId,
+        buildInsufficientReasoningPrompt(check, pfThreshold, pfRejections, MAX_PER_FILE_REASONING_REJECTIONS),
+      )
+      normalized = await callModelAdapter({
+        model: body.model,
+        runId,
+        task: task as never,
+        context: context as never,
+        userMessage: body.content,
+        command: body.command,
+        directoryTree: (body.directoryTree || []) as never,
+        projectId: body.projectId,
+        cwd: body.cwd,
+        planMode: body.planMode === true,
+        reasoningBrief,
+        reasoningElaborationBrief,
+        chunkPlanBrief,
+        projectInitBrief,
+        runIntent,
+        taskComplexity: taskComplexity.complexity,
+        userId: body.userId || null,
+        chatId: body.chatId || null,
+        clientPlatform,
+      } as never)
+    }
+  }
 
   await persistModelUsage({
     runId,
