@@ -3,6 +3,7 @@ import path from "node:path"
 import { spawn } from "node:child_process"
 import { emitAgent, isInkActive } from "./events.js"
 import { getShellInvocation } from "./shell.js"
+import { remapWindowsShellCommand, detectPowerShellError } from "./win-shell-aliases.js"
 
 // ─── Web Search ───
 
@@ -671,6 +672,13 @@ interface CommandResult {
   status?: "running" | "done" | "failed"
   command?: string
   success?: boolean
+  /**
+   * Stage 4 of awareness-and-verification-correctness plan: when a
+   * Windows Unix-alias remap occurred (e.g. `ls -la` → `Get-ChildItem
+   * -Force`), the original command is preserved here so the agent
+   * sees what it asked for vs what ran.
+   */
+  originalCommand?: string
 }
 
 /**
@@ -701,7 +709,13 @@ export async function runCommandTool(
   if (!command) {
     return { stdout: "", stderr: "No command provided", message: "run_command requires a command string." }
   }
-  const trimmed = preprocessCommand(command.trim())
+  const preprocessed = preprocessCommand(command.trim())
+  // Stage 4 of awareness-and-verification-correctness plan: remap
+  // Unix-form commands the LLM commonly emits but PowerShell rejects
+  // (`ls -la` etc.) into their PowerShell equivalents. On non-Windows
+  // platforms this is a no-op. originalCommand is preserved for the
+  // result envelope when a remap occurred.
+  const { command: trimmed, originalCommand } = remapWindowsShellCommand(preprocessed)
   const isLongRunning = LONG_RUNNING_PATTERNS.some((p) => p.test(trimmed))
   const isSlow = SLOW_COMMAND_PATTERNS.some((p) => p.test(trimmed))
   const matchesBackgroundDefault = BACKGROUND_BY_DEFAULT_PATTERNS.some((p) => p.test(trimmed))
@@ -922,10 +936,36 @@ export async function runCommandTool(
 
     child.on("close", (code) => {
       clearTimeout(timer)
+      // Stage 4 of awareness-and-verification-correctness plan:
+      // even with exit code 0, treat the command as failed when
+      // stderr contains PowerShell cmdlet-binding error markers
+      // (FullyQualifiedErrorId, NamedParameterNotFound, etc.). The
+      // shell process exited cleanly because `; exit $LASTEXITCODE`
+      // saw a stale 0, but the cmdlet itself rejected its args —
+      // reporting success would lie to the agent and the user.
+      const psError = process.platform === "win32" ? detectPowerShellError(stderr) : { isError: false, marker: null }
+      const originalSuffix = originalCommand ? { originalCommand } : {}
+
       if (code !== 0 && !stdout) {
         reject(new Error(stderr.slice(-500) || `Command exited with code ${code}`))
+      } else if (psError.isError) {
+        resolve({
+          stdout: stdout.slice(-4000),
+          stderr: stderr.slice(-2000),
+          success: false,
+          message: `PowerShell command failed (${psError.marker}). ${
+            originalCommand
+              ? `Original command was "${originalCommand}" — the cli mapped it to "${trimmed}" but PowerShell still rejected it. `
+              : ""
+          }Rephrase using native PowerShell syntax (e.g. Get-ChildItem instead of ls, Get-Content instead of cat).`,
+          ...originalSuffix,
+        })
       } else {
-        resolve({ stdout: stdout.slice(-4000), stderr: stderr.slice(-2000) })
+        resolve({
+          stdout: stdout.slice(-4000),
+          stderr: stderr.slice(-2000),
+          ...originalSuffix,
+        })
       }
     })
 
