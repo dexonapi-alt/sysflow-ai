@@ -929,19 +929,63 @@ export async function executeToolsBatch(
 }
 
 /**
- * Stage 4 of agent-runtime-fixes plan: top-level directory snapshot
- * used by the per-turn refresh path. Cheap — single readdir, no
- * recursion. Best-effort: returns undefined on I/O error so the
+ * Stage 1 of awareness-and-verification-correctness plan: top-level
+ * entries treated as noise. Heavy build dirs + tooling caches + the
+ * git workdir + the sysbase prefix — everything the agent never
+ * authors or reads at the top level.
+ *
+ * DELIBERATELY EXCLUDES legitimate top-level dotfiles (.env,
+ * .env.example, .gitignore, .eslintrc.json, .npmrc, .prettierrc,
+ * .editorconfig, .nvmrc, .dockerignore) — the agent commonly
+ * authors these and the user expects them in the tree. The prior
+ * "strip all .*" filter false-flagged .env.example as stale because
+ * the cli stripped it from the tree, the server still tracked it
+ * in ctx.files from the just-completed write, and the staleness
+ * comparison reported "stale top-level files: .env.example".
+ *
+ * Kept in sync with server/src/services/context-manager.ts —
+ * NOISE_TOP_LEVEL_ENTRIES. Both sides MUST agree on what counts
+ * as noise; otherwise staleness detection desyncs again.
+ */
+export const NOISE_TOP_LEVEL_ENTRIES: ReadonlySet<string> = new Set([
+  ".git",
+  ".DS_Store",
+  ".vscode",
+  ".idea",
+  "node_modules",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".next",
+  ".nuxt",
+  "dist",
+  "build",
+  ".turbo",
+  ".cache",
+])
+
+export function isNoiseTopLevelEntry(name: string): boolean {
+  if (NOISE_TOP_LEVEL_ENTRIES.has(name)) return true
+  if (name.startsWith("sysbase")) return true
+  return false
+}
+
+/**
+ * Stage 4 of agent-runtime-fixes plan (filter refined by Stage 1 of
+ * awareness-and-verification-correctness plan): top-level directory
+ * snapshot used by the per-turn refresh path. Cheap — single readdir,
+ * no recursion. Best-effort: returns undefined on I/O error so the
  * caller drops the field (server falls back to the prior tree).
  *
- * Skips dotfiles + node_modules + the sysbase directory to keep the
- * payload small. The agent never operates on those at the top level.
+ * Filter is now conservative — keeps legitimate dotfiles
+ * (.env*, .gitignore, .eslintrc*, .npmrc, etc.); drops only the
+ * heavy/noise set in NOISE_TOP_LEVEL_ENTRIES.
  */
 async function captureTopLevelTree(cwd: string): Promise<Array<{ name: string; type: "file" | "directory" }> | undefined> {
   try {
     const entries = await fs.readdir(cwd, { withFileTypes: true })
     return entries
-      .filter((e) => !e.name.startsWith(".") && e.name !== "node_modules" && !e.name.startsWith("sysbase"))
+      .filter((e) => !isNoiseTopLevelEntry(e.name))
       .map((e) => ({ name: e.name, type: e.isDirectory() ? ("directory" as const) : ("file" as const) }))
   } catch {
     return undefined
