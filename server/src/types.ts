@@ -408,6 +408,11 @@ export interface ClientResponse {
    *  behaviour) don't count — they would have passed the
    *  pre-Stage-2 detector. */
   intentKeywordContentMatches?: number
+  /** Stage 6 of accountability-and-parallel-execution-sequencing
+   *  plan: peak per-run count of Stage 5's per-file-reasoning gate
+   *  rejections. Bounded at MAX_PER_FILE_REASONING_REJECTIONS=3 per
+   *  run. Surfaced on every response — cli takes the peak. */
+  insufficientReasoningRejectionCount?: number
 }
 
 // ─── Database ───

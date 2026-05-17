@@ -1,7 +1,7 @@
 # Accountability + parallel-execution sequencing
 
 - **Created:** 2026-05-16
-- **Status:** draft
+- **Status:** implemented (2026-05-16)
 - **Scope:** Stop the agent from blasting 11 parallel tool calls without reasoning about each, from re-creating files it already wrote, from writing consumers before producers, and from declaring done without reading-back what it produced. Closes the user-reported pattern where the agent dispatched 11 tools in one batch (3 mkdirs + 8 writes), then wrote `src/index.ts` importing files that didn't yet exist (silently stripped by import-sanitizer), then claimed complete without verifying any of it.
 
 ## Goal
@@ -221,3 +221,18 @@ Each stage = one PR off `main`. ~1,400 LOC + 32-36 new tests across six stages.
 - **Reasoning-chain provider parity plan** — provides the per-file reasoning paragraphs surface so Stage 5's per-file requirement is actually visible to the user.
 - **Code-correctness plan** — Stage 3 of that plan's tsc gate fires after Stage 5's per-file reasoning is in place; the combination is "you wrote N files reasoning each one + tsc verified them clean".
 - **Awareness plan** (sibling) — `intent_keyword_absent` improvement reduces false off-course flags during wide scaffolds.
+
+## Completion notes
+
+Shipped in the plan's recommended order across six PRs:
+
+- **PR #120 — Stage 1 — parallel batch cap.** `applyBatchCap` + `resolveBatchCap` (3 default, 5 existing-large) + `buildBatchCapDeferralResult`. CLI defers tools beyond cap with synthetic `batch_cap_enforced` failures. 18 new tests.
+- **PR #121 — Stage 4 — already-created guard.** Per-run `Set<path>` tracks every successful write; second write to same path returns synthetic `already_created` failure unless `_acknowledge_overwrite: true`. `delete_file` clears path. 23 new tests.
+- **PR #122 — Stage 2 — producer-before-consumer topo ordering.** Pure helpers `extractRelativeImports` / `resolveRelativeImport` / `findBatchMatchForImport` / `topoOrderParallelWrites` (Kahn + 3-colour DFS cycle detection). Dependent writes collapse into one serial group; cycles → synthetic `import_cycle` failures. 35 new tests.
+- **PR #123 — Stage 3 — read-after-write inject.** `═══ READ-AFTER-WRITE REQUIRED ═══` block injected via `actionPlanner.injectContext` on the first batch of writes in a fresh scaffold (repoState empty/small). Latched once-per-run. New per-run repoState store in `setup-intelligence.ts`. 30 new tests.
+- **PR #124 — Stage 5 — per-file reasoning gate.** `validatePerFileReasoning` rejects responses with `tools.length > threshold` AND non-empty `reasoningChain` < `tools.length`. Wired into both `tool-result.ts` (per-turn) AND `user-message.ts` (initial turn — catches the 11-tool blast at its source). Capped at 3 rejections. 22 new tests.
+- **PR #125 — Stage 6 — telemetry + KB + plan archive.** 5 new RunSummary fields (`maxBatchSize`, `batchCapEnforcedCount`, `reorderedBatchCount`, `alreadyCreatedRejectionCount`, `insufficientReasoningRejectionCount`). KB entries (1 architecture diagram + 2 decisions + 1 gotcha). Plan archived.
+
+**Composition order matters.** Stage 5 fires BEFORE Stage 1 (server gate sees model's raw response; rejecting there forces the model to fix BEFORE the cli sees the tools). Stage 1's cap is the safety net for the residual case where the model passes Stage 5 (e.g. 4 tools with 4 paragraphs) but the cli still wants to bound it to 3. Stage 2 operates within Stage 1's executed batch (max 3-5 writes); Stage 4 is orthogonal (gates each write regardless); Stage 3 reads the batch's outcome.
+
+**Net diff across the six PRs:** +128 new tests, +5 new RunSummary telemetry fields, +6 new flags (all default-on), 4 new pure helper modules, zero breaking changes to existing APIs. All six PRs merged 2026-05-16.

@@ -772,4 +772,76 @@ describe("recordRunSummary", () => {
     const [entry] = await readEntries()
     expect(entry.awarenessModalShown).toBe(false)
   })
+
+  // ─── Stage 6 of accountability-and-parallel-execution-sequencing plan ───
+
+  it("persists Stage 6 accountability telemetry: maxBatchSize / batchCapEnforced / reorderedBatch / alreadyCreated / insufficientReasoning", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-accountability-6-1",
+      prompt: "build a fastify backend",
+      model: "openrouter-auto",
+      durationMs: 18_000,
+      stepCount: 12,
+      toolCount: 15,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      maxBatchSize: 11,
+      batchCapEnforcedCount: 3,
+      reorderedBatchCount: 1,
+      alreadyCreatedRejectionCount: 1,
+      insufficientReasoningRejectionCount: 2,
+    })
+    const [entry] = await readEntries()
+    expect(entry.maxBatchSize).toBe(11)
+    expect(entry.batchCapEnforcedCount).toBe(3)
+    expect(entry.reorderedBatchCount).toBe(1)
+    expect(entry.alreadyCreatedRejectionCount).toBe(1)
+    expect(entry.insufficientReasoningRejectionCount).toBe(2)
+  })
+
+  it("defaults Stage 6 accountability telemetry to 0 when omitted (legacy run)", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-accountability-6-2",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+    })
+    const [entry] = await readEntries()
+    expect(entry.maxBatchSize).toBe(0)
+    expect(entry.batchCapEnforcedCount).toBe(0)
+    expect(entry.reorderedBatchCount).toBe(0)
+    expect(entry.alreadyCreatedRejectionCount).toBe(0)
+    expect(entry.insufficientReasoningRejectionCount).toBe(0)
+  })
+
+  it("persists a clean run with all Stage 6 gate counters at 0 (no oversized batches)", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-accountability-6-3",
+      prompt: "fix a typo",
+      model: "claude-sonnet",
+      durationMs: 1_500,
+      stepCount: 2,
+      toolCount: 1,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      maxBatchSize: 1,
+      batchCapEnforcedCount: 0,
+      reorderedBatchCount: 0,
+      alreadyCreatedRejectionCount: 0,
+      insufficientReasoningRejectionCount: 0,
+    })
+    const [entry] = await readEntries()
+    expect(entry.maxBatchSize).toBe(1)
+    expect(entry.batchCapEnforcedCount).toBe(0)
+  })
 })

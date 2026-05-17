@@ -1746,6 +1746,11 @@ Do NOT reference these files in your next action. Do NOT try to read or edit the
   // wins on a clean increment, peak survives if the last response
   // doesn't carry the field).
   response.intentKeywordContentMatches = getIntentMatchTotal(body.runId)
+  // Stage 6 of accountability-and-parallel-execution-sequencing plan:
+  // surface the per-file-reasoning rejection counter so cli RunSummary
+  // records the peak. Monotonic for the run's lifetime; cli takes the
+  // max across turns.
+  response.insufficientReasoningRejectionCount = perFileReasoningRejections.get(body.runId) ?? 0
   // Stage E of model-lock-and-portable-reasoning: surface the run's
   // reasoner backend so the CLI can record it in `RunSummary`. Constant
   // for the run; absent until at least one runReasoning call has
