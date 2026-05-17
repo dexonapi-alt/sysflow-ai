@@ -561,4 +561,69 @@ describe("recordRunSummary", () => {
     expect(entry.reasoningChainEmittedTurns).toBe(10)
     expect(entry.reasoningChainSynthesisedTurns).toBe(0)
   })
+
+  // ─── Stage 5 of server-hardening plan: sysflow-infra + null-tool + non-retryable-5xx telemetry ───
+
+  it("persists sysflowInfraErrorCount + nullToolRejectionCount + nonRetryable5xxCount when supplied", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-shd-1",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1_500,
+      stepCount: 4,
+      toolCount: 6,
+      errorCount: 1,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "sysflow_infra",
+      sysflowInfraErrorCount: 1,
+      nullToolRejectionCount: 2,
+      nonRetryable5xxCount: 1,
+    })
+    const [entry] = await readEntries()
+    expect(entry.sysflowInfraErrorCount).toBe(1)
+    expect(entry.nullToolRejectionCount).toBe(2)
+    expect(entry.nonRetryable5xxCount).toBe(1)
+  })
+
+  it("defaults all three counters to 0 when omitted (legacy run)", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-shd-2",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+    })
+    const [entry] = await readEntries()
+    expect(entry.sysflowInfraErrorCount).toBe(0)
+    expect(entry.nullToolRejectionCount).toBe(0)
+    expect(entry.nonRetryable5xxCount).toBe(0)
+  })
+
+  it("clean run keeps all three counters at 0 (the common case)", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-shd-3",
+      prompt: "x",
+      model: "claude-sonnet",
+      durationMs: 5_000,
+      stepCount: 8,
+      toolCount: 12,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      sysflowInfraErrorCount: 0,
+      nullToolRejectionCount: 0,
+      nonRetryable5xxCount: 0,
+    })
+    const [entry] = await readEntries()
+    expect(entry.sysflowInfraErrorCount).toBe(0)
+    expect(entry.nullToolRejectionCount).toBe(0)
+    expect(entry.nonRetryable5xxCount).toBe(0)
+  })
 })

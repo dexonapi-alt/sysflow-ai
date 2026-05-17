@@ -119,6 +119,21 @@ export interface RunSummary {
    *  chain. Distribution-wise, spike here = MANDATORY directive being
    *  ignored = need to tighten further or model-specific shim. */
   reasoningChainSynthesisedTurns?: number
+  /** Stage 5 of plan 2026-05-16-server-hardening-and-error-source-distinction.md.
+   *  Per-run count of failed responses tagged `errorSource: "sysflow_infra"`
+   *  (sysflow's own API quota / auth / 5xx). Should be ≤ 1 most runs;
+   *  spike = something wrong with our backend / API keys / quotas. */
+  sysflowInfraErrorCount?: number
+  /** Stage 5: per-run count of client-side unknown-tool rejections
+   *  via `isKnownTool` gate. Spike = the model is hallucinating tool
+   *  names (not in the registry) — signal to tighten the tool-list
+   *  section of the system prompt. */
+  nullToolRejectionCount?: number
+  /** Stage 5: per-run count of 5xx responses the cli refused to retry
+   *  via `NonRetryableError` (Stage 3 detector). Spike = the server is
+   *  emitting more validation / constraint-violation 5xx than normal —
+   *  signal to investigate the request-shaping path. */
+  nonRetryable5xxCount?: number
 }
 
 const PROMPT_PREVIEW_CHARS = 200
@@ -183,6 +198,10 @@ export async function recordRunSummary(sysbasePath: string | undefined | null, s
     // jq distributions stay null-free.
     reasoningChainEmittedTurns: summary.reasoningChainEmittedTurns ?? 0,
     reasoningChainSynthesisedTurns: summary.reasoningChainSynthesisedTurns ?? 0,
+    // Stage 5 of server-hardening plan. Defaults to 0.
+    sysflowInfraErrorCount: summary.sysflowInfraErrorCount ?? 0,
+    nullToolRejectionCount: summary.nullToolRejectionCount ?? 0,
+    nonRetryable5xxCount: summary.nonRetryable5xxCount ?? 0,
   }
   try {
     await fs.appendFile(file, JSON.stringify(entry) + "\n", "utf8")

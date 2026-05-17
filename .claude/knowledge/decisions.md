@@ -639,3 +639,39 @@ The cli's live `<ReasoningPeek>` only refreshes when `perTurnReasoningChain` is 
 **Composition:** Stage 2's MANDATORY directive shifts the distribution toward structured emission; Stage 1's synthesis catches the residual. Stage 4 telemetry (`reasoningChainEmittedTurns` vs `reasoningChainSynthesisedTurns` in `RunSummary`) tracks the ratio over time so future tuning can target whichever side dominates.
 
 **Critical sibling fix:** Stage 3 found two server-side overrides in `base-provider.ts` (weak-completion + tool-gate) that were dropping the chain when they fired. Both now carry it forward via spread. Without this, the override would replace `reasoning` with its own hardcoded string AND clear the chain — the cli would see only the override's pre-written explanation, never the model's actual deliberation about WHY the override fired.
+
+## Sysflow infra errors halt the agent — they're not user-machine bugs
+
+- **Source:** plan `applied/2026-05-16-server-hardening-and-error-source-distinction.md` (Stage 2)
+
+Every error envelope carries `errorSource: "sysflow_infra" | "user_machine" | "unknown"`. When set to `sysflow_infra`, the cli halts the run cleanly with a banner — the agent's recovery chain does NOT fire. Without this discriminator the agent would interpret "set GEMINI_API_KEY in server/.env" (in an OpenRouter credit-exhaustion error) as a fix it should perform IN THE USER'S PROJECT DIRECTORY. The user reported the agent literally trying to mutate `server/.env` relative to their cwd to "fix" sysflow's exhausted credit pool.
+
+**Why a typed discriminator beats message-pattern matching:**
+
+1. **Provider-agnostic.** OpenRouter / Anthropic / Gemini all surface quota errors with different message formats. A typed flag set at the provider's failure site survives normalisation without each downstream consumer needing to know every provider's error vocabulary.
+2. **Override-safe.** Stage 2's tag survives the SSE event re-throws + the normaliser mapper without depending on string preservation. Stage 1 of the reasoning-chain plan showed how easily strings get rewritten by server-side overrides.
+3. **Telemetry-friendly.** `RunSummary.sysflowInfraErrorCount` aggregates cleanly. Spike across runs = API keys / quotas are draining.
+
+**Alternatives rejected:**
+
+- *Just check the error message for "credits" / "auth" / "401"* — already had a partial version in `state-machine.ts`. The user's repro slipped through because OpenRouter's credit-exhaustion error includes the word "rate" — the rate-limit matcher caught it first and triggered `rate_limit_retry`, fall-back retry, and eventually the agent recovery chain.
+- *Treat ALL 5xx from sysflow as sysflow_infra* — too coarse. A 5xx during the chunked-reasoning loop might be a transient (worth one retry) — current logic distinguishes via Stage 3's `classifyNonRetryable` body check.
+- *Auto-switch models on sysflow_infra (OpenRouter exhausted → fall to Gemini)* — explicitly rejected by the prior `model-lock-and-portable-reasoning` plan. Users want their model choice respected; auto-fallback confused them ("i used claude sonnet why it switches to gemini lol").
+
+## Cli refuses to retry 5xx with diagnostic bodies
+
+- **Source:** plan `applied/2026-05-16-server-hardening-and-error-source-distinction.md` (Stage 3)
+
+`cli-client/src/lib/server.ts` exports a `NonRetryableError` subclass + `classifyNonRetryable(text)` pure helper. The retry loop in `callServer` / `callServerStream` checks `instanceof NonRetryableError` to skip — independent of message format. The classifier matches:
+
+- Postgres constraint violations (canonical `violates (not-null|unique|foreign key|check) constraint` phrasings)
+- App validation codes (`validation_failure` / `ValidationError` / `invalid_payload` / `malformed_response`)
+- Server-tagged `"errorSource":"sysflow_infra"` (Stage 2's discriminator)
+
+**Why instanceof, not message substring:**
+
+The previous retry classifier used `!(err as Error).message?.includes("Server error")`. SSE-event error paths throw the raw error body without that conventional prefix, so the substring check failed and the loop retried. The user's repro hit this exact path: server returned 500 via SSE → SSE handler threw raw PG error body → outer catch didn't see "Server error" → retried 3x against an unrecoverable DB constraint.
+
+`instanceof NonRetryableError` survives every re-throw and parse round-trip. The signature field carries telemetry (which signature matched) without depending on the message format.
+
+**Pattern specificity matters.** The classifier requires canonical PG phrasings (`violates ... constraint`), not bare `constraint` (which appears in unrelated stack traces). Test coverage explicitly pins both the positive cases AND the should-NOT-match cases (generic `Internal Server Error`, empty bodies, connection errors, `constraint` in unrelated context). Drift-protected.
