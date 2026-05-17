@@ -188,7 +188,13 @@ export async function writeFileTool(filePath: string, content: string, runId?: s
   }
 
   // ─── Import sanitizer: strip relative imports to non-existent files ───
+  // Stage 2 of agent-code-correctness plan: surface stripped imports
+  // in the result so the server can inject a loud feedback block to
+  // the agent on the next turn. Previously the strips were silent —
+  // the agent wrote a file with bare names that no import resolved,
+  // didn't know, and hit ReferenceError at runtime later.
   const sanitized = await sanitizeImports(filePath, finalContent)
+  const _strippedImports: string[] = sanitized.removed
   if (sanitized.removed.length > 0) {
     finalContent = sanitized.content
   }
@@ -201,7 +207,12 @@ export async function writeFileTool(filePath: string, content: string, runId?: s
     storeDiff(runId, filePath, diff, oldContent, finalContent)
   }
 
-  return { success: true, diff: diff.changed ? diff : undefined, pkgProtected }
+  return {
+    success: true,
+    diff: diff.changed ? diff : undefined,
+    pkgProtected,
+    ...(_strippedImports.length > 0 ? { _strippedImports } : {}),
+  }
 }
 
 /**
@@ -328,7 +339,10 @@ export async function editFileTool(
   }
 
   // ─── Import sanitizer: strip relative imports to non-existent files ───
+  // Stage 2 of agent-code-correctness plan: same loud-feedback path
+  // as writeFileTool (see comment there).
   const sanitized = await sanitizeImports(filePath, finalContent)
+  const _strippedImports: string[] = sanitized.removed
   if (sanitized.removed.length > 0) {
     finalContent = sanitized.content
   }
@@ -341,7 +355,12 @@ export async function editFileTool(
     storeDiff(runId, filePath, diff, oldContent, finalContent)
   }
 
-  return { success: true, diff: diff.changed ? diff : undefined, pkgProtected }
+  return {
+    success: true,
+    diff: diff.changed ? diff : undefined,
+    pkgProtected,
+    ...(_strippedImports.length > 0 ? { _strippedImports } : {}),
+  }
 }
 
 /**
