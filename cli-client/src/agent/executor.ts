@@ -249,6 +249,16 @@ async function dispatch(tool: string, args: Record<string, unknown>, runId?: str
     }
 
     case "write_file": {
+      // Stage 4 of accountability-and-parallel-execution-sequencing plan:
+      // already-created guard. Fires when the agent has SUCCESSFULLY
+      // written this path earlier in the run AND hasn't opted in via
+      // `_acknowledge_overwrite: true`. Skips the actual write +
+      // returns a synthetic failure so the server's forced-error-
+      // reasoning path can ask the agent to acknowledge.
+      if (shouldGuardAlreadyCreated(args, runId)) {
+        bumpAlreadyCreatedRejection()
+        return buildAlreadyCreatedResult(args.path as string)
+      }
       const writeResult = await writeFileTool(args.path as string, args.content as string, runId)
       const writeReturn: Record<string, unknown> = {
         path: args.path,
@@ -256,6 +266,9 @@ async function dispatch(tool: string, args: Record<string, unknown>, runId?: str
         diffAdded: writeResult.diff?.added || 0,
         diffRemoved: writeResult.diff?.removed || 0
       }
+      // Stage 4: mark the path as created so a later write in the same
+      // run trips the guard.
+      markPathCreated(runId, args.path as string)
 
       // Per-file lint check
       const writeLint = await lintFile(args.path as string, process.cwd())
@@ -305,6 +318,11 @@ async function dispatch(tool: string, args: Record<string, unknown>, runId?: str
 
     case "delete_file": {
       await deleteFileTool(args.path as string)
+      // Stage 4 of accountability-and-parallel-execution-sequencing plan:
+      // remove the path from the created-paths set so a legitimate
+      // create-delete-recreate flow doesn't trip the guard on the
+      // recreate.
+      markPathDeleted(runId, args.path as string)
       return { path: args.path, success: true }
     }
 
@@ -376,12 +394,29 @@ async function dispatch(tool: string, args: Record<string, unknown>, runId?: str
 
     // ─── Hallucinated tool recovery: batch_write → multiple write_file ───
     case "batch_write": {
-      const files = (args.files || []) as Array<{ path: string; content: string }>
-      const results: Array<{ path: string; success: boolean; error?: string }> = []
+      const files = (args.files || []) as Array<{ path: string; content: string; _acknowledge_overwrite?: boolean }>
+      const results: Array<{ path: string; success: boolean; error?: string; _errorCategory?: string }> = []
+      const batchAck = args._acknowledge_overwrite === true
       for (const file of files) {
+        // Stage 4 of accountability-and-parallel-execution-sequencing plan:
+        // per-file already-created guard inside batch_write. Inherits
+        // the batch-level _acknowledge_overwrite OR allows per-file
+        // _acknowledge_overwrite on the file entry itself.
+        if (!batchAck && file._acknowledge_overwrite !== true && hasBeenCreatedThisRun(runId, file.path)) {
+          bumpAlreadyCreatedRejection()
+          const guard = buildAlreadyCreatedResult(file.path) as Record<string, unknown>
+          results.push({
+            path: file.path,
+            success: false,
+            error: guard.error as string,
+            _errorCategory: "already_created",
+          })
+          continue
+        }
         try {
           await writeFileTool(file.path, file.content)
           results.push({ path: file.path, success: true })
+          markPathCreated(runId, file.path)
         } catch (err) {
           results.push({ path: file.path, success: false, error: (err as Error).message })
         }
@@ -507,6 +542,117 @@ export function resetBatchCapEnforcedCount(): void {
 
 function bumpBatchCapEnforced(): void {
   _batchCapEnforcedThisRun += 1
+}
+
+// ─── Stage 4 of accountability-and-parallel-execution-sequencing plan: "already created" guard ───
+//
+// Cross-batch / cross-chunk re-creation tracker. The agent observably
+// re-issues `write_file` for paths it ALREADY wrote earlier in the
+// same run (user-reported "agent re-creates files it already wrote"
+// pattern). Pre-Stage-4 the cli executed the second write silently,
+// overwriting the earlier content; the agent never noticed it had
+// duplicated effort.
+//
+// Stage 4 maintains a per-run `Set<path>` of paths the agent
+// SUCCESSFULLY wrote this run. Before each write_file (or per-file
+// inside batch_write), the guard checks the set; on hit, the call
+// short-circuits with a synthetic `already_created` failure result.
+// The server's existing forced-error-reasoning Stage 3 path picks up
+// the failure and asks the model to acknowledge (was the re-create
+// intentional?).
+//
+// Escape hatch: `args._acknowledge_overwrite === true` bypasses the
+// guard explicitly. Use case: the agent intentionally wants to
+// overwrite (e.g. fixing a typo in a file it just wrote — though
+// `edit_file` is the cleaner path for that).
+//
+// On `delete_file` success, the path is removed from the set so the
+// legitimate create-delete-recreate flow doesn't false-trigger.
+
+const _createdPathsPerRun = new Map<string, Set<string>>()
+
+function getCreatedPathsForRun(runId: string): Set<string> {
+  let s = _createdPathsPerRun.get(runId)
+  if (!s) {
+    s = new Set()
+    _createdPathsPerRun.set(runId, s)
+  }
+  return s
+}
+
+/** Test-only — clear the entire store. Production code uses `clearCreatedPaths(runId)`. */
+export function _resetCreatedPathsStoreForTests(): void {
+  _createdPathsPerRun.clear()
+}
+
+export function hasBeenCreatedThisRun(runId: string | undefined, filePath: string): boolean {
+  if (!runId) return false
+  const s = _createdPathsPerRun.get(runId)
+  return s ? s.has(filePath) : false
+}
+
+export function markPathCreated(runId: string | undefined, filePath: string): void {
+  if (!runId || !filePath) return
+  getCreatedPathsForRun(runId).add(filePath)
+}
+
+export function markPathDeleted(runId: string | undefined, filePath: string): void {
+  if (!runId || !filePath) return
+  const s = _createdPathsPerRun.get(runId)
+  if (s) s.delete(filePath)
+}
+
+export function clearCreatedPaths(runId: string): void {
+  _createdPathsPerRun.delete(runId)
+}
+
+let _alreadyCreatedRejectionCount = 0
+
+export function getAlreadyCreatedRejectionCount(): number {
+  return _alreadyCreatedRejectionCount
+}
+
+export function resetAlreadyCreatedRejectionCount(): void {
+  _alreadyCreatedRejectionCount = 0
+}
+
+function bumpAlreadyCreatedRejection(): void {
+  _alreadyCreatedRejectionCount += 1
+}
+
+/**
+ * Pure predicate: should this write_file invocation be guarded?
+ *
+ * Guard fires when:
+ *   - The agent has emitted `args.path` as a successful write earlier
+ *     in this run (tracked in `_createdPathsPerRun`), AND
+ *   - The agent has NOT explicitly opted in via
+ *     `args._acknowledge_overwrite === true`.
+ */
+export function shouldGuardAlreadyCreated(
+  args: Record<string, unknown>,
+  runId: string | undefined,
+): boolean {
+  if (args._acknowledge_overwrite === true) return false
+  const path = typeof args.path === "string" ? args.path : ""
+  if (!path) return false
+  return hasBeenCreatedThisRun(runId, path)
+}
+
+/**
+ * Synthetic failure result shape returned when the guard fires.
+ * Tagged `_errorCategory: "already_created"` so the server's
+ * existing forced-error-reasoning Stage 3 path treats it as a
+ * recovery situation. Includes the three resolution actions the
+ * agent should reach for, ordered by typical intent.
+ */
+export function buildAlreadyCreatedResult(filePath: string): Record<string, unknown> {
+  return {
+    error: `Already created: you wrote ${filePath} earlier in this run. The earlier content is already on disk; re-writing will overwrite it without warning. If you meant to:\n  - UPDATE the file, use edit_file (preserves the prior write + records the diff).\n  - VERIFY the prior write landed, use read_file.\n  - DELIBERATELY overwrite (rare — e.g. discarding a draft), retry with _acknowledge_overwrite: true in the args.`,
+    success: false,
+    _errorCategory: "already_created",
+    path: filePath,
+  }
 }
 
 /**
