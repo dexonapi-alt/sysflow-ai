@@ -114,6 +114,20 @@ export interface DetectorInput {
    * heuristic skips.
    */
   latestAction?: ActionDescriptor | null
+  /**
+   * Stage 2 of awareness-and-verification-correctness plan: per-run
+   * snippet index of newly-written file CONTENT. Used by the
+   * `intent_keyword_absent` heuristic to search file content (not
+   * just file paths) — so a `package.json` with `"express"` in its
+   * deps satisfies the `"express"` intent keyword without the path
+   * `package.json` having to literally contain the substring
+   * "express". Plumbed from `context-manager.getContentSnippets`.
+   *
+   * Optional for backwards compatibility — older call sites that
+   * don't have a context-manager handy stay on the path-only
+   * haystack (the pre-Stage-2 behaviour).
+   */
+  contentSnippets?: Map<string, string>
 }
 
 // ─── Tuning constants ───
@@ -177,10 +191,32 @@ export function detectDivergence(input: DetectorInput): DivergenceSignal[] {
   }
 
   // ─── Heuristic 4: intent keyword from the user's prompt is absent ───
+  //
+  // Stage 2 of awareness-and-verification-correctness: three-tier
+  // satisfaction check so the heuristic stops false-flagging when
+  // the keyword IS present but only in file content / package.json
+  // deps (the pre-Stage-2 path-only haystack missed those).
+  //
+  //   Tier 1 (cheapest)  — keyword literally appears in a file path
+  //                        or in the completion message.
+  //   Tier 2             — structural signal: package.json deps OR a
+  //                        framework-specific file. e.g. "express"
+  //                        satisfied by `"express": "^4"` in
+  //                        package.json content; "prisma" satisfied
+  //                        by `prisma/schema.prisma` existing.
+  //   Tier 3 (richest)   — keyword appears in any file's content
+  //                        snippet (first 1KB).
+  //
+  // Tier 2 is the load-bearing addition — `package.json` doesn't have
+  // "express" in its path but it's THE canonical answer to "does this
+  // project use express?". The pre-Stage-2 heuristic could not see this.
   const intentKeywords = extractIntentKeywords(input.originalPrompt)
   if (intentKeywords.length > 0 && input.filesModified.length > 0) {
-    const haystack = (input.filesModified.join(" ") + " " + (input.completionMessage ?? "")).toLowerCase()
-    const missing = intentKeywords.filter((kw) => !haystackContainsKeyword(haystack, kw))
+    const pathHaystack = (input.filesModified.join(" ") + " " + (input.completionMessage ?? "")).toLowerCase()
+    const contentSnippets = input.contentSnippets ?? new Map()
+    const missing = intentKeywords.filter(
+      (kw) => !isIntentKeywordSatisfied(kw, pathHaystack, input.filesModified, contentSnippets),
+    )
     if (missing.length > 0) {
       signals.push({
         category: "intent_keyword_absent",
@@ -337,6 +373,214 @@ function haystackContainsKeyword(haystack: string, kw: string): boolean {
   // Drizzle ORM uses 'drizzle-orm', Prisma uses '@prisma/client', etc. —
   // a substring match catches those too.
   return false
+}
+
+/**
+ * Stage 2 of awareness-and-verification-correctness plan: per-keyword
+ * structural-signal table. An entry says: "this keyword is satisfied
+ * when ANY of these signals is present in the working context".
+ *
+ * Signals are pure string checks over (a) `package.json` content and
+ * (b) tracked file paths. No live filesystem access — the snippet
+ * index passed into the detector is the source of truth.
+ *
+ * Why a table not a function-per-keyword: data-driven means
+ * additions (new framework / new ORM) are one-line entries and the
+ * test surface stays small.
+ *
+ * Substring matches are CASE-INSENSITIVE. The path / content
+ * scanner lowercases both sides.
+ */
+const STRUCTURAL_SIGNALS: Record<string, ReadonlyArray<{
+  /** Where to look. */
+  source: "package_json_content" | "file_path"
+  /** Substring (lowercased) that satisfies. Used as `.includes(substr)`. */
+  substr: string
+}>> = {
+  express: [
+    { source: "package_json_content", substr: "\"express\"" },
+  ],
+  fastify: [
+    { source: "package_json_content", substr: "\"fastify\"" },
+  ],
+  nest: [{ source: "package_json_content", substr: "\"@nestjs/core\"" }],
+  nestjs: [{ source: "package_json_content", substr: "\"@nestjs/core\"" }],
+  koa: [{ source: "package_json_content", substr: "\"koa\"" }],
+  postgres: [
+    { source: "package_json_content", substr: "\"pg\"" },
+    { source: "package_json_content", substr: "\"postgres\"" },
+    { source: "package_json_content", substr: "\"node-postgres\"" },
+    { source: "package_json_content", substr: "\"@vercel/postgres\"" },
+  ],
+  postgresql: [
+    { source: "package_json_content", substr: "\"pg\"" },
+    { source: "package_json_content", substr: "\"postgres\"" },
+    { source: "package_json_content", substr: "\"node-postgres\"" },
+  ],
+  mysql: [
+    { source: "package_json_content", substr: "\"mysql\"" },
+    { source: "package_json_content", substr: "\"mysql2\"" },
+  ],
+  sqlite: [
+    { source: "package_json_content", substr: "\"sqlite\"" },
+    { source: "package_json_content", substr: "\"better-sqlite3\"" },
+  ],
+  mongodb: [
+    { source: "package_json_content", substr: "\"mongodb\"" },
+    { source: "package_json_content", substr: "\"mongoose\"" },
+  ],
+  mongo: [
+    { source: "package_json_content", substr: "\"mongodb\"" },
+    { source: "package_json_content", substr: "\"mongoose\"" },
+  ],
+  redis: [
+    { source: "package_json_content", substr: "\"redis\"" },
+    { source: "package_json_content", substr: "\"ioredis\"" },
+  ],
+  prisma: [
+    { source: "package_json_content", substr: "\"@prisma/client\"" },
+    { source: "package_json_content", substr: "\"prisma\"" },
+    { source: "file_path", substr: "prisma/schema.prisma" },
+    { source: "file_path", substr: "prisma\\schema.prisma" },
+  ],
+  drizzle: [
+    { source: "package_json_content", substr: "\"drizzle-orm\"" },
+  ],
+  knex: [{ source: "package_json_content", substr: "\"knex\"" }],
+  sequelize: [{ source: "package_json_content", substr: "\"sequelize\"" }],
+  react: [
+    { source: "package_json_content", substr: "\"react\"" },
+    { source: "file_path", substr: ".tsx" },
+    { source: "file_path", substr: ".jsx" },
+  ],
+  next: [{ source: "package_json_content", substr: "\"next\"" }],
+  nuxt: [{ source: "package_json_content", substr: "\"nuxt\"" }],
+  remix: [{ source: "package_json_content", substr: "\"@remix-run/" }],
+  astro: [{ source: "package_json_content", substr: "\"astro\"" }],
+  vue: [
+    { source: "package_json_content", substr: "\"vue\"" },
+    { source: "file_path", substr: ".vue" },
+  ],
+  svelte: [
+    { source: "package_json_content", substr: "\"svelte\"" },
+    { source: "file_path", substr: ".svelte" },
+  ],
+  sveltekit: [{ source: "package_json_content", substr: "\"@sveltejs/kit\"" }],
+  solid: [{ source: "package_json_content", substr: "\"solid-js\"" }],
+  preact: [{ source: "package_json_content", substr: "\"preact\"" }],
+  angular: [{ source: "package_json_content", substr: "\"@angular/core\"" }],
+  tailwind: [
+    { source: "package_json_content", substr: "\"tailwindcss\"" },
+    { source: "file_path", substr: "tailwind.config" },
+  ],
+  bootstrap: [{ source: "package_json_content", substr: "\"bootstrap\"" }],
+  mui: [{ source: "package_json_content", substr: "\"@mui/" }],
+  chakra: [{ source: "package_json_content", substr: "\"@chakra-ui/" }],
+  stripe: [{ source: "package_json_content", substr: "\"stripe\"" }],
+  supabase: [{ source: "package_json_content", substr: "\"@supabase/" }],
+  firebase: [{ source: "package_json_content", substr: "\"firebase\"" }],
+  trpc: [{ source: "package_json_content", substr: "\"@trpc/" }],
+  graphql: [
+    { source: "package_json_content", substr: "\"graphql\"" },
+    { source: "file_path", substr: ".graphql" },
+  ],
+  websocket: [
+    { source: "package_json_content", substr: "\"ws\"" },
+    { source: "package_json_content", substr: "\"socket.io\"" },
+  ],
+  typescript: [
+    { source: "package_json_content", substr: "\"typescript\"" },
+    { source: "file_path", substr: ".ts" },
+    { source: "file_path", substr: "tsconfig.json" },
+  ],
+  python: [
+    { source: "file_path", substr: ".py" },
+    { source: "file_path", substr: "requirements.txt" },
+    { source: "file_path", substr: "pyproject.toml" },
+  ],
+  go: [
+    { source: "file_path", substr: "go.mod" },
+    { source: "file_path", substr: ".go" },
+  ],
+  rust: [
+    { source: "file_path", substr: "cargo.toml" },
+    { source: "file_path", substr: ".rs" },
+  ],
+}
+
+/**
+ * Stage 2: three-tier intent-keyword satisfaction.
+ *
+ *   1. Path-haystack literal hit (covers the `package.json` literal
+ *      and any file path that names the framework like
+ *      `express.config.js`).
+ *   2. Structural signal — `package.json` deps OR
+ *      framework-specific file path.
+ *   3. Content-snippet substring hit (the snippet index from
+ *      context-manager — first 1KB per written file).
+ *
+ * Returns `true` if ANY tier satisfies. False positives are worse
+ * here than false negatives (a false positive lets the awareness
+ * detector miss real divergence) so each tier is strict-substring,
+ * not regex.
+ *
+ * Pure — no I/O. Exported for direct unit testing.
+ */
+export function isIntentKeywordSatisfied(
+  keyword: string,
+  pathHaystack: string,
+  filesModified: ReadonlyArray<string>,
+  contentSnippets: ReadonlyMap<string, string>,
+): boolean {
+  const kw = keyword.toLowerCase()
+
+  // Tier 1: path haystack (existing behaviour).
+  if (haystackContainsKeyword(pathHaystack, kw)) return true
+
+  // Tier 2: structural signals. Resolve package.json content snippet
+  // once (the most common signal source) and reuse across rules.
+  const signals = STRUCTURAL_SIGNALS[kw]
+  if (signals && signals.length > 0) {
+    const pkgJsonContent = (() => {
+      for (const [path, content] of contentSnippets) {
+        const lowerPath = path.toLowerCase()
+        if (lowerPath === "package.json" || lowerPath.endsWith("/package.json") || lowerPath.endsWith("\\package.json")) {
+          return content.toLowerCase()
+        }
+      }
+      return null
+    })()
+    for (const signal of signals) {
+      if (signal.source === "package_json_content") {
+        if (pkgJsonContent && pkgJsonContent.includes(signal.substr)) return true
+      } else if (signal.source === "file_path") {
+        // Substring search across modified file paths AND tracked
+        // content-snippet paths (so e.g. prisma/schema.prisma added
+        // via batch_write is visible even before it appears in the
+        // detector's filesModified list).
+        const allPaths = [...filesModified, ...contentSnippets.keys()]
+        for (const p of allPaths) {
+          if (p.toLowerCase().includes(signal.substr)) return true
+        }
+      }
+    }
+  }
+
+  // Tier 3: content scan across ALL snippets. Conservative — only
+  // fire when the keyword appears as a standalone word (bounded by
+  // non-alphanumerics) to avoid `"reactor"` satisfying `"react"`.
+  if (contentSnippets.size > 0) {
+    const wordRe = new RegExp(`(?:^|[^a-z0-9])${escapeRegex(kw)}(?:[^a-z0-9]|$)`, "i")
+    for (const content of contentSnippets.values()) {
+      if (wordRe.test(content)) return true
+    }
+  }
+
+  return false
+}
+
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
 /**

@@ -49,6 +49,19 @@ interface WorkingContext {
   commands: Array<{ command: string; outcome: string; tick: number }>
   /** User decisions from previous sessions */
   userDecisions: string[]
+  /**
+   * Stage 2 of awareness-and-verification-correctness plan: per-run
+   * snippet index of newly-written file CONTENT (first
+   * `MAX_CONTENT_SNIPPET_CHARS` chars per file). Used by the divergence
+   * detector's `intent_keyword_absent` heuristic to search file content
+   * — not just file PATHS — when deciding whether a prompt's intent
+   * keyword (e.g. "express", "postgres") is reflected in the
+   * implementation.
+   *
+   * Bounded to 1KB per file to keep memory in check on large scaffold
+   * runs. Cleared with the rest of the context at run terminal-exit.
+   */
+  contentSnippets: Map<string, string>
   /** Monotonic counter for ordering */
   tick: number
   /** Original task prompt */
@@ -105,6 +118,19 @@ const MAX_FILE_ENTRIES = 80
 const MAX_FACT_ENTRIES = 30
 const MAX_ERROR_ENTRIES = 10
 const MAX_COMMAND_ENTRIES = 15
+/**
+ * Stage 2 of awareness-and-verification-correctness plan: snippet
+ * char cap per file. 1KB is enough to catch package.json deps lists
+ * + the first imports of a TS / JS source file, which is where
+ * keyword anchors like "express" / "pg" / "react" surface.
+ */
+const MAX_CONTENT_SNIPPET_CHARS = 1024
+/**
+ * Stage 2: per-run cap on the number of files we snippet-index. Keeps
+ * memory bounded on large scaffold runs. Oldest entries (insertion
+ * order in a Map) are dropped when the cap is exceeded.
+ */
+const MAX_CONTENT_SNIPPETS = 60
 
 // ─── Public API ───
 
@@ -115,6 +141,7 @@ export function initRunContext(runId: string, originalTask: string): void {
     errors: [],
     commands: [],
     userDecisions: [],
+    contentSnippets: new Map(),
     tick: 0,
     originalTask
   })
@@ -285,6 +312,13 @@ export function ingestToolResult(
       tick,
       verified: true
     })
+    // Stage 2 of awareness-and-verification-correctness: capture
+    // the first 1KB of content so the divergence detector can
+    // search file CONTENT for intent keywords ("express" in deps,
+    // `import pg from "pg"`, etc.) not just file PATHS.
+    if (success && typeof args.content === "string") {
+      captureContentSnippet(ctx, p, args.content)
+    }
   }
 
   if (tool === "edit_file" && args.path) {
@@ -296,6 +330,13 @@ export function ingestToolResult(
       tick,
       verified: true
     })
+    // Stage 2: edit_file's new_string is a delta, not the full file.
+    // Concat the existing snippet (if any) with the new fragment so
+    // later content-scan still sees freshly-added imports / deps.
+    if (success && typeof args.new_string === "string") {
+      const existing = ctx.contentSnippets.get(p) ?? ""
+      captureContentSnippet(ctx, p, existing + "\n" + args.new_string)
+    }
   }
 
   if (tool === "read_file" && args.path) {
@@ -346,6 +387,18 @@ export function ingestToolResult(
         tick,
         verified: true
       })
+    }
+    // Stage 2: batch_write's `args.files` (input side) carries the
+    // content we just wrote. The `result.files` we iterated above
+    // is success/error metadata; for content we cross-ref the args.
+    const inputFiles = Array.isArray(args.files) ? (args.files as Array<{ path?: string; content?: string }>) : []
+    for (const inputFile of inputFiles) {
+      if (typeof inputFile?.path === "string" && typeof inputFile.content === "string") {
+        const matchingResult = (result.files as Array<{ path: string; success: boolean }>).find((r) => r.path === inputFile.path)
+        if (matchingResult?.success !== false) {
+          captureContentSnippet(ctx, inputFile.path, inputFile.content)
+        }
+      }
     }
   }
 
@@ -683,4 +736,51 @@ function extractFileSummary(content: string): string {
   // Fallback: first meaningful line
   const firstLine = lines.find((l) => l.trim().length > 5)
   return firstLine ? firstLine.trim().slice(0, 60) : "(empty)"
+}
+
+// ─── Stage 2 of awareness-and-verification-correctness: content snippet helpers ───
+
+/**
+ * Store a snippet of newly-written file content for keyword-match
+ * scanning. Truncates to `MAX_CONTENT_SNIPPET_CHARS` to keep memory
+ * bounded on large scaffold runs (60 files × 1KB = 60KB peak).
+ *
+ * When the index exceeds `MAX_CONTENT_SNIPPETS` entries, drop the
+ * oldest insertion (Map preserves insertion order). Newer files are
+ * more likely to satisfy the keyword scan since they're the agent's
+ * most recent intent — and the divergence detector is a per-step
+ * heuristic, so older snippets matter less.
+ */
+function captureContentSnippet(ctx: WorkingContext, filePath: string, content: string): void {
+  if (typeof content !== "string" || content.length === 0) return
+  const snippet = content.length > MAX_CONTENT_SNIPPET_CHARS
+    ? content.slice(0, MAX_CONTENT_SNIPPET_CHARS)
+    : content
+  // Re-set drops + re-inserts to refresh insertion order on update.
+  if (ctx.contentSnippets.has(filePath)) ctx.contentSnippets.delete(filePath)
+  ctx.contentSnippets.set(filePath, snippet)
+  // Cap: evict oldest when over the size limit. Map iteration order
+  // is insertion order so .keys().next() gives the oldest entry.
+  while (ctx.contentSnippets.size > MAX_CONTENT_SNIPPETS) {
+    const oldestKey = ctx.contentSnippets.keys().next().value
+    if (oldestKey === undefined) break
+    ctx.contentSnippets.delete(oldestKey)
+  }
+}
+
+/**
+ * Return a snapshot of the per-run content-snippet index. The caller
+ * (`buildDetectorInput` in `tool-result.ts`) threads this into the
+ * divergence detector's `intent_keyword_absent` heuristic.
+ *
+ * Returns an empty Map (not undefined) when the run has no context —
+ * keeps caller code branchless.
+ */
+export function getContentSnippets(runId: string): Map<string, string> {
+  const ctx = runContexts.get(runId)
+  if (!ctx) return new Map()
+  // Return the live Map directly — callers MUST treat as read-only.
+  // (Copying on every per-step call would be wasteful and the
+  // detector is pure.)
+  return ctx.contentSnippets
 }
