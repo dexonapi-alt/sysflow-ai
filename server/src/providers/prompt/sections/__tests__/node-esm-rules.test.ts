@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect } from "vitest"
-import { getNodeEsmRulesSection } from "../node-esm-rules.js"
+import { getNodeEsmRulesSection, shouldRenderNodeEsmRules } from "../node-esm-rules.js"
 import { buildSystemPrompt } from "../../build.js"
 
 describe("getNodeEsmRulesSection — content + key examples", () => {
@@ -66,15 +66,17 @@ describe("getNodeEsmRulesSection — content + key examples", () => {
 
   it("section is non-trivial in length (substantive content, not a stub)", () => {
     const section = getNodeEsmRulesSection()
+    expect(section).not.toBeNull()
     // Five rules + examples + verification hint should produce a meaningful section.
-    expect(section.length).toBeGreaterThan(1500)
+    expect(section!.length).toBeGreaterThan(1500)
   })
 
   it("uses concrete code examples (wrong then right), not abstract prose", () => {
     const section = getNodeEsmRulesSection()
+    expect(section).not.toBeNull()
     // The "Wrong: ... Right:" pattern appears for each rule with real syntax.
-    const wrongCount = (section.match(/Wrong:/g) || []).length
-    const rightCount = (section.match(/Right:/g) || []).length
+    const wrongCount = (section!.match(/Wrong:/g) || []).length
+    const rightCount = (section!.match(/Right:/g) || []).length
     expect(wrongCount).toBeGreaterThanOrEqual(3)
     expect(rightCount).toBeGreaterThanOrEqual(3)
   })
@@ -107,5 +109,140 @@ describe("buildSystemPrompt — node-esm-rules section threaded through", () => 
     expect(rulesIdx).toBeGreaterThan(-1)
     expect(nodeEsmIdx).toBeGreaterThan(rulesIdx)
     expect(outputEffIdx).toBeGreaterThan(nodeEsmIdx)
+  })
+})
+
+// ─── Language gating (follow-up to Stage 1: avoid wasting tokens on non-Node repos) ───
+
+describe("shouldRenderNodeEsmRules — language gate", () => {
+  it("returns true when no project-init brief is present (defensive default)", () => {
+    expect(shouldRenderNodeEsmRules({})).toBe(true)
+    expect(shouldRenderNodeEsmRules({ projectInitBrief: undefined })).toBe(true)
+  })
+
+  it("returns true when project-init brief is not an object (malformed)", () => {
+    expect(shouldRenderNodeEsmRules({ projectInitBrief: null })).toBe(true)
+    expect(shouldRenderNodeEsmRules({ projectInitBrief: "string" })).toBe(true)
+  })
+
+  it("returns true for empty repos (stack not yet determined)", () => {
+    expect(shouldRenderNodeEsmRules({
+      projectInitBrief: { repoState: "empty", keyMarkers: [] },
+    })).toBe(true)
+  })
+
+  it("returns true for small repos (stack not yet determined)", () => {
+    expect(shouldRenderNodeEsmRules({
+      projectInitBrief: { repoState: "small", keyMarkers: ["README.md"] },
+    })).toBe(true)
+  })
+
+  it("returns true for existing-small with package.json", () => {
+    expect(shouldRenderNodeEsmRules({
+      projectInitBrief: { repoState: "existing-small", keyMarkers: ["package.json", "src/"] },
+    })).toBe(true)
+  })
+
+  it("returns true for existing-large with tsconfig.json", () => {
+    expect(shouldRenderNodeEsmRules({
+      projectInitBrief: { repoState: "existing-large", keyMarkers: ["tsconfig.json", "src/", "tests/"] },
+    })).toBe(true)
+  })
+
+  it("returns true when keyMarkers include node_modules", () => {
+    expect(shouldRenderNodeEsmRules({
+      projectInitBrief: { repoState: "existing-large", keyMarkers: ["node_modules", "src/"] },
+    })).toBe(true)
+  })
+
+  it("returns true when keyMarkers include a .ts file", () => {
+    expect(shouldRenderNodeEsmRules({
+      projectInitBrief: { repoState: "existing-small", keyMarkers: ["index.ts"] },
+    })).toBe(true)
+  })
+
+  it("returns true when keyMarkers include a .js / .mjs / .cjs file", () => {
+    expect(shouldRenderNodeEsmRules({
+      projectInitBrief: { repoState: "existing-small", keyMarkers: ["server.js"] },
+    })).toBe(true)
+    expect(shouldRenderNodeEsmRules({
+      projectInitBrief: { repoState: "existing-small", keyMarkers: ["main.mjs"] },
+    })).toBe(true)
+  })
+
+  it("returns FALSE for existing Python project (pyproject.toml + no Node markers)", () => {
+    expect(shouldRenderNodeEsmRules({
+      projectInitBrief: { repoState: "existing-small", keyMarkers: ["pyproject.toml", "src/", "tests/"] },
+    })).toBe(false)
+  })
+
+  it("returns FALSE for existing Rust project (Cargo.toml)", () => {
+    expect(shouldRenderNodeEsmRules({
+      projectInitBrief: { repoState: "existing-large", keyMarkers: ["Cargo.toml", "src/", "target/"] },
+    })).toBe(false)
+  })
+
+  it("returns FALSE for existing Go project (go.mod)", () => {
+    expect(shouldRenderNodeEsmRules({
+      projectInitBrief: { repoState: "existing-small", keyMarkers: ["go.mod", "go.sum", "main.go"] },
+    })).toBe(false)
+  })
+
+  it("src/ alone doesn't qualify (Python uses it too)", () => {
+    // src/ is the ONLY marker; no package.json / tsconfig.json / etc.
+    expect(shouldRenderNodeEsmRules({
+      projectInitBrief: { repoState: "existing-small", keyMarkers: ["src/"] },
+    })).toBe(false)
+  })
+
+  it("ignores non-string entries in keyMarkers (defensive)", () => {
+    expect(shouldRenderNodeEsmRules({
+      projectInitBrief: { repoState: "existing-small", keyMarkers: [42, null, "package.json"] },
+    })).toBe(true)
+  })
+})
+
+describe("getNodeEsmRulesSection — returns null when gated off", () => {
+  it("returns null on existing Python project", () => {
+    const out = getNodeEsmRulesSection({
+      projectInitBrief: { repoState: "existing-small", keyMarkers: ["pyproject.toml"] },
+    })
+    expect(out).toBeNull()
+  })
+
+  it("returns the section on Node project", () => {
+    const out = getNodeEsmRulesSection({
+      projectInitBrief: { repoState: "existing-small", keyMarkers: ["package.json"] },
+    })
+    expect(out).not.toBeNull()
+    expect(out).toContain("═══ NODE-ESM + TYPESCRIPT IMPORT RULES ═══")
+  })
+
+  it("returns the section when no brief (default rendering preserved)", () => {
+    const out = getNodeEsmRulesSection()
+    expect(out).not.toBeNull()
+  })
+})
+
+describe("buildSystemPrompt — section drops when language gate says skip", () => {
+  it("section is ABSENT from full prompt for an existing Python project", () => {
+    const built = buildSystemPrompt({
+      projectInitBrief: { repoState: "existing-small", keyMarkers: ["pyproject.toml", "src/"] },
+    })
+    expect(built.full).not.toContain("═══ NODE-ESM + TYPESCRIPT IMPORT RULES ═══")
+  })
+
+  it("section is PRESENT for an existing Node project", () => {
+    const built = buildSystemPrompt({
+      projectInitBrief: { repoState: "existing-small", keyMarkers: ["package.json", "src/"] },
+    })
+    expect(built.full).toContain("═══ NODE-ESM + TYPESCRIPT IMPORT RULES ═══")
+  })
+
+  it("section is PRESENT for empty repo (stack not yet known)", () => {
+    const built = buildSystemPrompt({
+      projectInitBrief: { repoState: "empty", keyMarkers: [] },
+    })
+    expect(built.full).toContain("═══ NODE-ESM + TYPESCRIPT IMPORT RULES ═══")
   })
 })

@@ -18,10 +18,52 @@
  * import against a named export). All five rules below directly map
  * to one of those runtime failures.
  *
- * Cacheable — rules are static across runs. Always rendered.
+ * Cacheable — rules are static across runs. Gated on language: only
+ * renders when the project-init brief's keyMarkers indicate a Node /
+ * TypeScript project (or the repo is empty / small — where the user
+ * hasn't yet committed to a stack and Node is the dominant scaffold
+ * target in observed runs). Skips on existing Python / Rust / Go /
+ * etc. repos to avoid wasting ~2000 tokens on irrelevant rules.
  */
 
-export function getNodeEsmRulesSection(): string {
+/** Pure: decide whether the rules apply to this run's project shape. */
+export function shouldRenderNodeEsmRules(ctx: { projectInitBrief?: unknown } = {}): boolean {
+  const brief = ctx.projectInitBrief as { repoState?: string; keyMarkers?: unknown } | undefined
+  if (!brief || typeof brief !== "object") {
+    // Without a project-init brief (project-init disabled, no reasoner
+    // backend, or legacy code path), default to rendering — false
+    // negative would re-introduce the original bug. Token cost is the
+    // only downside, and only on non-Node existing projects.
+    return true
+  }
+  // For empty / small repos we don't know the eventual stack yet.
+  // Render the rules — the model can short-circuit when it's clearly
+  // scaffolding non-Node, and Node is by far the dominant target in
+  // observed runs.
+  if (brief.repoState === "empty" || brief.repoState === "small") return true
+  // Existing repos: check keyMarkers for Node / TS signals.
+  const markers = Array.isArray(brief.keyMarkers) ? (brief.keyMarkers as unknown[]) : []
+  for (const m of markers) {
+    if (typeof m !== "string") continue
+    // Canonical Node / TS markers the project-init reasoner reports.
+    if (m === "package.json") return true
+    if (m === "tsconfig.json") return true
+    if (m === "node_modules" || m === "node_modules/") return true
+    // Common Node directory shapes.
+    if (m === "src/" || m === "src") {
+      // src/ alone is ambiguous (Python uses it too). Pair-required
+      // with another marker; if no other Node marker, fall through.
+      continue
+    }
+    // File extensions in markers — some project-init implementations
+    // surface filenames like 'index.ts' directly.
+    if (m.endsWith(".ts") || m.endsWith(".tsx") || m.endsWith(".js") || m.endsWith(".mjs") || m.endsWith(".cjs") || m.endsWith(".jsx")) return true
+  }
+  return false
+}
+
+export function getNodeEsmRulesSection(ctx: { projectInitBrief?: unknown } = {}): string | null {
+  if (!shouldRenderNodeEsmRules(ctx)) return null
   return `═══ NODE-ESM + TYPESCRIPT IMPORT RULES ═══
 
 When you write TypeScript / JavaScript files in this run, your code
