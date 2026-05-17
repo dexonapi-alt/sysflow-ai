@@ -10,6 +10,7 @@ import { mapNormalizedResponseToClient } from "../providers/normalize.js"
 import { analyzeTaskComplexity } from "../services/completion-guard.js"
 import { actionPlanner } from "../services/action-planner.js"
 import { initRunContext, ingestDirectoryTree } from "../services/context-manager.js"
+import { setRunPlatform } from "../services/run-platform-store.js"
 import { isFrontendTask, detectFrontendStack, getFrontendPatterns } from "../knowledge/frontend-patterns.js"
 import { accumulateFrontendContent } from "../services/frontend-quality-guard.js"
 import { detectErrorForSearch, buildErrorSearchOverride, setConfigSkipList, setExpectedArtifacts } from "../services/setup-intelligence.js"
@@ -43,11 +44,33 @@ interface UserMessageBody {
   userId?: string | null
   chatId?: string | null
   planMode?: boolean
+  /**
+   * Stage 4.1 of awareness-and-verification-correctness plan: the
+   * cli sends its host platform here so the server's prompt builder
+   * renders env-info matching the user's OS, not the server's.
+   * Optional for backwards compatibility — legacy clients fall
+   * through to `process.platform`.
+   */
+  client?: {
+    platform?: string
+    arch?: string
+  }
 }
 
 export async function handleUserMessage(body: UserMessageBody): Promise<ClientResponse> {
   const runId = crypto.randomUUID()
   const taskId = crypto.randomUUID()
+
+  // Stage 4.1 of awareness-and-verification-correctness plan: capture
+  // the user's host platform so every downstream prompt-builder call
+  // can render bash vs PowerShell command examples that match the
+  // user's OS — not the server's. Fallback: `process.platform`
+  // (legacy behaviour for cli versions that don't send `client`).
+  const clientPlatform = (body.client?.platform || process.platform) as NodeJS.Platform
+  setRunPlatform(runId, clientPlatform)
+  if (body.client?.platform && body.client.platform !== process.platform) {
+    console.log(`[platform] run ${runId} client=${body.client.platform} (server=${process.platform})`)
+  }
 
   await saveOrphanedSessions(body.projectId, body.chatId)
 
@@ -189,7 +212,10 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
       projectInitBrief = await runProjectInitChain({
         directoryTree: (body.directoryTree ?? []) as Array<{ name: string; type: "file" | "directory" }>,
         userMessage: body.content,
-        platform: process.platform,
+        // Stage 4.1: use the user's platform so the reasoner's
+        // suggestions (preferred commands, scaffolding tools) match
+        // what the user's machine can actually run.
+        platform: clientPlatform,
         model: body.model,
         maxIterations: maxIters,
       })
@@ -603,7 +629,9 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
     runIntent,
     taskComplexity: taskComplexity.complexity,
     userId: body.userId || null,
-    chatId: body.chatId || null
+    chatId: body.chatId || null,
+    // Stage 4.1 of awareness-and-verification-correctness plan.
+    clientPlatform,
   } as never)
 
   await persistModelUsage({

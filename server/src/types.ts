@@ -87,6 +87,22 @@ export interface ProviderPayload {
    *  taskPlan instruction. The model's per-turn output then doesn't
    *  carry a taskPlan ceiling the conversation. */
   taskComplexity?: "simple" | "medium" | "complex" | null
+  /**
+   * Stage 4.1 of awareness-and-verification-correctness plan: the
+   * USER's platform as reported by the cli's `client.platform` field
+   * on the initial user_message. Threaded through every provider
+   * call so the prompt-builder's env-info section renders bash vs
+   * PowerShell command examples matching the user's OS — NOT the
+   * server's. Without this, our SaaS deployment (server on linux)
+   * told every Windows user the platform was `linux` and they should
+   * use bash, which is why the model kept emitting `ls -la` on
+   * Windows.
+   *
+   * Fallback chain when undefined: `process.platform` (server's own).
+   * Same shape as `NodeJS.Platform` but typed loosely so the type
+   * survives JSON round-trip from the cli.
+   */
+  clientPlatform?: string
 }
 
 export interface ProviderContext {

@@ -167,6 +167,12 @@ export class GeminiProvider extends BaseProvider {
       })(),
       // Stage 1 of agent-runtime-fixes plan: project-state block.
       projectInitBrief: payload.projectInitBrief,
+      // Stage 4.1 of awareness-and-verification-correctness plan:
+      // thread the USER's host platform so env-info renders the
+      // bash vs PowerShell preferred-commands list matching the
+      // user's OS — NOT the server's. Same threading as in
+      // base-provider.getSystemPromptForRequest.
+      platform: payload.clientPlatform,
     })
   }
 
