@@ -163,6 +163,11 @@ export async function executeToolLocally(tool: string, args: Record<string, unkn
 
   // Helper to wrap any branch's return so post-hooks fire.
   const finalize = async (result: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    // Stage 5 of code-correctness plan: account for stripped imports
+    // in this tool's result. Single accounting point — every tool's
+    // result passes through finalize, so we never double-count or
+    // miss strips from any write/edit code path.
+    bumpImportsStrippedCount(countStrippedInResult(result))
     const event = result.success === false || result.error ? "post_tool_use_failure" : "post_tool_use"
     await runHooks(event, { event, tool, args, runId, result })
     return result
@@ -420,6 +425,37 @@ export function resetNullToolRejections(): void {
 
 function bumpNullToolRejections(): void {
   _nullToolRejectionsThisRun += 1
+}
+
+// ─── Stage 5 of code-correctness plan: stripped-imports counter ───
+//
+// Bumped each time a writeFileTool / editFileTool result carries a
+// non-empty `_strippedImports` array (from Stage 2's loud-sanitizer
+// path). Counts EVERY stripped import — a single broken file with
+// 5 bad imports bumps by 5. Spike on the per-run total = the model
+// is writing forward references regularly = tighten Stage 1's
+// Node-ESM rules or batching/ordering (Plan 4 covers ordering).
+
+let _importsStrippedThisRun = 0
+
+export function getImportsStrippedCount(): number {
+  return _importsStrippedThisRun
+}
+
+export function resetImportsStrippedCount(): void {
+  _importsStrippedThisRun = 0
+}
+
+function bumpImportsStrippedCount(n: number): void {
+  if (n > 0) _importsStrippedThisRun += n
+}
+
+/** Pure: count stripped imports in a tool result. Exported for tests. */
+export function countStrippedInResult(result: Record<string, unknown> | undefined): number {
+  if (!result) return 0
+  const arr = result._strippedImports
+  if (!Array.isArray(arr)) return 0
+  return arr.filter((s) => typeof s === "string" && s.length > 0).length
 }
 
 /**

@@ -675,3 +675,56 @@ The previous retry classifier used `!(err as Error).message?.includes("Server er
 `instanceof NonRetryableError` survives every re-throw and parse round-trip. The signature field carries telemetry (which signature matched) without depending on the message format.
 
 **Pattern specificity matters.** The classifier requires canonical PG phrasings (`violates ... constraint`), not bare `constraint` (which appears in unrelated stack traces). Test coverage explicitly pins both the positive cases AND the should-NOT-match cases (generic `Internal Server Error`, empty bodies, connection errors, `constraint` in unrelated context). Drift-protected.
+
+## tsc --noEmit is a completion gate, not a hint
+
+- **Source:** plan `applied/2026-05-16-agent-code-correctness-and-completion-artifacts.md` (Stage 3)
+
+When the run authored ≥1 `.ts`/`.tsx` file AND `tsconfig.json` exists at the project root, the model's `completed` response is gated on `npx --no-install tsc --noEmit` returning zero errors. On failure: the response is overridden to `needs_tool` + a `═══ TYPECHECK FAILED — FIX BEFORE COMPLETION ═══` block is injected with diagnostics. The agent must fix every error before completion succeeds.
+
+**Why mechanical, not advisory:**
+
+The user's repro shipped a POS backend with cascading TS errors (missing extensions, `import { NextFunction }` from express CJS as a value, default-import against a named export) that only surfaced when the user ran `npm run dev`. Every one of those would have been caught by `tsc --noEmit`. Telling the model "please typecheck before declaring done" in the system prompt doesn't work on free-tier — the model commits when it THINKS it's done. The gate is the enforcement layer.
+
+**Why post-completion, not per-file:**
+
+Per-file tsc is too noisy — one file's import of a not-yet-written sibling shows up as a type error mid-batch. The completion-time gate sees the final state on disk; only legitimate errors fire.
+
+**Why graceful degrade, not block-on-infra-failure:**
+
+`tsc --noEmit` requires `tsc` installed locally. Some projects don't have it; `npx --no-install` doesn't auto-install. The gate degrades to `ok: true` when tsc isn't invocable rather than blocking the run on an infrastructure issue. The agent's other quality gates (import-sanitizer, artifact-gate) still fire.
+
+**Alternatives rejected:**
+
+- *Run tsc per-chunk (during chunked loop)* — too noisy + cost. Per-file errors mid-batch aren't actionable.
+- *Run a faster type-checker (swc-checker)* — currently no battle-tested ESM-aware option. tsc is the canonical reference.
+- *Auto-install tsc on missing* — would mutate the user's deps. Off-limit.
+
+## Prompt-implied artifacts (schema, tests) are mandatory, not suggested
+
+- **Source:** plan `applied/2026-05-16-agent-code-correctness-and-completion-artifacts.md` (Stage 4 + follow-up)
+
+When the user's prompt unambiguously requires an artifact (database schema for postgres prompts, prisma schema for prisma prompts, tests when explicitly asked), completion is blocked until the artifact exists on disk. The agent CANNOT ship a "this is a manual step for the user" disclaimer for prompt-implied work.
+
+**Why LLM-driven, not keyword-driven:**
+
+Initial implementation (Stage 4, PR #111) used hardcoded keyword matching: `postgres` / `mysql` / `prisma` / `tests` → require corresponding artifact. This caught the canonical user repro (POS backend with no schema) but had three false-positive paths:
+
+1. Q&A prompts mentioning DB (*"explain how postgres handles transactions"*) — keyword fired, gate required schema.
+2. Casual DB mention as INPUT (*"CLI that reads PG connection from env"*) — keyword fired, gate required schema even though no schema needed.
+3. Noun-form `test` (*"automation, test, CLI"* as category list) — keyword fired, gate required test files.
+
+PR #112 replaced the keyword classifier with **LLM-driven `expectedArtifacts`**: the project-init reasoner (running once per implement run) commits which artifacts are required, looking at the full prompt context. Empty array = "no artifacts required" → gate skips. The model sees Q&A intent, input-vs-output framing, and category-noun usage and decides correctly. Keyword classifier stays as Tier 2 fallback for legacy paths (no reasoner backend, project-init disabled).
+
+**Alternatives rejected:**
+
+- *Pure keyword matching (PR #111 only)* — false positives waste user time. Q&A about Postgres shouldn't require a schema.
+- *Pure LLM at completion time (no project-init brief)* — extra Flash call per completion. The brief at run-start covers this; reuse it.
+- *Block but make it warning-level (don't override)* — defeats the purpose. The user reported the agent SILENTLY shipping no schema; warnings get ignored.
+
+**The contract is bidirectional:**
+
+- LLM decides WHETHER an artifact is required (judgment call goes to the model).
+- Gate ENFORCES that decision against the disk (mechanical check).
+
+Both halves matter. Without the LLM verdict, the gate over-fires. Without the gate, the model can claim done without writing the file (the original user bug).

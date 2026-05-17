@@ -1046,3 +1046,82 @@ Every error envelope now carries an `errorSource` discriminator so the cli + age
 - Telemetry: `RunSummary.sysflowInfraErrorCount / nullToolRejectionCount / nonRetryable5xxCount`
 
 No new flags. The discriminator is a hard architectural change — flagging it off would re-introduce the "agent tries to fix sysflow from user project" bug.
+
+## Code-correctness gates
+
+- **Source:** plan `applied/2026-05-16-agent-code-correctness-and-completion-artifacts.md`
+
+Four mechanical gates + one LLM verdict prevent the agent from declaring "completed" while the project doesn't compile, has stripped imports, or is missing prompt-implied artifacts (schema, tests). Each layer catches a different failure class observed in the canonical user repro (POS backend shipped with cascading ESM errors + no schema).
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│  agent writes a .ts file                                           │
+│       │                                                            │
+│       ▼                                                            │
+│  Prompt-level rules (Stage 1)                                      │
+│       │   NODE-ESM + TS IMPORT RULES section in tools.ts:          │
+│       │     - relative imports require .ts extension               │
+│       │     - import type for CJS type-only imports                │
+│       │     - default vs named exports (verify source)             │
+│       │     - bare-package imports require declared deps           │
+│       │     - producer-before-consumer ordering                    │
+│       │   Language-gated via project-init keyMarkers (skips on     │
+│       │   Python/Rust/Go).                                         │
+│       │                                                            │
+│       ▼                                                            │
+│  Cli sanitizeImports                                               │
+│       │   Strips relative imports to non-existent files            │
+│       │                                                            │
+│       ▼                                                            │
+│  Stage 2: loud import-sanitizer feedback                           │
+│       │   cli surfaces _strippedImports on result envelope         │
+│       │   server scans batch via collectStrippedImports +          │
+│       │     buildImportStrippedInject                              │
+│       │   injects ═══ IMPORTS STRIPPED ═══ block via               │
+│       │     actionPlanner.injectContext (consumed next turn)       │
+│       │                                                            │
+│       ▼                                                            │
+│  agent declares completed                                          │
+│       │                                                            │
+│       ▼                                                            │
+│  Stage 3: tsc --noEmit gate                                        │
+│       │   only fires when run authored ≥1 .ts/.tsx AND             │
+│       │     tsconfig.json exists. Gracefully degrades on missing   │
+│       │     tsc / timeout.                                         │
+│       │   On error: override completed → needs_tool +              │
+│       │     ═══ TYPECHECK FAILED ═══ inject + agent fixes          │
+│       ▼                                                            │
+│  Stage 4: prompt-implied artifact gate                             │
+│       │   LLM-driven (preferred): project-init reasoner            │
+│       │     commits expectedArtifacts: ArtifactKind[] at           │
+│       │     run start. Empty = skip; non-empty = enforce.          │
+│       │   Keyword fallback (legacy): hardcoded matcher when        │
+│       │     project-init didn't fire.                              │
+│       │   On missing: override completed → needs_tool +            │
+│       │     ═══ COMPLETION BLOCKED ═══ inject + agent creates      │
+│       ▼                                                            │
+│  Completion accepted → RunSummary records:                         │
+│    - importsStrippedCount (Stage 2 strips, cli-side)               │
+│    - tscErrorCount (Stage 3 peak)                                  │
+│    - completionBlockedReason ("tsc" | "artifact_missing" | null)   │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+**Key boundaries:**
+
+- Stage 1 (prompt) is advisory. Stages 2/3/4 are mechanical — they OVERRIDE the model's `completed` response.
+- All four gates carry `reasoningChain` forward through the override (per the reasoning-chain-provider-parity plan) so the user sees the model's deliberation about why it thought it was done.
+- The Stage 4 LLM verdict means false-positive `expectedArtifacts` are minimised — the model sees the full prompt context (Q&A vs implement, casual mention vs creation intent) and decides. Hardcoded keyword classifier stays as Tier 2 fallback.
+
+**Files & flags:**
+
+- Prompt section: `server/src/providers/prompt/sections/node-esm-rules.ts` (language-gated via project-init `keyMarkers`)
+- Loud sanitizer: `cli-client/src/agent/tools.ts` (`sanitizeImports` returns `_strippedImports`) + `server/src/services/import-stripped-inject.ts` (pure renderer)
+- tsc gate: `server/src/services/tsc-completion-gate.ts`
+- Artifact gate: `server/src/services/completion-artifact-gate.ts` + per-run state in `setup-intelligence.ts` (`setExpectedArtifacts` / `getExpectedArtifacts`)
+- LLM verdict: `server/src/reasoning/project-init-reasoner.ts: ProjectInitBrief.expectedArtifacts`
+- Telemetry: `RunSummary.importsStrippedCount / tscErrorCount / completionBlockedReason`
+- Flags:
+  - `quality.precompletion_tsc_gate_enabled` (default `true`)
+  - `quality.precompletion_tsc_timeout_ms` (default `30000`)
+  - `quality.completion_artifact_check_enabled` (default `true`)

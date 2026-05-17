@@ -34,7 +34,7 @@ import { renderReasoningBrief, renderDecisionBrief } from "../cli/reasoning-disp
 import { classifyResponse, makeRetryBudget, noteSuccess, type RetryBudget } from "./state-machine.js"
 import { recordRunSummary } from "./usage-log.js"
 import { getReasoningPeekExpansions, resetReasoningPeekExpansions } from "../ui/components/ReasoningPeek.js"
-import { getNullToolRejections, resetNullToolRejections } from "./executor.js"
+import { getNullToolRejections, resetNullToolRejections, getImportsStrippedCount, resetImportsStrippedCount } from "./executor.js"
 import { getNonRetryable5xxCount, resetNonRetryable5xxCount } from "../lib/server.js"
 import { estimateTokens as cliEstimateTokens } from "./token-estimate.js"
 import { startJobStatusBar, stopJobStatusBar } from "../cli/job-status.js"
@@ -508,6 +508,12 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   // Stage 5 of server-hardening plan: per-run counter for sysflow_infra
   // terminal failures. 0 or 1 per run (sysflow_infra halts the loop).
   let sysflowInfraErrorCount = 0
+  // Stage 5 of code-correctness plan: completion-gate counters.
+  // tscErrorCount: peak observed across the run (max-wins so a brief
+  // recovery doesn't undercount). completionBlockedReason: last-write
+  // wins (which gate blocked LAST).
+  let tscErrorCountPeak = 0
+  let completionBlockedReasonLatest: "tsc" | "artifact_missing" | null = null
   // Stage 4 of reasoning-chain-provider-parity plan: distribution
   // counters for structured-vs-synthesised per-turn reasoning. Bumped
   // each turn based on the server-side classification surfaced on
@@ -669,10 +675,17 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       sysflowInfraErrorCount,
       nullToolRejectionCount: getNullToolRejections(),
       nonRetryable5xxCount: getNonRetryable5xxCount(),
+      // Stage 5 of code-correctness plan: import strips (cli-side),
+      // tsc error peak + completion-blocked reason (server-side
+      // surfaced via ClientResponse).
+      importsStrippedCount: getImportsStrippedCount(),
+      tscErrorCount: tscErrorCountPeak,
+      completionBlockedReason: completionBlockedReasonLatest,
     })
     resetReasoningPeekExpansions()
     resetNullToolRejections()
     resetNonRetryable5xxCount()
+    resetImportsStrippedCount()
     unregisterSpinner()
   }
 
@@ -917,6 +930,18 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         const ackCount = (response as Record<string, unknown>).errorAckRejectionCount
         if (typeof ackCount === "number" && ackCount > errorAckRejectionsPeak) {
           errorAckRejectionsPeak = ackCount
+        }
+        // Stage 5 of code-correctness plan: capture completion-gate
+        // override signals. Server attaches completionBlockedBy when
+        // tsc gate (Stage 3) or artifact gate (Stage 4) overrode a
+        // completed response. Peak tsc error count for tsc gate.
+        const blockedBy = (response as Record<string, unknown>).completionBlockedBy
+        if (blockedBy === "tsc" || blockedBy === "artifact_missing") {
+          completionBlockedReasonLatest = blockedBy
+        }
+        const tscErr = (response as Record<string, unknown>).completionTscErrorCount
+        if (typeof tscErr === "number" && tscErr > tscErrorCountPeak) {
+          tscErrorCountPeak = tscErr
         }
         // Stage E of model-lock-and-portable-reasoning: capture the
         // backend if it wasn't surfaced on the very first response

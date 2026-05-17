@@ -60,6 +60,22 @@ export function classifyPerTurnReasoningSource(normalized: NormalizedResponse): 
   return null
 }
 
+/**
+ * Stage 5 of plan 2026-05-16-agent-code-correctness-and-completion-artifacts.md.
+ *
+ * Reads the `_completionBlockedBy` marker that Stage 3 (tsc gate) /
+ * Stage 4 (artifact gate) attach to the normalized envelope when they
+ * override a `completed` response. Surfaces as `ClientResponse.completionBlockedBy`
+ * for cli RunSummary telemetry.
+ *
+ * Pure; exported for tests.
+ */
+export function extractCompletionGateSignal(normalized: NormalizedResponse): "tsc" | "artifact_missing" | null {
+  const marker = (normalized as unknown as Record<string, unknown>)._completionBlockedBy
+  if (marker === "tsc" || marker === "artifact_missing") return marker
+  return null
+}
+
 function classifyFailureErrorCode(error: string | undefined): ServerErrorCode {
   if (!error) return "unknown"
   const lower = error.toLowerCase()
@@ -97,6 +113,12 @@ export function mapNormalizedResponseToClient(runId: string, normalized: Normali
         // whether Stage 2's MANDATORY directive is shifting the
         // distribution toward structured chains.
         perTurnReasoningSource: classifyPerTurnReasoningSource(normalized),
+        // Stage 5 of code-correctness plan: surface completion-gate
+        // override signals so the cli can count them per-run.
+        completionBlockedBy: extractCompletionGateSignal(normalized),
+        completionTscErrorCount: typeof (normalized as unknown as Record<string, unknown>)._completionTscErrorCount === "number"
+          ? ((normalized as unknown as Record<string, unknown>)._completionTscErrorCount as number)
+          : undefined,
       }
 
     case "waiting_for_user":

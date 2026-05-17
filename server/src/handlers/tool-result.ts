@@ -1419,6 +1419,10 @@ Do NOT reference these files in your next action. Do NOT try to read or edit the
             reasoningChain: normalized.reasoningChain,
             usage: normalized.usage,
           }
+          // Stage 5: telemetry signal for the cli to count in
+          // RunSummary.completionBlockedReason + tscErrorCount.
+          ;(normalized as unknown as Record<string, unknown>)._completionBlockedBy = "tsc"
+          ;(normalized as unknown as Record<string, unknown>)._completionTscErrorCount = tscResult.errorCount
         } else if (tscResult.skippedReason) {
           console.log(`[tsc-gate] skipped: ${tscResult.skippedReason}`)
         }
@@ -1456,6 +1460,9 @@ Do NOT reference these files in your next action. Do NOT try to read or edit the
             reasoningChain: normalized.reasoningChain,
             usage: normalized.usage,
           }
+          // Stage 5: telemetry signal for the cli to count in
+          // RunSummary.completionBlockedReason.
+          ;(normalized as unknown as Record<string, unknown>)._completionBlockedBy = "artifact_missing"
         }
       } catch (err) {
         console.warn(`[artifact-gate] check threw — degrading to accept completion: ${(err as Error).message}`)

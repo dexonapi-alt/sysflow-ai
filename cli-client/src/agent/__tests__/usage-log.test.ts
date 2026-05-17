@@ -626,4 +626,86 @@ describe("recordRunSummary", () => {
     expect(entry.nullToolRejectionCount).toBe(0)
     expect(entry.nonRetryable5xxCount).toBe(0)
   })
+
+  // ─── Stage 5 of code-correctness plan: tsc + sanitizer + artifact gate telemetry ───
+
+  it("persists importsStrippedCount + tscErrorCount + completionBlockedReason when supplied", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-cc5-1",
+      prompt: "build a PG backend",
+      model: "openrouter-auto",
+      durationMs: 5_000,
+      stepCount: 8,
+      toolCount: 15,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      importsStrippedCount: 5,
+      tscErrorCount: 3,
+      completionBlockedReason: "tsc",
+    })
+    const [entry] = await readEntries()
+    expect(entry.importsStrippedCount).toBe(5)
+    expect(entry.tscErrorCount).toBe(3)
+    expect(entry.completionBlockedReason).toBe("tsc")
+  })
+
+  it("defaults code-correctness counters appropriately when omitted", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-cc5-2",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+    })
+    const [entry] = await readEntries()
+    expect(entry.importsStrippedCount).toBe(0)
+    expect(entry.tscErrorCount).toBe(0)
+    expect(entry.completionBlockedReason).toBeNull()
+  })
+
+  it("persists completionBlockedReason: artifact_missing", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-cc5-3",
+      prompt: "build a PG backend",
+      model: "openrouter-auto",
+      durationMs: 5_000,
+      stepCount: 6,
+      toolCount: 10,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      completionBlockedReason: "artifact_missing",
+    })
+    const [entry] = await readEntries()
+    expect(entry.completionBlockedReason).toBe("artifact_missing")
+  })
+
+  it("clean run with no gate firing keeps tscErrorCount=0 and completionBlockedReason=null", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-cc5-4",
+      prompt: "build a CLI",
+      model: "claude-sonnet",
+      durationMs: 3_000,
+      stepCount: 5,
+      toolCount: 8,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      importsStrippedCount: 0,
+      tscErrorCount: 0,
+      completionBlockedReason: null,
+    })
+    const [entry] = await readEntries()
+    expect(entry.tscErrorCount).toBe(0)
+    expect(entry.completionBlockedReason).toBeNull()
+  })
 })
