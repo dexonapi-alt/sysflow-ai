@@ -13,7 +13,7 @@ import { initRunContext, ingestDirectoryTree } from "../services/context-manager
 import { setRunPlatform } from "../services/run-platform-store.js"
 import { isFrontendTask, detectFrontendStack, getFrontendPatterns } from "../knowledge/frontend-patterns.js"
 import { accumulateFrontendContent } from "../services/frontend-quality-guard.js"
-import { detectErrorForSearch, buildErrorSearchOverride, setConfigSkipList, setExpectedArtifacts } from "../services/setup-intelligence.js"
+import { detectErrorForSearch, buildErrorSearchOverride, setConfigSkipList, setExpectedArtifacts, setRepoState } from "../services/setup-intelligence.js"
 import { runProjectInitChain } from "../reasoning/project-init-reasoner.js"
 import { detectErrorContext, setPendingError, detectAllErrors, setPendingErrorQueue } from "../services/error-autofix.js"
 import { createPipelineFromAiPlan, createFallbackPipeline, pipelineToTaskMeta } from "../services/task-pipeline.js"
@@ -221,6 +221,13 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
       })
       if (projectInitBrief) {
         console.log(`[project-init] committed: repoState=${projectInitBrief.repoState} fileCount=${projectInitBrief.fileCount} confidence=${projectInitBrief.confidence} iterations=${projectInitBrief.iterations}`)
+        // Stage 3 of accountability-and-parallel-execution-sequencing
+        // plan: persist the repoState classification so tool_result.ts
+        // can gate the read-after-write inject on later turns (the cli
+        // only sends the brief on the initial turn). HIGH/MEDIUM
+        // confidence is enough to commit; LOW confidence still stores
+        // (the inject is a soft nudge, false-positives are low-cost).
+        setRepoState(runId, projectInitBrief.repoState)
         // Seed the action-planner skip list ONLY when the brief is
         // confident enough to commit. LOW-confidence empty/small reads
         // could be a misclassification on a monorepo root; let the

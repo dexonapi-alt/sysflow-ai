@@ -248,6 +248,29 @@ export function clearExpectedArtifacts(runId: string): void {
   expectedArtifactsByRun.delete(runId)
 }
 
+// ─── Stage 3 of accountability-and-parallel-execution-sequencing plan ───
+//
+// Per-run repoState store. The project-init reasoner classifies the
+// repository as "empty" | "small" | "existing-small" | "existing-large"
+// on the initial user_message turn. Stage 3's read-after-write inject
+// (in tool-result.ts) needs to know this classification on later
+// tool_result turns to gate the inject to fresh scaffolds only.
+
+const repoStateByRun = new Map<string, string>()
+
+export function setRepoState(runId: string, repoState: string): void {
+  if (!runId || !repoState) return
+  repoStateByRun.set(runId, repoState)
+}
+
+export function getRepoState(runId: string): string | undefined {
+  return repoStateByRun.get(runId)
+}
+
+export function clearRepoState(runId: string): void {
+  repoStateByRun.delete(runId)
+}
+
 // ─── Response Overrides ───
 
 /**

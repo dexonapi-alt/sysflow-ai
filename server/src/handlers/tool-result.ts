@@ -20,6 +20,14 @@ import { actionPlanner } from "../services/action-planner.js"
 import { isFrontendTask } from "../knowledge/frontend-patterns.js"
 import { ingestToolResult, ingestDirectoryTree, clearRunContext, buildWorkingContextString, getContentSnippets } from "../services/context-manager.js"
 import { getIntentMatchTotal, clearIntentMatchTelemetry } from "../services/intent-match-telemetry.js"
+import { getRepoState, clearRepoState } from "../services/setup-intelligence.js"
+import {
+  shouldFireReadAfterWriteInject,
+  buildReadAfterWriteInject,
+  extractSuccessfulWritePaths,
+  markReadAfterWriteFired,
+  clearReadAfterWriteState,
+} from "../services/read-after-write-inject.js"
 import { resolveRunPlatform, clearRunPlatform } from "../services/run-platform-store.js"
 import { updatePipelineProgress, completePipeline, clearPipeline, getPipeline, hasPipeline, pipelineToTaskMeta, createPipelineFromAiPlan } from "../services/task-pipeline.js"
 import { getScaffoldChoice, storeScaffoldChoice, parseScaffoldResponse, clearScaffoldState } from "../scaffold/index.js"
@@ -220,6 +228,28 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     const totalCount = stripped.reduce((sum, s) => sum + s.imports.length, 0)
     actionPlanner.injectContext(body.runId, buildImportStrippedInject(stripped))
     console.log(`[import-sanitizer-inject] ${totalCount} stripped import(s) across ${stripped.length} file(s) — injected loud feedback for next turn`)
+  }
+
+  // Stage 3 of accountability-and-parallel-execution-sequencing plan:
+  // on the FIRST batch of write_file calls in a fresh scaffold
+  // (repoState empty / small), inject a READ-AFTER-WRITE REQUIRED
+  // block forcing the agent to batch_read what it just wrote before
+  // issuing another write batch. Closes the user-reported pattern:
+  // the agent declared scaffold complete without verifying ANY of
+  // the files actually contained what it intended.
+  //
+  // Latched per-run: fires AT MOST ONCE. Subsequent write batches
+  // don't re-inject — the chunked-loop reflector covers ongoing
+  // verification.
+  const writtenPaths = extractSuccessfulWritePaths(
+    body.tool && body.result ? { tool: body.tool, result: body.result } : undefined,
+    body.toolResults,
+  )
+  const repoState = getRepoState(body.runId)
+  if (shouldFireReadAfterWriteInject({ runId: body.runId, repoState, writtenPaths })) {
+    actionPlanner.injectContext(body.runId, buildReadAfterWriteInject(writtenPaths))
+    markReadAfterWriteFired(body.runId)
+    console.log(`[read-after-write-inject] first scaffold batch (repoState=${repoState}, ${writtenPaths.length} file${writtenPaths.length === 1 ? "" : "s"}) — injected verification block for next turn`)
   }
 
   let run: Awaited<ReturnType<typeof getRun>>
@@ -1584,6 +1614,10 @@ Do NOT reference these files in your next action. Do NOT try to read or edit the
     clearRunPlatform(body.runId)
     // Stage 5: drop the per-run intent-match telemetry counters.
     clearIntentMatchTelemetry(body.runId)
+    // Stage 3 of accountability-and-parallel-execution-sequencing
+    // plan: drop the read-after-write latch + the repoState store.
+    clearReadAfterWriteState(body.runId)
+    clearRepoState(body.runId)
   }
 
   // ─── Task Pipeline: track progress only if the AI created a plan on turn one.
