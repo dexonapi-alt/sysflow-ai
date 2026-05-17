@@ -26,6 +26,62 @@ export interface ServerError extends Error {
   plan?: string
 }
 
+/**
+ * Stage 3 of plan 2026-05-16-server-hardening-and-error-source-distinction.md.
+ *
+ * Thrown to signal the outer retry loop that this failure is NOT
+ * recoverable — retrying would burn budget against the same root
+ * cause that won't resolve until the user takes action. Used for:
+ *   - Postgres constraint violations (NOT NULL / unique / FK / CHECK)
+ *   - Application validation errors (validation_failure / ValidationError /
+ *     invalid_payload / malformed_response)
+ *   - Server-tagged sysflow_infra error envelopes (set by Stage 2
+ *     provider tagging)
+ *
+ * `instanceof NonRetryableError` is the contract the retry loop uses
+ * to skip the retry — string-pattern checks on the error message
+ * miss SSE-event-thrown errors that drop the conventional `Server
+ * error` prefix.
+ */
+export class NonRetryableError extends Error {
+  readonly signature: string
+  constructor(message: string, signature: string) {
+    super(message)
+    this.name = "NonRetryableError"
+    this.signature = signature
+  }
+}
+
+const NON_RETRYABLE_SIGNATURES: Array<{ pattern: RegExp; label: string }> = [
+  // Postgres constraint violations — schema-level, won't resolve via retry.
+  { pattern: /violates\s+not-null\s+constraint/i, label: "pg_not_null_violation" },
+  { pattern: /violates\s+unique\s+constraint/i, label: "pg_unique_violation" },
+  { pattern: /violates\s+foreign\s+key\s+constraint/i, label: "pg_fk_violation" },
+  { pattern: /violates\s+check\s+constraint/i, label: "pg_check_violation" },
+  // Application validation — request shape is wrong; same request would
+  // fail the same way next time.
+  { pattern: /\bvalidation_failure\b/, label: "app_validation_failure" },
+  { pattern: /\bValidationError\b/, label: "app_validation_error" },
+  { pattern: /\binvalid_payload\b/, label: "app_invalid_payload" },
+  { pattern: /\bmalformed_response\b/, label: "app_malformed_response" },
+  // Server-tagged sysflow_infra (Stage 2 provider tagging). The
+  // envelope JSON is in the error body for failed responses.
+  { pattern: /"errorSource"\s*:\s*"sysflow_infra"/, label: "sysflow_infra" },
+]
+
+/**
+ * Pure: inspect a server-side error body / message and return the
+ * matched non-retryable signature label, or null when nothing
+ * matches (signals the legacy retry path can fire).
+ */
+export function classifyNonRetryable(text: string): string | null {
+  if (!text || typeof text !== "string") return null
+  for (const { pattern, label } of NON_RETRYABLE_SIGNATURES) {
+    if (pattern.test(text)) return label
+  }
+  return null
+}
+
 export interface StreamEvent {
   type: "phase" | "result" | "error"
   data: Record<string, unknown>
@@ -105,12 +161,25 @@ export async function callServer(payload: Record<string, unknown>): Promise<Reco
         const expired = checkSessionExpired(text)
         if (expired) return expired
 
+        // Stage 3 of server-hardening plan: non-retryable 5xx with
+        // diagnostic body (PG constraint violation / validation
+        // error / sysflow_infra) → throw NonRetryableError so the
+        // outer catch skips the retry. Without this the cli kept
+        // retrying the same DB-constraint 500 three times before
+        // giving up.
+        const sig = classifyNonRetryable(text)
+        if (sig) {
+          throw new NonRetryableError(`Server error ${res.status}: ${text}`, sig)
+        }
+
         throw new Error(`Server error ${res.status}: ${text}`)
       }
 
       return res.json() as Promise<Record<string, unknown>>
     } catch (err) {
       if ((err as ServerError).code === "USAGE_LIMIT") throw err
+      // Stage 3: non-retryable failures bypass the retry loop entirely.
+      if (err instanceof NonRetryableError) throw err
       lastError = err as Error
 
       // Network/timeout errors — retry
@@ -176,6 +245,12 @@ export async function callServerStream(
         const expired = checkSessionExpired(text)
         if (expired) return expired
 
+        // Stage 3 of server-hardening plan: non-retryable signature detection.
+        const sig = classifyNonRetryable(text)
+        if (sig) {
+          throw new NonRetryableError(`Server error ${res.status}: ${text}`, sig)
+        }
+
         throw new Error(`Server error ${res.status}: ${text}`)
       }
 
@@ -221,10 +296,23 @@ export async function callServerStream(
                   err.plan = parsed.plan
                   throw err
                 }
+                // Stage 3 of server-hardening plan: SSE error events
+                // get the same non-retryable classification as HTTP
+                // body errors. Without this the SSE-event path dropped
+                // the "Server error" prefix → outer catch's substring
+                // check failed → retry fired against unrecoverable
+                // failures (the user's repro: 500 + DB-constraint
+                // body retried 3x before halt).
+                const errBody = parsed.error || JSON.stringify(parsed)
+                const sig = classifyNonRetryable(errBody)
+                if (sig) {
+                  throw new NonRetryableError(errBody, sig)
+                }
                 throw new Error(parsed.error || "Server error")
               }
             } catch (e) {
               if ((e as ServerError).code === "USAGE_LIMIT") throw e
+              if (e instanceof NonRetryableError) throw e
               if ((e as Error).message === "Server error") throw e
               // Ignore parse errors for partial data
             }
@@ -241,6 +329,9 @@ export async function callServerStream(
       return finalResult
     } catch (err) {
       if ((err as ServerError).code === "USAGE_LIMIT") throw err
+      // Stage 3 of server-hardening plan: non-retryable failures bypass
+      // the retry loop entirely.
+      if (err instanceof NonRetryableError) throw err
       lastError = err as Error
 
       // Network/timeout errors — retry
