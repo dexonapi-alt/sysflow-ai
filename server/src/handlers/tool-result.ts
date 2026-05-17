@@ -18,7 +18,7 @@ import { recordVerificationResult, shouldBlockCompletion, buildVerificationFixPa
 import { validateFrontendQuality, buildFrontendRejectionPayload, accumulateFrontendContent, clearFrontendContent } from "../services/frontend-quality-guard.js"
 import { actionPlanner } from "../services/action-planner.js"
 import { isFrontendTask } from "../knowledge/frontend-patterns.js"
-import { ingestToolResult, ingestDirectoryTree, clearRunContext, buildWorkingContextString } from "../services/context-manager.js"
+import { ingestToolResult, ingestDirectoryTree, clearRunContext, buildWorkingContextString, getContentSnippets } from "../services/context-manager.js"
 import { resolveRunPlatform, clearRunPlatform } from "../services/run-platform-store.js"
 import { updatePipelineProgress, completePipeline, clearPipeline, getPipeline, hasPipeline, pipelineToTaskMeta, createPipelineFromAiPlan } from "../services/task-pipeline.js"
 import { getScaffoldChoice, storeScaffoldChoice, parseScaffoldResponse, clearScaffoldState } from "../scaffold/index.js"
@@ -2096,6 +2096,11 @@ function buildDetectorInput(runId: string, originalPrompt: string): DetectorInpu
     recentActions,
     lastReasoning,
     latestAction,
+    // Stage 2 of awareness-and-verification-correctness: thread the
+    // per-run content-snippet index so the `intent_keyword_absent`
+    // heuristic can search file CONTENT + package.json deps, not
+    // just file paths. Empty Map for runs with no context (defensive).
+    contentSnippets: getContentSnippets(runId),
   }
 }
 
