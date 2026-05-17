@@ -19,6 +19,7 @@ import { validateFrontendQuality, buildFrontendRejectionPayload, accumulateFront
 import { actionPlanner } from "../services/action-planner.js"
 import { isFrontendTask } from "../knowledge/frontend-patterns.js"
 import { ingestToolResult, ingestDirectoryTree, clearRunContext, buildWorkingContextString } from "../services/context-manager.js"
+import { resolveRunPlatform, clearRunPlatform } from "../services/run-platform-store.js"
 import { updatePipelineProgress, completePipeline, clearPipeline, getPipeline, hasPipeline, pipelineToTaskMeta, createPipelineFromAiPlan } from "../services/task-pipeline.js"
 import { getScaffoldChoice, storeScaffoldChoice, parseScaffoldResponse, clearScaffoldState } from "../scaffold/index.js"
 import { getPendingError, clearPendingError, setPendingError, buildFixInstructions, setPendingFileContent, hasPendingErrors, popNextPendingError } from "../services/error-autofix.js"
@@ -450,6 +451,12 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     (context as Record<string, unknown>).workingContext = workingContext
   }
 
+  // Stage 4.1 of awareness-and-verification-correctness plan: look
+  // up the client platform stashed at user_message time. Falls back
+  // to `process.platform` (server's own) if the run pre-dates the
+  // store or the cli is on a legacy version.
+  const clientPlatform = resolveRunPlatform(body.runId)
+
   // Build provider payload with single or batch results
   const providerPayload: Record<string, unknown> = {
     model: run.model,
@@ -474,6 +481,13 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
     // medium/complex runs).
     runIntent: getCachedIntentOrRegex(body.runId, run.content),
     taskComplexity: analyzeTaskComplexity(run.content).complexity,
+    // Stage 4.1 of awareness-and-verification-correctness plan:
+    // thread the user's platform through every tool_result turn too —
+    // base-provider.getSystemPromptForRequest reads it to pick bash
+    // vs PowerShell example commands. The cli only sends `client` on
+    // the initial user_message; subsequent turns recover it via
+    // resolveRunPlatform(runId).
+    clientPlatform,
   }
 
   if (isBatch) {
@@ -630,12 +644,16 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
             const matches = await recallErrorPatterns({
               cwd: run.cwd as string,
               errorSignature: errText,
-              platform: process.platform,
+              // Stage 4.1: key by the USER's platform — prior fixes
+              // recorded on Windows shouldn't be surfaced to a Linux
+              // run (or vice versa) just because the SERVER's OS
+              // happens to be one or the other.
+              platform: clientPlatform,
               maxEntries: 3,
             })
             priorRecall = formatRecallForReasoner(matches)
             if (priorRecall) {
-              console.log(`[error-pattern] recall surfaced ${matches.length} prior pattern(s) for ${process.platform}`)
+              console.log(`[error-pattern] recall surfaced ${matches.length} prior pattern(s) for ${clientPlatform}`)
             }
           } catch (recallErr) {
             console.warn(`[error-pattern] recall failed:`, (recallErr as Error).message)
@@ -652,7 +670,10 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
             pendingErrorRecovery.set(body.runId, {
               errorText: errText,
               errorClass: classifyToolError(lastError.tool, errText).category,
-              platform: process.platform,
+              // Stage 4.1: record the recovery under the USER's
+              // platform so subsequent recall matches the OS where
+              // the fix actually applies.
+              platform: clientPlatform,
               failedTool: lastError.tool,
               failedCommand,
             })
@@ -662,7 +683,8 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
           errorText: errText,
           tool: lastError.tool,
           args: (errResultRecord.args as Record<string, unknown>) ?? undefined,
-          platform: process.platform,
+          // Stage 4.1: reason about the error in the user's OS context.
+          platform: clientPlatform,
           model: run.model,
           maxIterations: maxIters,
           priorRecall,
@@ -1539,6 +1561,9 @@ Do NOT reference these files in your next action. Do NOT try to read or edit the
     clearFrontendContent(body.runId)
     consecutiveToolErrors.delete(body.runId)
     onErrorReasoningCount.delete(body.runId)
+    // Stage 4.1: drop the per-run client-platform now that the run
+    // is terminal. Same cadence as clearRunContext.
+    clearRunPlatform(body.runId)
   }
 
   // ─── Task Pipeline: track progress only if the AI created a plan on turn one.

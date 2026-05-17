@@ -384,6 +384,14 @@ export abstract class BaseProvider {
       // brief into the system prompt so the agent's first move reflects
       // the classified repo state.
       projectInitBrief: payload.projectInitBrief,
+      // Stage 4.1 of awareness-and-verification-correctness plan:
+      // thread the USER's host platform so env-info renders the
+      // bash vs PowerShell preferred-commands list correctly. Without
+      // this, the server's `process.platform` lied to every user
+      // about the OS — Windows users saw `platform: linux` + bash
+      // examples, so the model emitted `ls -la` rather than
+      // `Get-ChildItem -Force`.
+      platform: payload.clientPlatform,
     })
   }
 
@@ -802,7 +810,12 @@ export abstract class BaseProvider {
     return buildVerifyAfterWriteBlock({
       filesWritten,
       dirsCreated,
-      platform: process.platform,
+      // Stage 4.1 of awareness-and-verification-correctness plan:
+      // the verify-after-write block embeds platform-specific
+      // commands the model is told to run. Picking the SERVER's
+      // platform here would put bash commands in front of a Windows
+      // user (or vice versa) — defeating the block's whole point.
+      platform: (payload.clientPlatform || process.platform) as NodeJS.Platform,
     })
   }
 
