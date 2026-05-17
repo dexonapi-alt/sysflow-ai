@@ -868,7 +868,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         const result = await handleNeedsTool(
           response,
           spinner,
-          { hasReasoning, lastDisplayedAction, lastDisplayedReasoning, currentRunId, taskShown, taskSteps, completedSteps, lastPipelineStepId, prevTool, chunkIndex, flashCallsThisTurn: 0, lastAwarenessState, runIntent, taskDisplaySelective, budget },
+          { hasReasoning, lastDisplayedAction, lastDisplayedReasoning, currentRunId, taskShown, taskSteps, completedSteps, lastPipelineStepId, prevTool, chunkIndex, flashCallsThisTurn: 0, lastAwarenessState, runIntent, taskDisplaySelective, budget, projectInitRepoState },
           makeServerCall,
         )
         response = result.response
@@ -1296,6 +1296,12 @@ interface NeedsToolCtx {
    *  setting. Captured once per run; toggling mid-run isn't supported. */
   taskDisplaySelective: boolean
   budget: RetryBudget
+  /** Stage 1 of accountability-and-parallel-execution-sequencing plan:
+   *  project-init classified repoState (constant for the run). Passed
+   *  to `executeToolsBatch` so the parallel-batch cap relaxes from 3
+   *  to 5 on `existing-large` repos where wide edits are more likely
+   *  legitimate. Null when the project-init reasoner didn't fire. */
+  projectInitRepoState: "empty" | "small" | "existing-small" | "existing-large" | null
 }
 
 interface NeedsToolResult {
@@ -1440,7 +1446,7 @@ async function handleNeedsTool(
       console.log("")
       try {
         // Phase 12 Stage 4: surface a card per tool in the batch.
-        response = await surfaceToolBatch(toolCalls!, () => executeToolsBatch(toolCalls!, response.runId as string))
+        response = await surfaceToolBatch(toolCalls!, () => executeToolsBatch(toolCalls!, response.runId as string, undefined, ctx.projectInitRepoState))
       } catch (batchError) {
         budget.failure.consecutiveErrors++
         console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.error("error:")} ` + colors.muted((batchError as Error).message))
@@ -1470,7 +1476,7 @@ async function handleNeedsTool(
       response = await surfaceToolBatch(toolCalls!, () =>
         executeToolsBatch(toolCalls!, response.runId as string, (label) => {
           spinner.text = colors.muted(`  ${label}`)
-        }),
+        }, ctx.projectInitRepoState),
       )
       spinner.stop()
 

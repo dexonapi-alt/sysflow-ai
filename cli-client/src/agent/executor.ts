@@ -25,7 +25,7 @@ import {
 import { runVerification } from "./verifier.js"
 import { createSnapshot, cleanupSnapshot, rollback, getSnapshot, detectGit } from "./git.js"
 import { lintFile, lintFiles, displayLintErrors, resetTscCache } from "./lint.js"
-import { partitionToolCalls, getToolMeta, groupForParallelExecution, KNOWN_TOOL_NAMES, isKnownTool } from "./tool-meta.js"
+import { partitionToolCalls, getToolMeta, groupForParallelExecution, KNOWN_TOOL_NAMES, isKnownTool, applyBatchCap, resolveBatchCap, buildBatchCapDeferralResult, type RepoState } from "./tool-meta.js"
 import { validateToolInput } from "./validate-tool-input.js"
 import { checkPermissions, loadRules, saveRule, lookupAnswer, rememberAnswer, primaryPath, type Rule } from "./permissions.js"
 import { getSysbasePath, getPermissionMode, getSafeCommandsAutoApprove } from "../lib/sysbase.js"
@@ -484,6 +484,31 @@ function bumpDotfileFilterCorrections(n: number): void {
   if (n > 0) _dotfileFilterCorrectionsThisRun += n
 }
 
+// ─── Stage 1 of accountability-and-parallel-execution-sequencing plan: batch-cap counter ───
+//
+// Bumped each time `executeToolsBatch` enforces the per-turn cap on
+// parallel tool calls (deferring at least one tool). Diagnostic for
+// "is the agent regularly trying to emit oversized batches?". Spike =
+// the model is reaching for parallel scaffold patterns; the cap is
+// doing useful work. Zero on small / focused runs is expected.
+//
+// Same module-level pattern as the other Stage-5 telemetry counters.
+// Read + reset by `agent.ts` at run terminal-exit.
+
+let _batchCapEnforcedThisRun = 0
+
+export function getBatchCapEnforcedCount(): number {
+  return _batchCapEnforcedThisRun
+}
+
+export function resetBatchCapEnforcedCount(): void {
+  _batchCapEnforcedThisRun = 0
+}
+
+function bumpBatchCapEnforced(): void {
+  _batchCapEnforcedThisRun += 1
+}
+
 /**
  * Pure: count entries that are dotfiles AND NOT in the noise set —
  * the diagnostic for "how many entries did Stage 1's conservative
@@ -591,7 +616,15 @@ function isInteractiveCommand(tc: ToolCallEntry): boolean {
 export async function executeToolsBatch(
   tools: ToolCallEntry[],
   runId: string,
-  onPhase?: (label: string) => void
+  onPhase?: (label: string) => void,
+  /**
+   * Stage 1 of accountability-and-parallel-execution-sequencing plan:
+   * thread the project-init brief's classified repoState so the batch
+   * cap can relax for `existing-large` repos. Null / undefined falls
+   * back to the default cap. Caller (`agent.ts`) reads this from the
+   * initial response's `projectInitRepoState`.
+   */
+  repoState?: RepoState,
 ): Promise<Record<string, unknown>> {
   // Stage 1 of server-hardening plan: partition the batch into known
   // and unknown tools. Unknown tools (null / empty / hallucinated
@@ -628,6 +661,30 @@ export async function executeToolsBatch(
   // Mixed batch: continue with the known tools; rejected results merge
   // into allResults at the end so the server sees the full picture.
   tools = knownTools
+
+  // Stage 1 of accountability-and-parallel-execution-sequencing plan:
+  // enforce a per-turn cap on the number of tool calls. When the agent
+  // emits more than `cap` tools, we execute the first `cap` AND defer
+  // the rest with a synthetic failure result. The agent's next turn
+  // sees the deferral + the executed batch's real outcomes, can reason
+  // about whether to re-emit, and the cli still ships everything in
+  // one tool_result so the server's existing batch-handling stays the
+  // same.
+  const cap = resolveBatchCap(repoState ?? null)
+  const { executed, deferred } = applyBatchCap(tools, cap)
+  if (deferred.length > 0) {
+    const originalSize = tools.length
+    console.log(`[batch-cap] ${originalSize} tools > cap ${cap} (repoState=${repoState ?? "default"}); executing ${executed.length}, deferring ${deferred.length}`)
+    bumpBatchCapEnforced()
+    for (const tc of deferred) {
+      rejectedResults.push({
+        id: tc.id,
+        tool: tc.tool,
+        result: buildBatchCapDeferralResult(tc.tool, originalSize, cap),
+      })
+    }
+  }
+  tools = executed
 
   // Split via tool-meta: concurrency-safe tools run in parallel; everything
   // else runs sequentially (preserving submission order). Sibling abort lives
