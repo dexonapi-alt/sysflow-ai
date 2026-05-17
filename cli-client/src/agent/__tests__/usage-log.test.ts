@@ -501,4 +501,64 @@ describe("recordRunSummary", () => {
     expect(entry.webSearchEmptyCount).toBe(0)
     expect(entry.reasoningPeekExpansions).toBe(0)
   })
+
+  // ─── Stage 4 of reasoning-chain-provider-parity plan: structured-vs-synthesised distribution ───
+
+  it("persists reasoningChainEmittedTurns + reasoningChainSynthesisedTurns when supplied", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-rcpp-1",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1_500,
+      stepCount: 8,
+      toolCount: 12,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      reasoningChainEmittedTurns: 7,
+      reasoningChainSynthesisedTurns: 5,
+    })
+    const [entry] = await readEntries()
+    expect(entry.reasoningChainEmittedTurns).toBe(7)
+    expect(entry.reasoningChainSynthesisedTurns).toBe(5)
+  })
+
+  it("defaults reasoningChainEmittedTurns + reasoningChainSynthesisedTurns to 0 when omitted", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-rcpp-2",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+    })
+    const [entry] = await readEntries()
+    expect(entry.reasoningChainEmittedTurns).toBe(0)
+    expect(entry.reasoningChainSynthesisedTurns).toBe(0)
+  })
+
+  it("preserves a structured-only run (synthesised=0)", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-rcpp-3",
+      prompt: "x",
+      model: "claude-sonnet",
+      durationMs: 1_000,
+      stepCount: 5,
+      toolCount: 8,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      reasoningChainEmittedTurns: 10,
+      reasoningChainSynthesisedTurns: 0,
+    })
+    const [entry] = await readEntries()
+    expect(entry.reasoningChainEmittedTurns).toBe(10)
+    expect(entry.reasoningChainSynthesisedTurns).toBe(0)
+  })
 })

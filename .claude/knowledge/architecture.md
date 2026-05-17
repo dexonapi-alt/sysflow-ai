@@ -933,3 +933,55 @@ Every implement-class run starts with a project-init iterative reasoner that cla
 
 - Stage 2 (web search gating + 0-hit recovery): the project-init brief tells the agent which configs are being authored; the web_search tool description repeats the rule; the action-planner skip list mechanically enforces it. Three layers of pressure.
 - Stage 4 (per-turn directory refresh): when the agent later deletes files, the refreshed tree surfaces stale references via the `═══ DIRECTORY STATE CHANGED ═══` inject — the agent's mental model of the project shape stays current across turns.
+
+## Reasoning-chain provider parity (peek refresh on all backends)
+
+- **Source:** plan `applied/2026-05-16-reasoning-chain-provider-parity.md`
+
+Project-init reasoning + per-turn reasoning briefs only reach the cli's `<ReasoningPeek>` if the model's per-turn response actually carries `reasoningChain[]`. Provider-parity reality: not all models emit the structured field consistently. The cli's live peek would stay stuck on the project-init brief from minute 1, even though the agent kept reasoning per-turn (visible inline as `│ <text>` from `response.reasoning`).
+
+The plan layered four mechanical fixes so the peek refreshes on EVERY turn regardless of which provider serves the run:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  model emits response                                            │
+│       │                                                          │
+│       ▼                                                          │
+│  parseJsonResponse (base-provider)                               │
+│       │   extracts reasoningChain[] from JSON                    │
+│       │   Stage 3: weak-completion + tool-gate overrides         │
+│       │     now preserve reasoningChain through synthesis        │
+│       ▼                                                          │
+│  validateCompletionResponse                                      │
+│       │   may swap weak-completed → needs_tool                   │
+│       │   (chain carried through)                                │
+│       ▼                                                          │
+│  mapNormalizedResponseToClient (normalize.ts)                    │
+│       │                                                          │
+│       ▼                                                          │
+│  resolvePerTurnReasoningChain                                    │
+│       │   if array non-empty → use verbatim ("structured")       │
+│       │   if singular reasoning present → synthesise one-element │
+│       │     chain from it ("synthesised")                        │
+│       │   else → undefined                                       │
+│       ▼                                                          │
+│  ClientResponse.perTurnReasoningChain + perTurnReasoningSource   │
+│       │                                                          │
+│       ▼                                                          │
+│  cli agent.ts                                                    │
+│       │   emit `reasoning_brief` event kind="per_turn"           │
+│       │   accumulate RunSummary counters                         │
+│       ▼                                                          │
+│  <ReasoningPeek> refreshes with new brief.key                    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Key composition:** Stage 2's MANDATORY prompt directive shifts the distribution toward structured emission; Stage 1's synthesis catches the residual; Stage 3 preserves the chain through server-side overrides. Telemetry on `RunSummary.reasoningChainEmittedTurns` vs `reasoningChainSynthesisedTurns` shows the structured-vs-fallback ratio over time.
+
+**Files:**
+
+- Normaliser: `server/src/providers/normalize.ts` (`resolvePerTurnReasoningChain` + `classifyPerTurnReasoningSource`)
+- Prompt directive: `server/src/providers/prompt/sections/tools.ts` (MANDATORY block)
+- Overrides preservation: `server/src/providers/base-provider.ts` (weak-completion + tool-gate spread `reasoningChain`)
+- Client surface: `server/src/types.ts: ClientResponse.perTurnReasoningChain + perTurnReasoningSource`
+- CLI capture + telemetry: `cli-client/src/agent/agent.ts` + `usage-log.ts: RunSummary.reasoningChainEmittedTurns / reasoningChainSynthesisedTurns`

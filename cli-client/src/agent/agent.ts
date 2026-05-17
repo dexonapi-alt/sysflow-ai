@@ -503,6 +503,19 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   // time the cli observes a tool_result with `_errorCategory:
   // "web_search_empty"`.
   let webSearchEmptyCount = 0
+  // Stage 4 of reasoning-chain-provider-parity plan: distribution
+  // counters for structured-vs-synthesised per-turn reasoning. Bumped
+  // each turn based on the server-side classification surfaced on
+  // ClientResponse.perTurnReasoningSource. High synthesised share over
+  // time = directive being ignored = tighten Stage 2's prompt or add
+  // model-specific shim.
+  let reasoningChainEmittedTurns = 0
+  let reasoningChainSynthesisedTurns = 0
+  {
+    const sourceInitial = (response as Record<string, unknown>).perTurnReasoningSource
+    if (sourceInitial === "structured") reasoningChainEmittedTurns += 1
+    else if (sourceInitial === "synthesised") reasoningChainSynthesisedTurns += 1
+  }
   // Resolve the task-display-selective flag once for the run — toggling
   // mid-run isn't a supported flow.
   const taskDisplaySelective = await getTaskDisplaySelective()
@@ -644,6 +657,8 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       projectInitConfidence,
       webSearchEmptyCount,
       reasoningPeekExpansions: getReasoningPeekExpansions(),
+      reasoningChainEmittedTurns,
+      reasoningChainSynthesisedTurns,
     })
     resetReasoningPeekExpansions()
     unregisterSpinner()
@@ -807,6 +822,8 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         flashCallsCount += result.flashCallsThisTurn
         investigationCommandsCount += result.investigationCommandsThisTurn
         webSearchEmptyCount += result.webSearchEmptyThisTurn
+        if (result.perTurnReasoningSourceThisTurn === "structured") reasoningChainEmittedTurns += 1
+        else if (result.perTurnReasoningSourceThisTurn === "synthesised") reasoningChainSynthesisedTurns += 1
         // Phase 19: defensive capture of runIntent from subsequent
         // responses in case the initial response didn't carry it.
         // Once set, stays set — the value is run-constant.
@@ -1221,6 +1238,11 @@ interface NeedsToolResult {
    *  observed this turn (0 or 1 — only one tool result per handleNeedsTool
    *  invocation). Caller accumulates into RunSummary.webSearchEmptyCount. */
   webSearchEmptyThisTurn: number
+  /** Stage 4 of reasoning-chain-provider-parity plan: which path
+   *  produced this turn's reasoning chain (server-side classification).
+   *  Caller increments the structured-vs-synthesised counters in
+   *  RunSummary based on observation. */
+  perTurnReasoningSourceThisTurn: "structured" | "synthesised" | null
 }
 
 async function handleNeedsTool(
@@ -1237,6 +1259,13 @@ async function handleNeedsTool(
   // Stage 5 of agent-runtime-fixes plan: 0-hit web_search tally for
   // RunSummary.webSearchEmptyCount.
   let webSearchEmptyThisTurn = 0
+  // Stage 4 of reasoning-chain-provider-parity plan: capture the
+  // per-turn reasoning source classification surfaced by the server.
+  // Defaults to null when the response didn't carry the field (legacy
+  // server build or unrelated kind like waiting_for_user).
+  const sourceObserved = (response as Record<string, unknown>).perTurnReasoningSource
+  const perTurnReasoningSourceThisTurn: "structured" | "synthesised" | null =
+    sourceObserved === "structured" || sourceObserved === "synthesised" ? sourceObserved : null
 
   // Step transition handling
   const stepTransition = response.stepTransition as { complete?: string; start?: string } | undefined
@@ -1342,12 +1371,12 @@ async function handleNeedsTool(
           tool: "_recovery",
           result: { error: (batchError as Error).message, success: false }
         })
-        return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn, webSearchEmptyThisTurn }
+        return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn, webSearchEmptyThisTurn, perTurnReasoningSourceThisTurn }
       }
       console.log(colors.accent(`    ${BOX.bl}${BOX.h}${BOX.h}`) + ` ${colors.success("done")}`)
       console.log("")
       spinner.start(colors.muted("thinking..."))
-      return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn, webSearchEmptyThisTurn }
+      return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn, webSearchEmptyThisTurn, perTurnReasoningSourceThisTurn }
     }
 
     spinner.start(colors.muted(`  executing ${toolCalls!.length} tools...`))
@@ -1399,7 +1428,7 @@ async function handleNeedsTool(
         result: { error: (batchError as Error).message, success: false }
       })
     }
-    return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn, webSearchEmptyThisTurn }
+    return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn, webSearchEmptyThisTurn, perTurnReasoningSourceThisTurn }
   }
 
   // ── SINGLE TOOL PATH ──
@@ -1704,5 +1733,5 @@ async function handleNeedsTool(
     })
   }
 
-  return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn, webSearchEmptyThisTurn }
+  return { response, taskShown, taskSteps, lastDisplayedAction, lastDisplayedReasoning, lastPipelineStepId, toolThisTurn: (response.tool as string) || null, chunkIndex: ctx.chunkIndex, flashCallsThisTurn: ctx.flashCallsThisTurn, lastAwarenessState: ctx.lastAwarenessState, investigationCommandsThisTurn, webSearchEmptyThisTurn, perTurnReasoningSourceThisTurn }
 }

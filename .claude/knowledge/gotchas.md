@@ -199,3 +199,24 @@ Past bugs and non-obvious constraints worth preserving so the next contributor d
   - Stage 2 tagged 0-hit `web_search` results with `_errorCategory: "web_search_empty"` + a recovery hint. The existing error-reasoning chain catches retries.
 - **Prevention:** when adding new action-planner hijacks or new tool results that could be no-signal-but-valid, ASK: "what happens in a fresh repo where the precondition isn't met?" and "what's the recovery action if this call returns nothing useful?" The default should never be "agent halts with a 'please provide' message".
 - **Test guards:** `server/src/reasoning/__tests__/project-init-reasoner.test.ts` covers the empty-repo classification → skip-list seeding. `server/src/services/__tests__/setup-intelligence-skip.test.ts` covers `detectConfigFile(path, runId)` honouring the skip list. `server/src/services/__tests__/tool-error-classifier.test.ts` covers the `web_search_empty` category.
+
+## Reasoning peek stayed stuck on project_init across multi-turn run
+
+- **Source:** plan `applied/2026-05-16-reasoning-chain-provider-parity.md` (the canonical trigger)
+- **Symptom:** running `sys` on `openrouter-auto` against a multi-turn implement task, the cli's live `<ReasoningPeek>` displayed the SAME `Reasoning(project init)` brief on every single turn for the entire run. The agent was clearly reasoning (per-turn `│ <text>` lines appeared inline) but the live peek never updated.
+- **Root cause:** THREE compounding mechanisms.
+  1. The cli's per-turn brief emission only fires when `response.perTurnReasoningChain` is a non-empty array (Stage 3 of the prior agent-runtime-fixes plan).
+  2. Models served via OpenRouter / Anthropic (especially CJS-shaped or smaller free-tier models) populate `response.reasoning` (singular string, legacy field) instead of the structured `reasoningChain[]` (array).
+  3. The mapper at the time only forwarded `reasoningChain[]` to `perTurnReasoningChain`; without an array there was nothing for the cli to emit.
+
+  Plus: even on the rare turns where the model DID emit a chain, two server-side overrides in `base-provider.ts` (weak-completion override at `validateCompletionResponse` line ~498, tool-gate override at `parseJsonResponse` line ~1156) constructed new response objects without copying `reasoningChain` forward — so any override fire silently dropped the chain.
+
+- **Fix:** Plan `applied/2026-05-16-reasoning-chain-provider-parity.md`:
+  - Stage 1 added `resolvePerTurnReasoningChain()` synthesising a single-element chain from singular `reasoning` when the array is empty.
+  - Stage 2 strengthened the system-prompt directive (`tools.ts`) — `reasoningChain` MANDATORY on every needs_tool/completed; removed the "Skip on trivial turns" escape hatch.
+  - Stage 3 audited the response parser (all three providers route through one); fixed both overrides to carry the chain forward.
+  - Stage 4 added `RunSummary.reasoningChainEmittedTurns` vs `reasoningChainSynthesisedTurns` so the structured-vs-synthesised distribution is trackable.
+
+- **Prevention:** when adding new response-shaping logic in `base-provider.ts`, ASK: "if I'm constructing a new response object, am I dropping fields the model emitted?" The answer for `reasoningChain` and `reasoning` should always be: carry forward. Spread the original or explicitly copy.
+
+- **Test guards:** `server/src/providers/__tests__/normalize-per-turn-reasoning.test.ts` (synthesis paths), `server/src/providers/prompt/sections/__tests__/tools-reasoning-chain-directive.test.ts` (MANDATORY directive present), `server/src/providers/__tests__/reasoning-chain-override-preservation.test.ts` (override preservation), `cli-client/src/agent/__tests__/usage-log.test.ts` (telemetry counters).

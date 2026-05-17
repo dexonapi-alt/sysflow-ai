@@ -619,3 +619,23 @@ ReasoningPeek renders at most `MAX_PARAGRAPH_LINES = 3` paragraphs, each capped 
 - `Ctrl+R` is added as an alias because the user explicitly asked for it. Some terminals capture `Ctrl+R` for reverse-search-history but in Ink mode the cli owns the input loop.
 
 **State resets on new brief emissions** so a fresh chain doesn't open in expanded mode unexpectedly. The user re-presses `r` if they want to see the new one. Tracked via `useRef(brief.key)` to avoid React's stale-closure trap.
+
+## Normaliser synthesises reasoningChain from singular reasoning when needed
+
+- **Source:** plan `applied/2026-05-16-reasoning-chain-provider-parity.md` (Stage 1)
+
+When the model returns `response.reasoning` (singular string, legacy field) but NOT `response.reasoningChain[]` (array, new structured field), the normaliser synthesises a single-element chain from the trimmed singular value. Done in `resolvePerTurnReasoningChain(normalized)` for both `needs_tool` and `completed` envelopes.
+
+**Why:**
+
+The cli's live `<ReasoningPeek>` only refreshes when `perTurnReasoningChain` is a non-empty array. Provider-parity reality: models served via OpenRouter / Anthropic (especially CJS-shaped or smaller free-tier ones) populate `reasoning` instead of `reasoningChain[]`. Without synthesis, the peek stays stuck on the FIRST brief of the run (`project_init` / `intent_classification`) because no later turn produces a chain.
+
+**Alternatives rejected:**
+
+- *Trust the prompt-level directive alone* — Stage 2 strengthens the directive but free-tier models still skim past it ~25% of the time. The synthesis is the safety net.
+- *Drop the structured field entirely; always render `reasoning`* — loses the per-paragraph multi-step structure on models that DO emit chains correctly. Structured wins when available.
+- *Provider-specific shims (one synth per provider)* — over-engineered. The single helper applies uniformly because all three providers route through `parseJsonResponse` → `mapNormalizedResponseToClient`.
+
+**Composition:** Stage 2's MANDATORY directive shifts the distribution toward structured emission; Stage 1's synthesis catches the residual. Stage 4 telemetry (`reasoningChainEmittedTurns` vs `reasoningChainSynthesisedTurns` in `RunSummary`) tracks the ratio over time so future tuning can target whichever side dominates.
+
+**Critical sibling fix:** Stage 3 found two server-side overrides in `base-provider.ts` (weak-completion + tool-gate) that were dropping the chain when they fired. Both now carry it forward via spread. Without this, the override would replace `reasoning` with its own hardcoded string AND clear the chain — the cli would see only the override's pre-written explanation, never the model's actual deliberation about WHY the override fired.
