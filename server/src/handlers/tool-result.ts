@@ -19,6 +19,7 @@ import { validateFrontendQuality, buildFrontendRejectionPayload, accumulateFront
 import { actionPlanner } from "../services/action-planner.js"
 import { isFrontendTask } from "../knowledge/frontend-patterns.js"
 import { ingestToolResult, ingestDirectoryTree, clearRunContext, buildWorkingContextString, getContentSnippets } from "../services/context-manager.js"
+import { getIntentMatchTotal, clearIntentMatchTelemetry } from "../services/intent-match-telemetry.js"
 import { resolveRunPlatform, clearRunPlatform } from "../services/run-platform-store.js"
 import { updatePipelineProgress, completePipeline, clearPipeline, getPipeline, hasPipeline, pipelineToTaskMeta, createPipelineFromAiPlan } from "../services/task-pipeline.js"
 import { getScaffoldChoice, storeScaffoldChoice, parseScaffoldResponse, clearScaffoldState } from "../scaffold/index.js"
@@ -1581,6 +1582,8 @@ Do NOT reference these files in your next action. Do NOT try to read or edit the
     // Stage 4.1: drop the per-run client-platform now that the run
     // is terminal. Same cadence as clearRunContext.
     clearRunPlatform(body.runId)
+    // Stage 5: drop the per-run intent-match telemetry counters.
+    clearIntentMatchTelemetry(body.runId)
   }
 
   // ─── Task Pipeline: track progress only if the AI created a plan on turn one.
@@ -1644,6 +1647,13 @@ Do NOT reference these files in your next action. Do NOT try to read or edit the
   const response = mapNormalizedResponseToClient(body.runId, normalized)
   if (onErrorBrief) response.reasoningBrief = onErrorBrief
   if (onCompletionBrief) response.reasoningBrief = onCompletionBrief
+  // Stage 5 of awareness-and-verification-correctness plan: surface
+  // the cumulative intent-match telemetry count on every response so
+  // the cli's RunSummary records the run's final peak. Monotonic for
+  // the run's lifetime; cli takes the max across turns (last value
+  // wins on a clean increment, peak survives if the last response
+  // doesn't carry the field).
+  response.intentKeywordContentMatches = getIntentMatchTotal(body.runId)
   // Stage E of model-lock-and-portable-reasoning: surface the run's
   // reasoner backend so the CLI can record it in `RunSummary`. Constant
   // for the run; absent until at least one runReasoning call has
@@ -2118,6 +2128,9 @@ function buildDetectorInput(runId: string, originalPrompt: string): DetectorInpu
     // heuristic can search file CONTENT + package.json deps, not
     // just file paths. Empty Map for runs with no context (defensive).
     contentSnippets: getContentSnippets(runId),
+    // Stage 5: thread runId so the detector can bump the per-run
+    // intent-match telemetry counters on Tier 2/3 satisfactions.
+    runId,
   }
 }
 

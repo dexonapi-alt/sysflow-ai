@@ -458,6 +458,49 @@ export function countStrippedInResult(result: Record<string, unknown> | undefine
   return arr.filter((s) => typeof s === "string" && s.length > 0).length
 }
 
+// ─── Stage 5 of awareness-and-verification-correctness plan: dotfile-filter counter ───
+//
+// Bumped each time `captureTopLevelTree` keeps a legitimate top-level
+// dotfile (`.env*`, `.gitignore`, `.eslintrc*`, `.npmrc`, etc.) that
+// the PRE-Stage-1 filter would have stripped. Spike on the per-run
+// total = lots of dotfiles authored, the new conservative filter is
+// doing useful work. Zero on a run with no dotfiles is fine — no
+// false-positive stale signals to suppress.
+//
+// Same module-level pattern as importsStrippedCount above. Read +
+// reset by agent.ts at run terminal-exit.
+
+let _dotfileFilterCorrectionsThisRun = 0
+
+export function getDotfileFilterCorrections(): number {
+  return _dotfileFilterCorrectionsThisRun
+}
+
+export function resetDotfileFilterCorrections(): void {
+  _dotfileFilterCorrectionsThisRun = 0
+}
+
+function bumpDotfileFilterCorrections(n: number): void {
+  if (n > 0) _dotfileFilterCorrectionsThisRun += n
+}
+
+/**
+ * Pure: count entries that are dotfiles AND NOT in the noise set —
+ * the diagnostic for "how many entries did Stage 1's conservative
+ * filter rescue from the pre-Stage-1 strip-all-dots filter?".
+ *
+ * Exported for tests.
+ */
+export function countLegitimateDotfilesInEntries(
+  names: ReadonlyArray<string>,
+): number {
+  let n = 0
+  for (const name of names) {
+    if (name.startsWith(".") && !isNoiseTopLevelEntry(name)) n += 1
+  }
+  return n
+}
+
 /**
  * Stage 1 of plan 2026-05-16-server-hardening-and-error-source-distinction.md.
  *
@@ -984,9 +1027,12 @@ export function isNoiseTopLevelEntry(name: string): boolean {
 async function captureTopLevelTree(cwd: string): Promise<Array<{ name: string; type: "file" | "directory" }> | undefined> {
   try {
     const entries = await fs.readdir(cwd, { withFileTypes: true })
-    return entries
-      .filter((e) => !isNoiseTopLevelEntry(e.name))
-      .map((e) => ({ name: e.name, type: e.isDirectory() ? ("directory" as const) : ("file" as const) }))
+    const kept = entries.filter((e) => !isNoiseTopLevelEntry(e.name))
+    // Stage 5 of awareness-and-verification-correctness plan: count
+    // the dotfiles the new conservative filter rescued. Tracks the
+    // per-call rescue total cumulatively across the run.
+    bumpDotfileFilterCorrections(countLegitimateDotfilesInEntries(kept.map((e) => e.name)))
+    return kept.map((e) => ({ name: e.name, type: e.isDirectory() ? ("directory" as const) : ("file" as const) }))
   } catch {
     return undefined
   }

@@ -708,4 +708,68 @@ describe("recordRunSummary", () => {
     expect(entry.tscErrorCount).toBe(0)
     expect(entry.completionBlockedReason).toBeNull()
   })
+
+  // ─── Stage 5 of awareness-and-verification-correctness plan ───
+
+  it("persists Stage 5 awareness telemetry: dotfile / intent-match / modal-shown / win-shell-errors", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-awareness-5-1",
+      prompt: "build a POS PG backend",
+      model: "openrouter-auto",
+      durationMs: 12_000,
+      stepCount: 20,
+      toolCount: 25,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      dotfileFilterCorrections: 3,
+      intentKeywordContentMatches: 4,
+      awarenessModalShown: true,
+      windowsShellErrorsCaught: 2,
+    })
+    const [entry] = await readEntries()
+    expect(entry.dotfileFilterCorrections).toBe(3)
+    expect(entry.intentKeywordContentMatches).toBe(4)
+    expect(entry.awarenessModalShown).toBe(true)
+    expect(entry.windowsShellErrorsCaught).toBe(2)
+  })
+
+  it("defaults Stage 5 awareness telemetry to 0 / false when omitted (legacy run)", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-awareness-5-2",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+    })
+    const [entry] = await readEntries()
+    expect(entry.dotfileFilterCorrections).toBe(0)
+    expect(entry.intentKeywordContentMatches).toBe(0)
+    expect(entry.awarenessModalShown).toBe(false)
+    expect(entry.windowsShellErrorsCaught).toBe(0)
+  })
+
+  it("persists awarenessModalShown=false explicitly on a clean run", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-awareness-5-3",
+      prompt: "build x",
+      model: "openrouter-auto",
+      durationMs: 5_000,
+      stepCount: 8,
+      toolCount: 10,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      awarenessModalShown: false,
+    })
+    const [entry] = await readEntries()
+    expect(entry.awarenessModalShown).toBe(false)
+  })
 })

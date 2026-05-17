@@ -12,6 +12,7 @@
 
 import type { ChunkBoundary } from "./chunk-state.js"
 import { crossCheckReasoningAction, type ActionDescriptor } from "./reasoner-action-checker.js"
+import { bumpIntentMatch } from "./intent-match-telemetry.js"
 
 export type DivergenceCategory =
   | "same_file_edited_repeatedly"
@@ -128,6 +129,13 @@ export interface DetectorInput {
    * haystack (the pre-Stage-2 behaviour).
    */
   contentSnippets?: Map<string, string>
+  /**
+   * Stage 5 of awareness-and-verification-correctness plan: run id
+   * used to bump the per-run intent-match telemetry counters
+   * (structural / content satisfactions). Pure-detector tests can
+   * omit it; the production caller threads runId from the handler.
+   */
+  runId?: string
 }
 
 // ─── Tuning constants ───
@@ -214,9 +222,22 @@ export function detectDivergence(input: DetectorInput): DivergenceSignal[] {
   if (intentKeywords.length > 0 && input.filesModified.length > 0) {
     const pathHaystack = (input.filesModified.join(" ") + " " + (input.completionMessage ?? "")).toLowerCase()
     const contentSnippets = input.contentSnippets ?? new Map()
-    const missing = intentKeywords.filter(
-      (kw) => !isIntentKeywordSatisfied(kw, pathHaystack, input.filesModified, contentSnippets),
-    )
+    const missing: string[] = []
+    for (const kw of intentKeywords) {
+      const tier = classifyIntentKeywordSatisfaction(kw, pathHaystack, input.filesModified, contentSnippets)
+      if (tier === null) {
+        missing.push(kw)
+        continue
+      }
+      // Stage 5 of awareness-and-verification-correctness plan: track
+      // how often Stage 2's broader haystack (Tier 2 structural OR
+      // Tier 3 content) was the satisfier — telemetry for "is the
+      // new logic doing useful work?". Tier 1 (path) hits don't
+      // count; they would have passed the pre-Stage-2 detector too.
+      if ((tier === "structural" || tier === "content") && input.runId) {
+        bumpIntentMatch(input.runId, tier)
+      }
+    }
     if (missing.length > 0) {
       signals.push({
         category: "intent_keyword_absent",
@@ -509,33 +530,41 @@ const STRUCTURAL_SIGNALS: Record<string, ReadonlyArray<{
 }
 
 /**
+ * Stage 5 of awareness-and-verification-correctness plan: which tier
+ * satisfied an intent keyword (or `null` if no tier did). Stage 5's
+ * telemetry counter bumps on "structural" / "content" hits so we
+ * can track how often Stage 2's broader haystack does useful work.
+ */
+export type IntentKeywordSatisfactionTier = "path" | "structural" | "content" | null
+
+/**
  * Stage 2: three-tier intent-keyword satisfaction.
  *
  *   1. Path-haystack literal hit (covers the `package.json` literal
  *      and any file path that names the framework like
- *      `express.config.js`).
+ *      `express.config.js`). Returns "path".
  *   2. Structural signal — `package.json` deps OR
- *      framework-specific file path.
- *   3. Content-snippet substring hit (the snippet index from
- *      context-manager — first 1KB per written file).
+ *      framework-specific file path. Returns "structural".
+ *   3. Content-snippet word-boundary hit (the snippet index from
+ *      context-manager — first 1KB per written file). Returns "content".
  *
- * Returns `true` if ANY tier satisfies. False positives are worse
+ * Returns `null` when no tier satisfies. False positives are worse
  * here than false negatives (a false positive lets the awareness
  * detector miss real divergence) so each tier is strict-substring,
  * not regex.
  *
  * Pure — no I/O. Exported for direct unit testing.
  */
-export function isIntentKeywordSatisfied(
+export function classifyIntentKeywordSatisfaction(
   keyword: string,
   pathHaystack: string,
   filesModified: ReadonlyArray<string>,
   contentSnippets: ReadonlyMap<string, string>,
-): boolean {
+): IntentKeywordSatisfactionTier {
   const kw = keyword.toLowerCase()
 
   // Tier 1: path haystack (existing behaviour).
-  if (haystackContainsKeyword(pathHaystack, kw)) return true
+  if (haystackContainsKeyword(pathHaystack, kw)) return "path"
 
   // Tier 2: structural signals. Resolve package.json content snippet
   // once (the most common signal source) and reuse across rules.
@@ -552,7 +581,7 @@ export function isIntentKeywordSatisfied(
     })()
     for (const signal of signals) {
       if (signal.source === "package_json_content") {
-        if (pkgJsonContent && pkgJsonContent.includes(signal.substr)) return true
+        if (pkgJsonContent && pkgJsonContent.includes(signal.substr)) return "structural"
       } else if (signal.source === "file_path") {
         // Substring search across modified file paths AND tracked
         // content-snippet paths (so e.g. prisma/schema.prisma added
@@ -560,7 +589,7 @@ export function isIntentKeywordSatisfied(
         // detector's filesModified list).
         const allPaths = [...filesModified, ...contentSnippets.keys()]
         for (const p of allPaths) {
-          if (p.toLowerCase().includes(signal.substr)) return true
+          if (p.toLowerCase().includes(signal.substr)) return "structural"
         }
       }
     }
@@ -572,11 +601,26 @@ export function isIntentKeywordSatisfied(
   if (contentSnippets.size > 0) {
     const wordRe = new RegExp(`(?:^|[^a-z0-9])${escapeRegex(kw)}(?:[^a-z0-9]|$)`, "i")
     for (const content of contentSnippets.values()) {
-      if (wordRe.test(content)) return true
+      if (wordRe.test(content)) return "content"
     }
   }
 
-  return false
+  return null
+}
+
+/**
+ * Backwards-compatible boolean wrapper around
+ * `classifyIntentKeywordSatisfaction`. Pre-Stage-5 call sites + the
+ * existing test suite consume this shape. Internally the tier is
+ * computed once and discarded.
+ */
+export function isIntentKeywordSatisfied(
+  keyword: string,
+  pathHaystack: string,
+  filesModified: ReadonlyArray<string>,
+  contentSnippets: ReadonlyMap<string, string>,
+): boolean {
+  return classifyIntentKeywordSatisfaction(keyword, pathHaystack, filesModified, contentSnippets) !== null
 }
 
 function escapeRegex(s: string): string {

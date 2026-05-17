@@ -34,7 +34,8 @@ import { renderReasoningBrief, renderDecisionBrief } from "../cli/reasoning-disp
 import { classifyResponse, makeRetryBudget, noteSuccess, type RetryBudget } from "./state-machine.js"
 import { recordRunSummary } from "./usage-log.js"
 import { getReasoningPeekExpansions, resetReasoningPeekExpansions } from "../ui/components/ReasoningPeek.js"
-import { getNullToolRejections, resetNullToolRejections, getImportsStrippedCount, resetImportsStrippedCount } from "./executor.js"
+import { getNullToolRejections, resetNullToolRejections, getImportsStrippedCount, resetImportsStrippedCount, getDotfileFilterCorrections, resetDotfileFilterCorrections } from "./executor.js"
+import { getWindowsShellErrorsCaught, resetWindowsShellErrorsCaught } from "./tools.js"
 import { getNonRetryable5xxCount, resetNonRetryable5xxCount } from "../lib/server.js"
 import { estimateTokens as cliEstimateTokens } from "./token-estimate.js"
 import { startJobStatusBar, stopJobStatusBar } from "../cli/job-status.js"
@@ -514,6 +515,12 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   // wins (which gate blocked LAST).
   let tscErrorCountPeak = 0
   let completionBlockedReasonLatest: "tsc" | "artifact_missing" | null = null
+  // Stage 5 of awareness-and-verification-correctness plan: telemetry.
+  // intentKeywordContentMatches: server-side cumulative count, peak
+  // captured client-side (max-wins). awarenessModalShown: latched true
+  // when Stage 3's off-course modal renders.
+  let intentKeywordContentMatchesPeak = 0
+  let awarenessModalShownThisRun = false
   // Stage 4 of reasoning-chain-provider-parity plan: distribution
   // counters for structured-vs-synthesised per-turn reasoning. Bumped
   // each turn based on the server-side classification surfaced on
@@ -681,11 +688,19 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       importsStrippedCount: getImportsStrippedCount(),
       tscErrorCount: tscErrorCountPeak,
       completionBlockedReason: completionBlockedReasonLatest,
+      // Stage 5 of awareness-and-verification-correctness plan.
+      dotfileFilterCorrections: getDotfileFilterCorrections(),
+      intentKeywordContentMatches: intentKeywordContentMatchesPeak,
+      awarenessModalShown: awarenessModalShownThisRun,
+      windowsShellErrorsCaught: getWindowsShellErrorsCaught(),
     })
     resetReasoningPeekExpansions()
     resetNullToolRejections()
     resetNonRetryable5xxCount()
     resetImportsStrippedCount()
+    // Stage 5 of awareness-and-verification-correctness plan.
+    resetDotfileFilterCorrections()
+    resetWindowsShellErrorsCaught()
     unregisterSpinner()
   }
 
@@ -886,6 +901,17 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         tallyAwareness((response as Record<string, unknown>).awarenessSnapshot as { state: string; confidence: number } | undefined)
         if ((response as Record<string, unknown>).awarenessChoice === true) {
           autoPauseEventsThisRun += 1
+          // Stage 5 of awareness-and-verification-correctness plan:
+          // latch the modal-shown flag so the per-run telemetry records
+          // it even if the user picks "continue" and the run keeps going.
+          awarenessModalShownThisRun = true
+        }
+        // Stage 5: peak-wins capture for server-side cumulative
+        // intent-match count. Server's counter is monotonic per run;
+        // taking the max is defensive against an out-of-order response.
+        const intentMatches = (response as Record<string, unknown>).intentKeywordContentMatches
+        if (typeof intentMatches === "number" && intentMatches > intentKeywordContentMatchesPeak) {
+          intentKeywordContentMatchesPeak = intentMatches
         }
         // Stage 3 of forced-error-reasoning plan: when a turn's response
         // carries `errorReasoningParagraphs`, emit a reasoning_brief
