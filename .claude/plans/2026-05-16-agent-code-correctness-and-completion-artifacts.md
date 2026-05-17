@@ -1,7 +1,7 @@
 # Agent code-correctness gate + completion-artifact enforcement
 
 - **Created:** 2026-05-16
-- **Status:** draft
+- **Status:** in-progress
 - **Scope:** Stop the agent from declaring a run "complete" when the code it wrote doesn't compile, has missing imports, omits required prompt-implied artifacts (schema, migrations), or violates Node ESM rules. Fixes the user-reported repro where `sys` "built" a POS backend that crashed on every `npm run dev` with cascading `ReferenceError` / `ERR_MODULE_NOT_FOUND` / `SyntaxError` failures because the verification gate only ran on `.js` files and the system prompt had no Node-ESM rules.
 
 ## Goal
