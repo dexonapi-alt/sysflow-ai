@@ -50,6 +50,7 @@ import { shouldRunDivergenceSecondLook, resolveMaxChunksPerRun, resolveMaxFilesP
 import { classifyIntent, getCachedIntentOrRegex } from "../reasoning/intent-classifier.js"
 import { clearIntentForRun } from "../services/intent-cache.js"
 import { recordSignals as recordConfidenceSignals, clearConfidence, getConfidence, getConfidenceState, getThresholdState } from "../services/confidence-tracker.js"
+import { synthesizeAwarenessHaltResponse } from "../services/awareness-halt-synthesis.js"
 import { runVerificationGate, gateSignals } from "../services/verification-gate.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
@@ -375,6 +376,33 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
         const score = getConfidence(body.runId)
         const state = getThresholdState(body.runId, run.sysbasePath as string | null | undefined, run.model as string | undefined)
         console.log(`[awareness] per-step: ${signals.length} signal(s), confidence=${score} state=${state} (categories: ${signals.map((s) => s.category).join(", ")})`)
+
+        // Stage 3 of awareness-and-verification-correctness plan: when
+        // the per-step path crosses the blocked threshold, short-circuit
+        // with the off-course modal — same envelope the chunk-boundary
+        // path produces. The pre-Stage-3 code only logged here, so a
+        // stuck-loop driving confidence to 25 produced log noise but the
+        // agent kept executing (the user-reported repro). Sharing the
+        // synthesis with the chunk-boundary path ensures identical cli
+        // routing regardless of which detector fired.
+        if (state === "blocked") {
+          const fullState = getConfidenceState(body.runId)
+          const verdict = lastDivergenceVerdict.get(body.runId) ?? null
+          // The per-step path runs OUTSIDE the chunked loop, so there
+          // may be no active chunk to roll back to. Use the most recent
+          // chunk index from history, or -1 when no chunks have started.
+          const chunkHist = getChunkHistory(body.runId)
+          const lastGoodChunkIndex = chunkHist.length > 0 ? chunkHist[chunkHist.length - 1].index : -1
+          console.log(`[awareness] per-step: BLOCKED (confidence=${score}). Surfacing off-course modal to user.`)
+          return synthesizeAwarenessHaltResponse({
+            runId: body.runId,
+            confidence: score,
+            signals: fullState?.signals ?? [],
+            lastLlmVerdict: verdict,
+            lastGoodChunkIndex,
+            source: "per_step",
+          })
+        }
       }
     }
   } catch (err) {
@@ -1096,32 +1124,21 @@ Do NOT reference these files in your next action. Do NOT try to read or edit the
           if (state === "blocked") {
             const fullState = getConfidenceState(body.runId)
             const verdict = lastDivergenceVerdict.get(body.runId) ?? null
-            // Roll back the chunk that JUST crossed the threshold — its
-            // snapshot was taken at the start of this chunk.
-            const lastGoodChunkIndex = chunkIdx
-            const message = `Confidence dropped to ${Math.round(score)}/100 — I think the run drifted from your ask. What should I do?`
             console.log(`[awareness] chunk ${chunkIdx}: BLOCKED (confidence=${score}). Surfacing off-course modal to user.`)
-
-            const synthesised: NormalizedResponse = {
-              kind: "waiting_for_user",
-              content: message,
-              usage: { inputTokens: 0, outputTokens: 0 },
-            }
-            const resp = mapNormalizedResponseToClient(body.runId, synthesised) as unknown as Record<string, unknown>
-            // Custom payload the cli inspects to route to the off-course modal
-            // instead of the generic askUser path.
-            resp.awarenessChoice = true
-            resp.awarenessEvidence = {
+            // Stage 3 of awareness-and-verification-correctness plan:
+            // share the synthesis with the per-step path via the new
+            // helper. Identical envelope shape regardless of which
+            // detector fired.
+            return synthesizeAwarenessHaltResponse({
+              runId: body.runId,
               confidence: score,
-              signals: (fullState?.signals ?? []).slice(-6).map((s) => ({
-                category: s.category,
-                detail: s.detail,
-                severity: s.severity ?? null,
-              })),
+              signals: fullState?.signals ?? [],
               lastLlmVerdict: verdict,
-              lastGoodChunkIndex,
-            }
-            return resp as unknown as ClientResponse
+              // Roll back the chunk that JUST crossed the threshold —
+              // its snapshot was taken at the start of this chunk.
+              lastGoodChunkIndex: chunkIdx,
+              source: "chunk_boundary",
+            })
           }
         }
       } catch (err) {
