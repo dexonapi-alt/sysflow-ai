@@ -34,6 +34,8 @@ import { renderReasoningBrief, renderDecisionBrief } from "../cli/reasoning-disp
 import { classifyResponse, makeRetryBudget, noteSuccess, type RetryBudget } from "./state-machine.js"
 import { recordRunSummary } from "./usage-log.js"
 import { getReasoningPeekExpansions, resetReasoningPeekExpansions } from "../ui/components/ReasoningPeek.js"
+import { getNullToolRejections, resetNullToolRejections } from "./executor.js"
+import { getNonRetryable5xxCount, resetNonRetryable5xxCount } from "../lib/server.js"
 import { estimateTokens as cliEstimateTokens } from "./token-estimate.js"
 import { startJobStatusBar, stopJobStatusBar } from "../cli/job-status.js"
 import { list as listBackgroundJobs, cleanupRun as cleanupBackgroundJobs } from "./background-jobs.js"
@@ -503,6 +505,9 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   // time the cli observes a tool_result with `_errorCategory:
   // "web_search_empty"`.
   let webSearchEmptyCount = 0
+  // Stage 5 of server-hardening plan: per-run counter for sysflow_infra
+  // terminal failures. 0 or 1 per run (sysflow_infra halts the loop).
+  let sysflowInfraErrorCount = 0
   // Stage 4 of reasoning-chain-provider-parity plan: distribution
   // counters for structured-vs-synthesised per-turn reasoning. Bumped
   // each turn based on the server-side classification surfaced on
@@ -659,8 +664,15 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       reasoningPeekExpansions: getReasoningPeekExpansions(),
       reasoningChainEmittedTurns,
       reasoningChainSynthesisedTurns,
+      // Stage 5 of server-hardening plan: read module-level counters
+      // (bumped from executor.ts + server.ts on each rejection).
+      sysflowInfraErrorCount,
+      nullToolRejectionCount: getNullToolRejections(),
+      nonRetryable5xxCount: getNonRetryable5xxCount(),
     })
     resetReasoningPeekExpansions()
+    resetNullToolRejections()
+    resetNonRetryable5xxCount()
     unregisterSpinner()
   }
 
@@ -795,6 +807,7 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
           // user action required (top up credits, /model swap, set
           // env var). Halt cleanly with a distinct banner so the user
           // doesn't confuse it with a project-side error.
+          sysflowInfraErrorCount = 1
           spinner.stop()
           console.log("")
           console.log(colors.error("  ═══ SYSFLOW INFRASTRUCTURE ERROR ═══"))

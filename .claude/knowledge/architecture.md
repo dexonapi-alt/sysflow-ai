@@ -985,3 +985,64 @@ The plan layered four mechanical fixes so the peek refreshes on EVERY turn regar
 - Overrides preservation: `server/src/providers/base-provider.ts` (weak-completion + tool-gate spread `reasoningChain`)
 - Client surface: `server/src/types.ts: ClientResponse.perTurnReasoningChain + perTurnReasoningSource`
 - CLI capture + telemetry: `cli-client/src/agent/agent.ts` + `usage-log.ts: RunSummary.reasoningChainEmittedTurns / reasoningChainSynthesisedTurns`
+
+## Error provenance (sysflow_infra vs user_machine)
+
+- **Source:** plan `applied/2026-05-16-server-hardening-and-error-source-distinction.md`
+
+Every error envelope now carries an `errorSource` discriminator so the cli + agent recovery loop can distinguish failures originating in **sysflow's own infrastructure** (API quota, auth, DB, provider 5xx) from failures originating on the **user's machine** (file not found, permission denied, command not in PATH). The former halt the run cleanly with a banner; the latter feed into the existing recovery chain. Without this discriminator the agent would interpret sysflow's "set GEMINI_API_KEY in server/.env" error as a fix it should perform IN THE USER'S PROJECT DIRECTORY — exactly what the user reported.
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│  provider call fails (OpenRouter 402, Anthropic 401, Gemini 5xx)   │
+│       │                                                            │
+│       ▼                                                            │
+│  failedResponse(error, "sysflow_infra")    base-provider.ts        │
+│       │                                                            │
+│       ▼                                                            │
+│  NormalizedResponse { kind: "failed", error, errorSource }         │
+│       │                                                            │
+│       ▼                                                            │
+│  mapNormalizedResponseToClient — propagates errorSource            │
+│       │                                                            │
+│       ▼                                                            │
+│  ClientResponse { status: "failed", error, errorSource }           │
+│       │                                                            │
+│       ▼                                                            │
+│  cli callServer/callServerStream — classifyNonRetryable(body)      │
+│       │   matches "errorSource":"sysflow_infra" → throws           │
+│       │   NonRetryableError (skips retry loop)                     │
+│       ▼                                                            │
+│  cli state-machine — classifyResponse                              │
+│       │   errorSource === "sysflow_infra" → terminal sysflow_infra │
+│       ▼                                                            │
+│  cli agent.ts terminal handler                                     │
+│       │   renders ═══ SYSFLOW INFRASTRUCTURE ERROR ═══ banner      │
+│       │   halts the loop                                           │
+│       ▼                                                            │
+│  RunSummary.sysflowInfraErrorCount += 1                            │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+**Discriminator taxonomy:**
+
+| Value | Examples | Cli behaviour |
+|---|---|---|
+| `sysflow_infra` | OpenRouter 401/402/403, Anthropic 401/403, Gemini invalid key, any provider 5xx, missing API keys | Halt + banner. NO retry. NO agent recovery. |
+| `user_machine` | file not found, permission denied, ENOENT, EACCES, network unreachable from user box | Recovery chain fires (forced-error-reasoning plan). |
+| `unknown` / absent | Legacy code paths | Fall-back: treated as `user_machine` (preserves legacy semantics). |
+
+**Non-retryable 5xx detection** is an orthogonal but cooperating layer. Even when no `errorSource` is set, the cli's `classifyNonRetryable(body)` matches Postgres constraint violations, application validation errors, and the `sysflow_infra` envelope tag itself — throwing `NonRetryableError` to bypass the retry loop. This catches every case where retrying would burn budget against the same root cause.
+
+**Files & flags:**
+
+- Provider tagging: `server/src/providers/openrouter.ts` + `anthropic.ts` + `gemini.ts`
+- Type discriminator: `server/src/types.ts: NormalizedResponse.errorSource + ClientResponse.errorSource`
+- Server mapper: `server/src/providers/normalize.ts: mapNormalizedResponseToClient (failed envelope)`
+- Cli retry classifier: `cli-client/src/lib/server.ts: classifyNonRetryable + NonRetryableError`
+- Cli state machine: `cli-client/src/agent/state-machine.ts: TerminalReason "sysflow_infra"`
+- Cli render: `cli-client/src/agent/agent.ts: case "sysflow_infra"`
+- OpenRouter internal: `classify402Terminal` (skip retry when affordable < 4096 OR `Insufficient credits` text)
+- Telemetry: `RunSummary.sysflowInfraErrorCount / nullToolRejectionCount / nonRetryable5xxCount`
+
+No new flags. The discriminator is a hard architectural change — flagging it off would re-introduce the "agent tries to fix sysflow from user project" bug.

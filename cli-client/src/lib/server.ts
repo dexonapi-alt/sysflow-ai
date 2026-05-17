@@ -82,6 +82,28 @@ export function classifyNonRetryable(text: string): string | null {
   return null
 }
 
+// ─── Stage 5 of server-hardening plan: per-run telemetry counter ───
+//
+// Bumped each time the cli throws a `NonRetryableError` instead of
+// retrying a 5xx (Stage 3). Read by `agent.ts: runAgent` at terminal
+// exit + reset via `resetNonRetryable5xxCount` for the next run.
+// Sustained nonzero values mean the server is emitting more validation
+// / constraint-violation 5xx than normal — signal to investigate.
+
+let _nonRetryable5xxThisRun = 0
+
+export function getNonRetryable5xxCount(): number {
+  return _nonRetryable5xxThisRun
+}
+
+export function resetNonRetryable5xxCount(): void {
+  _nonRetryable5xxThisRun = 0
+}
+
+function bumpNonRetryable5xxCount(): void {
+  _nonRetryable5xxThisRun += 1
+}
+
 export interface StreamEvent {
   type: "phase" | "result" | "error"
   data: Record<string, unknown>
@@ -169,6 +191,7 @@ export async function callServer(payload: Record<string, unknown>): Promise<Reco
         // giving up.
         const sig = classifyNonRetryable(text)
         if (sig) {
+          bumpNonRetryable5xxCount()
           throw new NonRetryableError(`Server error ${res.status}: ${text}`, sig)
         }
 
@@ -248,6 +271,7 @@ export async function callServerStream(
         // Stage 3 of server-hardening plan: non-retryable signature detection.
         const sig = classifyNonRetryable(text)
         if (sig) {
+          bumpNonRetryable5xxCount()
           throw new NonRetryableError(`Server error ${res.status}: ${text}`, sig)
         }
 
@@ -306,6 +330,7 @@ export async function callServerStream(
                 const errBody = parsed.error || JSON.stringify(parsed)
                 const sig = classifyNonRetryable(errBody)
                 if (sig) {
+                  bumpNonRetryable5xxCount()
                   throw new NonRetryableError(errBody, sig)
                 }
                 throw new Error(parsed.error || "Server error")

@@ -1,7 +1,7 @@
 # Server hardening + error-source distinction
 
 - **Created:** 2026-05-16
-- **Status:** in-progress
+- **Status:** implemented (2026-05-16)
 - **Scope:** Stop the sysflow server from leaking infrastructure errors into the agent's recovery flow as if they were user-app errors. Stop the DB from crashing on null tool names. Stop the cli from retrying non-recoverable errors. Closes the user-reported sequence where (a) the agent emitted a `▸ unknown {}` tool call, (b) the server crashed with a Postgres NOT NULL constraint violation, (c) the cli retried the 500 three times, then (d) an OpenRouter "out of credits" error caused the agent to attempt writing `server/.env` IN THE USER'S PROJECT DIRECTORY trying to fix sysflow's own backend.
 
 ## Goal
@@ -164,3 +164,25 @@ Each stage = one PR off `main`. ~1,200 LOC + 26-30 new tests across five stages.
 - **Forced-error-reasoning Stage 4 ack-rejection loop** — Stage 2's `errorSource: "sysflow_infra"` short-circuit ensures the ack-loop never fires for sysflow infra errors (would never recover; would burn budget and end with the same halt).
 - **Project-init reasoning** — independent. Project-init reads the user's directory; sysflow_infra errors are about the server's own state.
 - **Cli retry budget** — Stage 3's non-retryable classifier sits BEFORE the existing retry-budget logic; saves budget for legitimately transient failures.
+
+## Completion notes
+
+Shipped across five PRs (#102-#106) on 2026-05-16:
+
+- **PR #102 (Stage 1)** — null/unknown tool rejection: `KNOWN_TOOL_NAMES` set + `isKnownTool` gate at executor entries + server-side `saveToolResult` guard + handler-level early-return. 17 tests.
+- **PR #103 (Stage 2)** — `errorSource` discriminator threaded through `NormalizedResponse` → `ClientResponse` → cli state machine → cli render banner. Each provider tags its quota/auth errors. 15 tests.
+- **PR #104 (Stage 3)** — cli `NonRetryableError` class + `classifyNonRetryable()` detector wired into both `callServer` and `callServerStream` (HTTP body + SSE error event paths). 22 tests.
+- **PR #105 (Stage 4)** — OpenRouter `classify402Terminal()` skips internal retry when affordable < 4096 (was 512, too low). 10 tests.
+- **PR #106 (this)** — three telemetry counters (`sysflowInfraErrorCount`, `nullToolRejectionCount`, `nonRetryable5xxCount`) in `RunSummary`, three new KB entries (architecture diagram + 2 decisions), gotcha for the canonical repro. Plan archived.
+
+**The user's repro is fixed at THREE layers:**
+
+1. Null tool → cli's `isKnownTool` gate rejects before dispatch (Stage 1).
+2. Sysflow infra errors → cli halts with banner instead of retry-loop (Stage 2 + 3).
+3. OpenRouter 402 → server bails on internal retry when affordable below threshold (Stage 4).
+
+A single null-tool emission produces exactly: cli rejection (counted) → synthetic validation_failure to agent → next turn. A single sysflow_infra OpenRouter 402 produces: one OpenRouter call → terminal failure → one cli render → halt. No retries at any layer for either failure mode.
+
+**Test counts at archive time:** Server: 961 + new Stage 5 cases. CLI: 449 + new Stage 5 cases. Both typecheck clean.
+
+**Deviation:** none material. The plan called for "8 new tests" per stage; we shipped more (17 / 15 / 22 / 10) — the granular coverage paid off in finding edge cases (e.g., bare `constraint` in unrelated context not triggering the PG matcher, threshold edge case at exactly 4096).

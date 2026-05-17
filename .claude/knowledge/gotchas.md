@@ -220,3 +220,41 @@ Past bugs and non-obvious constraints worth preserving so the next contributor d
 - **Prevention:** when adding new response-shaping logic in `base-provider.ts`, ASK: "if I'm constructing a new response object, am I dropping fields the model emitted?" The answer for `reasoningChain` and `reasoning` should always be: carry forward. Spread the original or explicitly copy.
 
 - **Test guards:** `server/src/providers/__tests__/normalize-per-turn-reasoning.test.ts` (synthesis paths), `server/src/providers/prompt/sections/__tests__/tools-reasoning-chain-directive.test.ts` (MANDATORY directive present), `server/src/providers/__tests__/reasoning-chain-override-preservation.test.ts` (override preservation), `cli-client/src/agent/__tests__/usage-log.test.ts` (telemetry counters).
+
+## Agent tried to write server/.env in user project to fix sysflow's OpenRouter credits
+
+- **Source:** plan `applied/2026-05-16-server-hardening-and-error-source-distinction.md` (the canonical trigger)
+- **Symptom:** running `sys` against the user's `test` directory hit sysflow's OpenRouter quota during a model call:
+  ```
+  ✖ OpenRouter is out of credits and even the lowest affordable max_tokens would be too small to be useful.
+    Top up at https://openrouter.ai/settings/credits, switch model with /model gemini-flash,
+    or set GEMINI_API_KEY in server/.env (free tier from Google AI Studio).
+  Auto-retrying (1/5)...
+  ✖ ...same error...
+  Auto-retrying (2/5)...
+  │ The previous tool execution failed due to insufficient credits on OpenRouter. The error message
+  │ explicitly suggests setting the `GEMINI_API_KEY` in `server/.env` to utilize Google AI Studio's
+  │ free tier as a solution. This is a viable alternative to topping up credits...
+  ▸ create server/.env +1
+  ● Write(server/.env)
+  ─ error: ⛔ PERMISSION DENIED: tool "write_file" was denied by the active permission policy.
+  ```
+  The agent literally tried to mutate `server/.env` IN THE USER'S PROJECT DIRECTORY to fix sysflow's own backend.
+
+- **Root cause:** THREE compounding mechanisms.
+  1. The OpenRouter 402 failure was returned as a `failed` envelope with NO `errorSource` tag — the cli's state machine fell through to `failure_retry` and the cli retried 5x against the same exhausted credit pool.
+  2. The failure's error string (which contains the suggestion to set `GEMINI_API_KEY in server/.env`) reached the agent's error-reasoning chain as if it were a tool-execution error from the user's machine.
+  3. The chain interpreted the suggestion as actionable from inside the project — wrote `write_file` against `server/.env` relative to the user's cwd.
+
+  Plus: the cli's retry classifier was message-substring based — it only skipped retry when the thrown error message contained the literal `"Server error"` prefix. SSE-event error paths drop that prefix → retry fired.
+
+- **Fix:** Plan `applied/2026-05-16-server-hardening-and-error-source-distinction.md`:
+  - Stage 1 added the `KNOWN_TOOL_NAMES` registry-derived set + `isKnownTool` gate (catches null tool names at source — separate but related failure mode).
+  - Stage 2 added `errorSource: "sysflow_infra" | "user_machine" | "unknown"` on every error envelope. Providers tag their quota / auth / 5xx as `sysflow_infra`. Cli state machine halts terminally on `sysflow_infra` with a distinct banner.
+  - Stage 3 added the cli `NonRetryableError` class + `classifyNonRetryable()` detector matching PG constraints + app validation + `sysflow_infra` envelope tag. Bypasses the retry loop via `instanceof`, not message format.
+  - Stage 4 added OpenRouter's `classify402Terminal()` — skip internal retry when affordable < 4096 OR body says `Insufficient credits`.
+  - Stage 5 added telemetry counters (`sysflowInfraErrorCount` / `nullToolRejectionCount` / `nonRetryable5xxCount`) + this gotcha.
+
+- **Prevention:** when adding a new failure path or error envelope, ASK: "could the AGENT interpret this error as something to fix from inside the user's project?" If yes, tag with `errorSource: "sysflow_infra"`. The discriminator is the safety contract; message-pattern matching is fragile and provider-dependent.
+
+- **Test guards:** `cli-client/src/agent/__tests__/state-machine-sysflow-infra.test.ts` (terminal classification), `server/src/providers/__tests__/error-source-propagation.test.ts` (failedResponse + mapper propagation), `cli-client/src/lib/__tests__/server-non-retryable.test.ts` (cli retry classifier), `server/src/providers/__tests__/openrouter-402.test.ts: classify402Terminal` (provider-side bail-out).

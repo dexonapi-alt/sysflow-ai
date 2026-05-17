@@ -399,6 +399,29 @@ async function dispatch(tool: string, args: Record<string, unknown>, runId?: str
   }
 }
 
+// ─── Stage 5 of server-hardening plan: per-run telemetry counter ───
+//
+// Bumped each time the cli's `isKnownTool` gate rejects a tool name
+// (either single-tool dispatch or per-tool in a batch). Read by
+// `agent.ts: runAgent` at terminal exit + reset via
+// `resetNullToolRejections` for the next run. Sustained nonzero
+// values mean the model is hallucinating tool names — signal to
+// tighten the tool-list section of the system prompt.
+
+let _nullToolRejectionsThisRun = 0
+
+export function getNullToolRejections(): number {
+  return _nullToolRejectionsThisRun
+}
+
+export function resetNullToolRejections(): void {
+  _nullToolRejectionsThisRun = 0
+}
+
+function bumpNullToolRejections(): void {
+  _nullToolRejectionsThisRun += 1
+}
+
 /**
  * Stage 1 of plan 2026-05-16-server-hardening-and-error-source-distinction.md.
  *
@@ -437,6 +460,7 @@ export async function executeTool(
   // the agent sees the rejection in its next turn instead of the
   // server crashing on a NOT NULL constraint.
   if (!isKnownTool(tool)) {
+    bumpNullToolRejections()
     const toolRaw = tool as unknown
     console.warn(`[executor] BLOCKED unknown tool: "${String(toolRaw)}" — synthesising validation failure`)
     const safeName = typeof toolRaw === "string" && toolRaw.length > 0 ? toolRaw : "(invalid)"
@@ -502,6 +526,7 @@ export async function executeToolsBatch(
     if (isKnownTool(tc.tool)) {
       knownTools.push(tc)
     } else {
+      bumpNullToolRejections()
       const tcToolRaw = tc.tool as unknown
       const display = typeof tcToolRaw === "string" && tcToolRaw.length > 0 ? tcToolRaw : "(invalid)"
       console.warn(`[executor] BLOCKED unknown tool in batch: "${display}" (id: ${tc.id}) — synthesising validation failure`)
