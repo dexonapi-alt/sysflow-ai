@@ -146,3 +146,87 @@ export function groupForParallelExecution(tools: ToolCallEntry[]): ToolCallEntry
 
   return [...standalone, ...byPath.values()]
 }
+
+// ─── Stage 1 of accountability-and-parallel-execution-sequencing plan ───
+//
+// Parallel batch cap. The agent's `tools[]` can carry N parallel calls
+// in one response (we've seen 11 in user-reported repros). Without a
+// cap, the cli's executor fires all N at once and ships one combined
+// tool_result — the agent never reasons between batches, never reads
+// back what it wrote, and can author `src/index.ts` (consumer) in the
+// SAME turn as `src/routes/auth.ts` (producer), leaving the import
+// sanitizer to silently strip the unresolved reference.
+//
+// Stage 1 enforces a per-turn cap. When the agent emits more than `cap`
+// tools, the cli executes the first `cap` AND defers the rest with a
+// synthetic `batch_cap_enforced` failure result so the agent's next
+// turn sees the deferral + the prior batch's outcomes + can reason
+// before re-emitting.
+
+export type RepoState = "empty" | "small" | "existing-small" | "existing-large" | null
+
+/**
+ * Default cap. Empty / small / existing-small repos cap at 3 — the
+ * common case for fresh scaffolds where ordering + per-file
+ * accountability matter most. existing-large gets a relaxed cap
+ * because edits across a known codebase are more likely to be wide
+ * and the agent's existing context is richer.
+ *
+ * Kept as constants (not flags) for v1 — flag plumbing is a separate
+ * micro-PR if telemetry shows we need tuning.
+ */
+export const BATCH_CAP_DEFAULT = 3
+export const BATCH_CAP_EXISTING_LARGE = 5
+
+/**
+ * Resolve the cap for this run based on the project-init brief's
+ * classified `repoState`. Falls back to `BATCH_CAP_DEFAULT` when the
+ * classifier didn't fire (null) or for the smaller-repo states.
+ */
+export function resolveBatchCap(repoState: RepoState): number {
+  if (repoState === "existing-large") return BATCH_CAP_EXISTING_LARGE
+  return BATCH_CAP_DEFAULT
+}
+
+export interface BatchCapSplit {
+  /** First `cap` tools — to be executed this turn. */
+  executed: ToolCallEntry[]
+  /** Tools beyond `cap` — synthesise deferral results, agent re-emits next turn. */
+  deferred: ToolCallEntry[]
+}
+
+/**
+ * Pure: split a batch into the executed prefix + deferred suffix.
+ * When `tools.length <= cap` (or cap <= 0), returns the whole batch
+ * as `executed` with an empty `deferred`.
+ */
+export function applyBatchCap(tools: ReadonlyArray<ToolCallEntry>, cap: number): BatchCapSplit {
+  if (cap <= 0 || tools.length <= cap) {
+    return { executed: [...tools], deferred: [] }
+  }
+  return { executed: tools.slice(0, cap), deferred: tools.slice(cap) }
+}
+
+/**
+ * Build the synthetic failure result the cli attaches for each
+ * deferred tool. The agent sees this in its next tool_result payload
+ * alongside the executed tools' real results and can decide whether
+ * to re-issue the deferred tools, revise the plan, or stop.
+ *
+ * The `_errorCategory: "batch_cap_enforced"` lets the server's
+ * existing error-classification path treat this as a recovery
+ * situation (forced-error-reasoning Stage 3) rather than a hard
+ * failure.
+ */
+export function buildBatchCapDeferralResult(
+  toolName: string,
+  batchSize: number,
+  cap: number,
+): Record<string, unknown> {
+  return {
+    error: `Batch cap enforced: this turn carried ${batchSize} tool calls but the cap is ${cap}. The first ${cap} tools were executed; this tool (${toolName}) was DEFERRED so you can reason about the prior batch's outcomes before re-issuing. READ the executed tools' results carefully, then RE-EMIT the deferred tools in your next response if you still want them — or revise the plan if the results warrant.`,
+    success: false,
+    _errorCategory: "batch_cap_enforced",
+    _deferred: true,
+  }
+}
