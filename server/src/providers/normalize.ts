@@ -123,7 +123,11 @@ export function mapNormalizedResponseToClient(runId: string, normalized: Normali
         status: "failed",
         runId,
         error: normalized.error,
-        errorCode: classifyFailureErrorCode(normalized.error)
+        errorCode: classifyFailureErrorCode(normalized.error),
+        // Stage 2 of server-hardening plan: propagate the source
+        // discriminator. Default "unknown" preserves legacy semantics
+        // for any failed envelope that didn't tag.
+        errorSource: normalized.errorSource ?? "unknown",
       }
 
     case "rate_limited":

@@ -149,17 +149,25 @@ export class OpenRouterProvider extends BaseProvider {
 
         this.clearRunState(payload.runId)
 
+        // Stage 2 of server-hardening plan: tag sysflow-infra errors
+        // so the cli halts cleanly + the recovery chain doesn't try
+        // to "fix" them by mutating the user's project.
         if (status === 401 || status === 403) {
-          return this.failedResponse(`OpenRouter auth error (${status}). Check your OPENROUTER_API_KEY.`)
+          return this.failedResponse(`OpenRouter auth error (${status}). Check your OPENROUTER_API_KEY.`, "sysflow_infra")
         }
         if (status === 402) {
           return this.failedResponse(
             `OpenRouter is out of credits and even the lowest affordable max_tokens would be too small to be useful. ` +
             `Top up at https://openrouter.ai/settings/credits, switch model with /model gemini-flash, ` +
-            `or set GEMINI_API_KEY in server/.env (free tier from Google AI Studio). Original error: ${errBody.slice(0, 200)}`
+            `or set GEMINI_API_KEY in server/.env (free tier from Google AI Studio). Original error: ${errBody.slice(0, 200)}`,
+            "sysflow_infra"
           )
         }
-        return this.failedResponse(`OpenRouter error ${status}: ${errBody.slice(0, 300)}`)
+        // 5xx from OpenRouter is also their infrastructure; 4xx (other than
+        // auth/quota) often points at our request shape — tag as unknown
+        // for the legacy retry path to handle.
+        const source = status >= 500 ? "sysflow_infra" : "unknown"
+        return this.failedResponse(`OpenRouter error ${status}: ${errBody.slice(0, 300)}`, source)
       }
 
       const data = await response.json() as {
@@ -197,10 +205,10 @@ export class OpenRouterProvider extends BaseProvider {
       console.error("[openrouter] Error:", errMsg)
 
       if (errMsg.includes("OPENROUTER_API_KEY")) {
-        return this.failedResponse("OPENROUTER_API_KEY is not set in .env")
+        return this.failedResponse("OPENROUTER_API_KEY is not set in .env", "sysflow_infra")
       }
 
-      return this.failedResponse(`OpenRouter error: ${errMsg}`)
+      return this.failedResponse(`OpenRouter error: ${errMsg}`, "unknown")
     }
   }
 }
