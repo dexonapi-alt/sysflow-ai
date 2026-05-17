@@ -3,6 +3,7 @@ import path from "node:path"
 import { getRun, finalizeRun } from "../store/runs.js"
 import { getTask, finalizeTask } from "../store/tasks.js"
 import { saveToolResult } from "../store/tool-results.js"
+import { collectStrippedImports, buildImportStrippedInject } from "../services/import-stripped-inject.js"
 import { persistModelUsage } from "../store/usage.js"
 import { maybeUpdateProjectMemory } from "../store/memory.js"
 import { recordRunAction, saveSessionEntry, getRunActions, clearRunActions } from "../store/sessions.js"
@@ -197,6 +198,23 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
       body.result._persistedSize = archive.originalSize
     }
     await saveToolResult(body.runId, body.tool, body.result)
+  }
+
+  // Stage 2 of plan 2026-05-16-agent-code-correctness-and-completion-artifacts.md:
+  // surface import-sanitizer strips as a LOUD inject to the agent's
+  // next turn. Previously the cli stripped silently — agent wrote a
+  // file referencing names whose imports were gone, never knew, hit
+  // ReferenceError at runtime later. Now: per-file strips collected
+  // from each tool result, single inject block listing them with
+  // recovery instructions. One-shot (consumed on next adapter call).
+  const strippedResults = isBatch
+    ? body.toolResults!.map((tr) => ({ tool: tr.tool, result: tr.result }))
+    : [{ tool: body.tool, result: body.result }]
+  const stripped = collectStrippedImports(strippedResults)
+  if (stripped.length > 0) {
+    const totalCount = stripped.reduce((sum, s) => sum + s.imports.length, 0)
+    actionPlanner.injectContext(body.runId, buildImportStrippedInject(stripped))
+    console.log(`[import-sanitizer-inject] ${totalCount} stripped import(s) across ${stripped.length} file(s) — injected loud feedback for next turn`)
   }
 
   let run: Awaited<ReturnType<typeof getRun>>
