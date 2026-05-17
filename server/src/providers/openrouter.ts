@@ -115,8 +115,21 @@ export class OpenRouterProvider extends BaseProvider {
           // through a small agent turn that doesn't actually need 16k+.
           if (response.status === 402 && attempt < MAX_RETRIES) {
             const errBody = await response.clone().text()
+            // Stage 4 of server-hardening plan: classify the 402
+            // BEFORE attempting a retry. Skip retry entirely when
+            // either (a) the body explicitly says credits are
+            // exhausted with no affordable number, or (b) the
+            // parsed affordable is below MEANINGFUL_AFFORDABLE_THRESHOLD
+            // (4096) — too small for any practical response even after
+            // the 90% safety margin. Falls through to the failure
+            // handler below which tags as sysflow_infra (Stage 2).
+            const terminal = classify402Terminal(errBody)
+            if (terminal) {
+              console.warn(`[openrouter] 402 terminal (${terminal}) — skipping affordability retry; failing fast`)
+              break
+            }
             const affordable = parseAffordableTokens(errBody)
-            if (affordable && affordable > 512) {
+            if (affordable && affordable >= MEANINGFUL_AFFORDABLE_THRESHOLD) {
               const next = Math.floor(affordable * 0.9)
               console.warn(`[openrouter] 402 affordability — lowering max_tokens ${maxTokensCap} → ${next} and retrying`)
               maxTokensCap = next
@@ -224,4 +237,36 @@ export function parseAffordableTokens(errBody: string): number | null {
   if (!m) return null
   const n = parseInt(m[1], 10)
   return Number.isFinite(n) && n > 0 ? n : null
+}
+
+/**
+ * Stage 4 of plan 2026-05-16-server-hardening-and-error-source-distinction.md.
+ *
+ * Detect non-recoverable OpenRouter 402 patterns. Returns the matched
+ * label or null when the legacy affordability-retry path can fire.
+ *
+ *   - "insufficient_credits" — the body says credits are exhausted
+ *     without an affordable number. No retry will succeed.
+ *   - "below_meaningful_threshold" — the affordable number IS present
+ *     but too small for any practical request (< 4096 tokens — won't
+ *     hold a meaningful response even after the 90% safety margin).
+ *   - null — affordable number is high enough that lowering max_tokens
+ *     is genuinely worth retrying.
+ *
+ * Pure; exported for tests.
+ */
+export const MEANINGFUL_AFFORDABLE_THRESHOLD = 4096
+
+export function classify402Terminal(errBody: string): "insufficient_credits" | "below_meaningful_threshold" | null {
+  if (!errBody || typeof errBody !== "string") return null
+  // Explicit credit-exhaustion patterns OpenRouter uses.
+  if (/insufficient\s+credits/i.test(errBody)) return "insufficient_credits"
+  if (/you\s+have\s+used\s+all\s+your\s+credits/i.test(errBody)) return "insufficient_credits"
+  // Parsed affordable too small to be useful — even at 90% safety
+  // margin the resulting max_tokens won't hold a meaningful response.
+  const affordable = parseAffordableTokens(errBody)
+  if (affordable !== null && affordable < MEANINGFUL_AFFORDABLE_THRESHOLD) {
+    return "below_meaningful_threshold"
+  }
+  return null
 }
