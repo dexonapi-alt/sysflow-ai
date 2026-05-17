@@ -230,3 +230,338 @@ export function buildBatchCapDeferralResult(
     _deferred: true,
   }
 }
+
+// ─── Stage 2 of accountability-and-parallel-execution-sequencing plan ───
+//
+// Producer-before-consumer topological ordering inside a batch.
+//
+// THE BUG (user repro continued):
+//
+//   write_file("src/index.ts", `import { auth } from './routes/auth'`)
+//   write_file("src/routes/auth.ts", `export async function auth() {...}`)
+//
+//   When both fire in the same parallel batch, the cli's
+//   `groupForParallelExecution` puts each different path in its own
+//   group, and `Promise.allSettled` runs all groups in parallel.
+//   If index.ts's write completes (and the import-sanitizer runs)
+//   BEFORE routes/auth.ts has been written to disk, the sanitizer
+//   sees the unresolved `./routes/auth` reference and silently
+//   strips the import — leaving index.ts with a broken file.
+//
+// THE FIX:
+//
+//   1. Extract relative imports (`./X`, `../X`) from every
+//      write_file in the batch.
+//   2. Resolve each import against the batch's other write paths
+//      (with common extension expansions: .ts/.tsx/.js/.jsx/.mjs/.cjs,
+//      directory `/index.ts`, etc.).
+//   3. Build a dependency graph (consumer → producers).
+//   4. Topo-sort with Kahn's algorithm. Cycle → reject the involved
+//      writes with a synthetic failure; the agent has to break the
+//      cycle (extract a shared interface, etc.).
+//   5. Collapse the topo-ordered writes into ONE serial group so
+//      they run sequentially (producer lands on disk before
+//      consumer is dispatched). Non-write tools (create_directory,
+//      etc.) keep their parallel grouping.
+
+/**
+ * Pure: scan TypeScript / JavaScript source for relative import
+ * specifiers. Matches both `import` and `export ... from` forms.
+ * Returns the raw specifier strings (e.g. `"./routes/auth"`,
+ * `"../db"`). Non-relative imports (`"react"`, `"@scope/pkg"`) are
+ * filtered out — those aren't files we're authoring this batch.
+ *
+ * The regex tolerates side-effect imports (`import "./styles"`),
+ * default imports, named imports, namespace imports, and
+ * re-exports. It does NOT handle dynamic `import(...)` —
+ * conservative-by-design; if the agent writes a dynamic import to a
+ * batch sibling, we won't reorder for it (rare, low impact).
+ */
+const IMPORT_SPECIFIER_RE = /(?:import|export)\s+(?:[^'"\n]*?from\s+)?['"]([^'"\n]+)['"]/g
+
+export function extractRelativeImports(content: string): string[] {
+  if (!content) return []
+  const out: string[] = []
+  let m: RegExpExecArray | null
+  // Reset lastIndex defensively in case the regex literal is reused.
+  IMPORT_SPECIFIER_RE.lastIndex = 0
+  while ((m = IMPORT_SPECIFIER_RE.exec(content)) !== null) {
+    const spec = m[1]
+    if (spec.startsWith("./") || spec.startsWith("../")) {
+      out.push(spec)
+    }
+  }
+  return out
+}
+
+/**
+ * Pure: resolve a relative import specifier against a from-file's
+ * path. Strips `./` segments, walks `../`, returns the normalized
+ * path WITHOUT extension. The caller matches against batch paths
+ * via `findBatchMatchForImport` which expands extensions.
+ *
+ * Example:
+ *   resolveRelativeImport("src/index.ts", "./routes/auth")
+ *     → "src/routes/auth"
+ *   resolveRelativeImport("src/lib/db.ts", "../config")
+ *     → "src/config"
+ */
+export function resolveRelativeImport(fromFile: string, specifier: string): string {
+  const lastSlash = fromFile.lastIndexOf("/")
+  const fromDir = lastSlash >= 0 ? fromFile.slice(0, lastSlash) : ""
+  const joined = (fromDir ? fromDir + "/" : "") + specifier
+  const parts = joined.split("/").filter((p) => p !== "" && p !== ".")
+  const stack: string[] = []
+  for (const p of parts) {
+    if (p === "..") {
+      if (stack.length > 0) stack.pop()
+    } else {
+      stack.push(p)
+    }
+  }
+  return stack.join("/")
+}
+
+/**
+ * Common extensions to try when matching an extensionless resolved
+ * specifier against a batch path. Order reflects typical priority
+ * (TypeScript projects use .ts more than .mjs).
+ */
+const COMMON_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]
+const COMMON_INDEX_PATHS = COMMON_EXTENSIONS.map((ext) => "/index" + ext)
+
+/**
+ * Pure: find a matching batch path for a resolved import specifier.
+ *
+ * Tries exact match first (in case the specifier already has an
+ * extension, e.g. ".env.example"). Then tries each common
+ * extension, then each directory-index variant. Returns the first
+ * matching batch path, or null.
+ *
+ * Case-sensitive — file systems vary but POSIX is the norm we
+ * target; matching case-insensitively could over-resolve on mac/win.
+ */
+export function findBatchMatchForImport(
+  resolvedNoExt: string,
+  batchPaths: ReadonlyArray<string>,
+): string | null {
+  const set = new Set(batchPaths)
+  if (set.has(resolvedNoExt)) return resolvedNoExt
+  for (const ext of COMMON_EXTENSIONS) {
+    const candidate = resolvedNoExt + ext
+    if (set.has(candidate)) return candidate
+  }
+  for (const idx of COMMON_INDEX_PATHS) {
+    const candidate = resolvedNoExt + idx
+    if (set.has(candidate)) return candidate
+  }
+  return null
+}
+
+export interface TopoOrderResult {
+  /**
+   * Groups for the executor's parallel loop. Dependent write_files
+   * are collapsed into ONE serial group (in topo order); non-write
+   * tools + non-dependent writes each get their own group as
+   * `groupForParallelExecution` would have produced.
+   */
+  groups: ToolCallEntry[][]
+  /**
+   * When non-null, list of paths in a detected import cycle. The
+   * `groups` returned EXCLUDES the cycle members so the executor
+   * can synthesise failure results for them separately.
+   */
+  cycle: string[] | null
+  /** True if topo-ordering rearranged any tools (i.e. edges existed). */
+  reordered: boolean
+}
+
+/**
+ * Pure: analyse + topo-order a parallel batch's write_file tools.
+ *
+ * Algorithm:
+ *   1. Pull write_file tools that carry both `path` + `content`.
+ *   2. Build consumer→producer edges via relative-import resolution.
+ *   3. If a cycle is detected → return `cycle` populated; the
+ *      executor synthesises failures for the cycle members and
+ *      excludes them from execution.
+ *   4. If no edges → return the default `groupForParallelExecution`
+ *      layout (no work to do).
+ *   5. Otherwise → Kahn's topo sort the writes. Build groups:
+ *        - One serial group containing every dependent write in
+ *          topo order (producers first).
+ *        - One group per non-write tool / non-dependent tool.
+ *
+ * This guarantees that when a consumer write is dispatched, every
+ * producer it relative-imports has already landed on disk — closing
+ * the import-sanitizer-strips-the-reference bug.
+ */
+export function topoOrderParallelWrites(tools: ToolCallEntry[]): TopoOrderResult {
+  const writes: Array<{ tc: ToolCallEntry; path: string; content: string }> = []
+  for (const t of tools) {
+    if (t.tool !== "write_file") continue
+    const p = t.args.path
+    const c = t.args.content
+    if (typeof p === "string" && typeof c === "string") {
+      writes.push({ tc: t, path: p, content: c })
+    }
+  }
+
+  if (writes.length < 2) {
+    return { groups: groupForParallelExecution(tools), cycle: null, reordered: false }
+  }
+
+  const writePaths = writes.map((w) => w.path)
+  const edges = new Map<string, Set<string>>()
+  const fwd = new Map<string, Set<string>>()
+  let hasEdges = false
+
+  for (const w of writes) {
+    const imports = extractRelativeImports(w.content)
+    for (const spec of imports) {
+      const resolved = resolveRelativeImport(w.path, spec)
+      const matched = findBatchMatchForImport(resolved, writePaths)
+      if (matched && matched !== w.path) {
+        let s = edges.get(w.path)
+        if (!s) {
+          s = new Set()
+          edges.set(w.path, s)
+        }
+        s.add(matched)
+        let f = fwd.get(matched)
+        if (!f) {
+          f = new Set()
+          fwd.set(matched, f)
+        }
+        f.add(w.path)
+        hasEdges = true
+      }
+    }
+  }
+
+  if (!hasEdges) {
+    return { groups: groupForParallelExecution(tools), cycle: null, reordered: false }
+  }
+
+  const cycle = detectCycleDfs(writePaths, edges)
+  if (cycle) {
+    const cycleSet = new Set(cycle)
+    const remainingTools = tools.filter(
+      (t) => !(t.tool === "write_file" && typeof t.args.path === "string" && cycleSet.has(t.args.path)),
+    )
+    return {
+      groups: groupForParallelExecution(remainingTools),
+      cycle,
+      reordered: false,
+    }
+  }
+
+  // Kahn's algorithm — producers first.
+  const indegree = new Map<string, number>()
+  for (const w of writes) indegree.set(w.path, 0)
+  for (const [consumer, producers] of edges) {
+    indegree.set(consumer, producers.size)
+  }
+  const ready: string[] = []
+  for (const [path, deg] of indegree) {
+    if (deg === 0) ready.push(path)
+  }
+  const ordered: string[] = []
+  while (ready.length > 0) {
+    const cur = ready.shift() as string
+    ordered.push(cur)
+    const dependents = fwd.get(cur)
+    if (dependents) {
+      for (const d of dependents) {
+        const next = (indegree.get(d) ?? 0) - 1
+        indegree.set(d, next)
+        if (next === 0) ready.push(d)
+      }
+    }
+  }
+
+  // Map ordered paths back to ToolCallEntry. The serial group is
+  // every write_file in topo order; non-write tools keep their own
+  // groups.
+  const byPath = new Map(writes.map((w) => [w.path, w.tc] as const))
+  const writeGroup = ordered.map((p) => byPath.get(p)).filter((tc): tc is ToolCallEntry => Boolean(tc))
+  const writePathSet = new Set(writePaths)
+  const nonWriteTools = tools.filter(
+    (t) => !(t.tool === "write_file" && typeof t.args.path === "string" && writePathSet.has(t.args.path)),
+  )
+  const groups = [...groupForParallelExecution(nonWriteTools), writeGroup]
+  return { groups, cycle: null, reordered: true }
+}
+
+/**
+ * Pure DFS cycle detector. Returns the cycle path (in traversal
+ * order, with the back-edge endpoint as the first AND last element)
+ * when a cycle is found, or null otherwise.
+ *
+ * Uses three-colour DFS: WHITE (unvisited) → GRAY (on stack) → BLACK
+ * (finished). A GRAY hit is the back-edge that proves a cycle.
+ */
+function detectCycleDfs(
+  paths: ReadonlyArray<string>,
+  edges: ReadonlyMap<string, ReadonlySet<string>>,
+): string[] | null {
+  const WHITE = 0
+  const GRAY = 1
+  const BLACK = 2
+  const color = new Map<string, number>()
+  for (const p of paths) color.set(p, WHITE)
+  const parent = new Map<string, string>()
+
+  function dfs(node: string): string[] | null {
+    color.set(node, GRAY)
+    const next = edges.get(node)
+    if (next) {
+      for (const n of next) {
+        const c = color.get(n)
+        if (c === GRAY) {
+          // Walk parent chain back to n to reconstruct the cycle.
+          const stack: string[] = [node]
+          let cur: string | undefined = node
+          while (cur !== undefined && cur !== n && parent.has(cur)) {
+            cur = parent.get(cur)
+            if (cur !== undefined) stack.push(cur)
+          }
+          stack.reverse()
+          stack.push(node)
+          return stack
+        }
+        if (c === WHITE) {
+          parent.set(n, node)
+          const r = dfs(n)
+          if (r) return r
+        }
+      }
+    }
+    color.set(node, BLACK)
+    return null
+  }
+
+  for (const p of paths) {
+    if (color.get(p) === WHITE) {
+      const r = dfs(p)
+      if (r) return r
+    }
+  }
+  return null
+}
+
+/**
+ * Synthetic failure result for a write_file rejected because of a
+ * detected import cycle within the batch. Tagged
+ * `_errorCategory: "import_cycle"` so the server's existing
+ * forced-error-reasoning path treats it as a recovery situation.
+ */
+export function buildImportCycleResult(filePath: string, cycle: ReadonlyArray<string>): Record<string, unknown> {
+  return {
+    error: `Import cycle detected within this batch: ${cycle.join(" → ")}\n\nThis file (${filePath}) is part of a relative-import cycle with its siblings, so the cli can't topologically order the batch. Break the cycle by extracting a shared interface to a new file, or by inverting one dependency direction. Then re-emit the batch.`,
+    success: false,
+    _errorCategory: "import_cycle",
+    path: filePath,
+    cycle: [...cycle],
+  }
+}
