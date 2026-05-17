@@ -34,7 +34,7 @@ import { renderReasoningBrief, renderDecisionBrief } from "../cli/reasoning-disp
 import { classifyResponse, makeRetryBudget, noteSuccess, type RetryBudget } from "./state-machine.js"
 import { recordRunSummary } from "./usage-log.js"
 import { getReasoningPeekExpansions, resetReasoningPeekExpansions } from "../ui/components/ReasoningPeek.js"
-import { getNullToolRejections, resetNullToolRejections, getImportsStrippedCount, resetImportsStrippedCount, getDotfileFilterCorrections, resetDotfileFilterCorrections } from "./executor.js"
+import { getNullToolRejections, resetNullToolRejections, getImportsStrippedCount, resetImportsStrippedCount, getDotfileFilterCorrections, resetDotfileFilterCorrections, getAlreadyCreatedRejectionCount, resetAlreadyCreatedRejectionCount, clearCreatedPaths } from "./executor.js"
 import { getWindowsShellErrorsCaught, resetWindowsShellErrorsCaught } from "./tools.js"
 import { getNonRetryable5xxCount, resetNonRetryable5xxCount } from "../lib/server.js"
 import { estimateTokens as cliEstimateTokens } from "./token-estimate.js"
@@ -701,6 +701,9 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
     // Stage 5 of awareness-and-verification-correctness plan.
     resetDotfileFilterCorrections()
     resetWindowsShellErrorsCaught()
+    // Stage 4 of accountability-and-parallel-execution-sequencing plan.
+    resetAlreadyCreatedRejectionCount()
+    if (currentRunId) clearCreatedPaths(currentRunId)
     unregisterSpinner()
   }
 
