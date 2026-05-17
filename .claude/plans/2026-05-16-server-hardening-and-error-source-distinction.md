@@ -1,7 +1,7 @@
 # Server hardening + error-source distinction
 
 - **Created:** 2026-05-16
-- **Status:** draft
+- **Status:** in-progress
 - **Scope:** Stop the sysflow server from leaking infrastructure errors into the agent's recovery flow as if they were user-app errors. Stop the DB from crashing on null tool names. Stop the cli from retrying non-recoverable errors. Closes the user-reported sequence where (a) the agent emitted a `▸ unknown {}` tool call, (b) the server crashed with a Postgres NOT NULL constraint violation, (c) the cli retried the 500 three times, then (d) an OpenRouter "out of credits" error caused the agent to attempt writing `server/.env` IN THE USER'S PROJECT DIRECTORY trying to fix sysflow's own backend.
 
 ## Goal

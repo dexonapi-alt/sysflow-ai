@@ -25,7 +25,7 @@ import {
 import { runVerification } from "./verifier.js"
 import { createSnapshot, cleanupSnapshot, rollback, getSnapshot, detectGit } from "./git.js"
 import { lintFile, lintFiles, displayLintErrors, resetTscCache } from "./lint.js"
-import { partitionToolCalls, getToolMeta, groupForParallelExecution } from "./tool-meta.js"
+import { partitionToolCalls, getToolMeta, groupForParallelExecution, KNOWN_TOOL_NAMES, isKnownTool } from "./tool-meta.js"
 import { validateToolInput } from "./validate-tool-input.js"
 import { checkPermissions, loadRules, saveRule, lookupAnswer, rememberAnswer, primaryPath, type Rule } from "./permissions.js"
 import { getSysbasePath, getPermissionMode, getSafeCommandsAutoApprove } from "../lib/sysbase.js"
@@ -385,18 +385,42 @@ async function dispatch(tool: string, args: Record<string, unknown>, runId?: str
     }
 
     default: {
-      const KNOWN_TOOLS = [
-        "list_directory", "read_file", "batch_read", "write_file",
-        "edit_file", "create_directory", "search_code", "search_files",
-        "run_command", "move_file", "delete_file", "web_search",
-        "file_exists", "batch_write"
-      ]
+      // Stage 1 of server-hardening plan: use the canonical
+      // KNOWN_TOOL_NAMES set from tool-meta.ts so this list stays
+      // in sync with the registry automatically.
+      const validList = Array.from(KNOWN_TOOL_NAMES).join(", ")
       return {
-        error: `Unknown tool: "${tool}". This tool does not exist. Valid tools are: ${KNOWN_TOOLS.join(", ")}. Use one of these instead.`,
+        error: `Unknown tool: "${tool}". This tool does not exist. Valid tools are: ${validList}. Use one of these instead.`,
         success: false,
-        rejectedTool: tool
+        _errorCategory: "unknown_tool",
+        rejectedTool: tool,
       }
     }
+  }
+}
+
+/**
+ * Stage 1 of plan 2026-05-16-server-hardening-and-error-source-distinction.md.
+ *
+ * Pre-dispatch gate: rejects tool calls with null / empty / unknown
+ * names BEFORE they reach the server, so the server's persist path
+ * never sees a row with a null `tool` column. The DB schema enforces
+ * `tool TEXT NOT NULL` — without this gate the executor would dispatch
+ * `▸ unknown {}`, the server would crash with a Postgres constraint
+ * violation, and the cli would surface a raw 500 to the user.
+ *
+ * Returns a synthetic `validation_failure` result the cli can return
+ * to the agent so the next turn surfaces the issue + lets the model
+ * pick a real tool name.
+ */
+export function buildUnknownToolFailure(toolName: unknown): Record<string, unknown> {
+  const validList = Array.from(KNOWN_TOOL_NAMES).slice(0, 16).join(", ")
+  const displayName = typeof toolName === "string" && toolName.length > 0 ? toolName : "(null/empty)"
+  return {
+    success: false,
+    error: `⛔ INVALID TOOL: "${displayName}" is not a known tool. Valid tools: ${validList}, .... Pick one of these and retry. Do NOT invent tool names — they crash the server-side persist path.`,
+    _errorCategory: "unknown_tool",
+    rejectedTool: displayName,
   }
 }
 
@@ -407,6 +431,27 @@ export async function executeTool(
   onPhase?: (label: string) => void
 ): Promise<Record<string, unknown>> {
   const { tool, args, runId } = response
+
+  // Stage 1 of server-hardening plan: reject unknown / null / empty
+  // tool names BEFORE dispatch. Returns the failure synthetically so
+  // the agent sees the rejection in its next turn instead of the
+  // server crashing on a NOT NULL constraint.
+  if (!isKnownTool(tool)) {
+    const toolRaw = tool as unknown
+    console.warn(`[executor] BLOCKED unknown tool: "${String(toolRaw)}" — synthesising validation failure`)
+    const safeName = typeof toolRaw === "string" && toolRaw.length > 0 ? toolRaw : "(invalid)"
+    const result = buildUnknownToolFailure(toolRaw)
+    const payload = { type: "tool_result", runId, tool: safeName, result }
+    let serverResponse: Record<string, unknown>
+    try {
+      serverResponse = await callServerStream(payload, onPhase)
+    } catch {
+      serverResponse = await callServer(payload)
+    }
+    serverResponse.lastToolResult = result
+    return serverResponse
+  }
+
   const result = await executeToolLocally(tool, args, runId)
   const payload = { type: "tool_result", runId, tool, result }
 
@@ -445,6 +490,41 @@ export async function executeToolsBatch(
   runId: string,
   onPhase?: (label: string) => void
 ): Promise<Record<string, unknown>> {
+  // Stage 1 of server-hardening plan: partition the batch into known
+  // and unknown tools. Unknown tools (null / empty / hallucinated
+  // names) get synthetic validation_failure results without ever
+  // touching the local executor or the server. Closes the bug where
+  // the agent emitted ▸ unknown {}, the cli dispatched it, and the
+  // server crashed with a Postgres NOT NULL constraint on `tool`.
+  const knownTools: ToolCallEntry[] = []
+  const rejectedResults: Array<{ id: string; tool: string; result: Record<string, unknown> }> = []
+  for (const tc of tools) {
+    if (isKnownTool(tc.tool)) {
+      knownTools.push(tc)
+    } else {
+      const tcToolRaw = tc.tool as unknown
+      const display = typeof tcToolRaw === "string" && tcToolRaw.length > 0 ? tcToolRaw : "(invalid)"
+      console.warn(`[executor] BLOCKED unknown tool in batch: "${display}" (id: ${tc.id}) — synthesising validation failure`)
+      rejectedResults.push({ id: tc.id, tool: display, result: buildUnknownToolFailure(tcToolRaw) })
+    }
+  }
+  if (rejectedResults.length > 0 && knownTools.length === 0) {
+    // All tools rejected — send only the synthesised failures so the
+    // agent's next turn sees the rejections + can retry with valid
+    // tool names. Skips git snapshot + permission flow entirely.
+    const payload = {
+      type: "tool_result",
+      runId,
+      tool: rejectedResults[0].tool,
+      result: rejectedResults[0].result,
+      toolResults: rejectedResults,
+    }
+    try { return await callServerStream(payload, onPhase) } catch { return callServer(payload) }
+  }
+  // Mixed batch: continue with the known tools; rejected results merge
+  // into allResults at the end so the server sees the full picture.
+  tools = knownTools
+
   // Split via tool-meta: concurrency-safe tools run in parallel; everything
   // else runs sequentially (preserving submission order). Sibling abort lives
   // in the serial loop — if a tool with abortsSiblingsOnError fails, the
@@ -765,12 +845,17 @@ export async function executeToolsBatch(
     refreshedTree = await captureTopLevelTree(process.cwd())
   }
 
+  // Stage 1 of server-hardening plan: merge any rejected (unknown-tool)
+  // synthetic results into the batch's allResults so the server's
+  // tool_result handler sees the full picture — including which tools
+  // were rejected so the agent gets feedback on its next turn.
+  const mergedResults = [...allResults, ...rejectedResults]
   const payload = {
     type: "tool_result",
     runId,
-    tool: tools[0].tool,      // backwards compat
-    result: allResults[0]?.result || {},
-    toolResults: allResults,
+    tool: mergedResults[0]?.tool || tools[0].tool,      // backwards compat
+    result: mergedResults[0]?.result || {},
+    toolResults: mergedResults,
     directoryTree: refreshedTree,
   }
 

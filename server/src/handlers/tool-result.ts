@@ -127,6 +127,39 @@ interface ToolResultBody {
 export async function handleToolResult(body: ToolResultBody): Promise<ClientResponse> {
   const isBatch = body.toolResults && body.toolResults.length > 0
 
+  // Stage 1 of plan 2026-05-16-server-hardening-and-error-source-distinction.md:
+  // reject payloads with null / empty tool names BEFORE the persist path.
+  // The DB schema enforces tool NOT NULL (migration 011); without this
+  // gate a null tool causes a Postgres constraint-violation 500 that
+  // surfaces as a raw error to the user. The cli's `isKnownTool` gate
+  // (executor.ts) catches these client-side, but this guard is
+  // belt-and-suspenders for any direct API call / test / external
+  // integration that might bypass the cli.
+  if (isBatch) {
+    const hasInvalid = body.toolResults!.some((tr) => typeof tr.tool !== "string" || tr.tool.length === 0)
+    if (hasInvalid && body.toolResults!.every((tr) => typeof tr.tool !== "string" || tr.tool.length === 0)) {
+      // ALL tools invalid — reject the whole batch.
+      console.warn(`[tool-result] BLOCKED batch payload — all tool names null/empty (runId=${body.runId})`)
+      return {
+        status: "failed",
+        runId: body.runId,
+        error: "Tool name required on every tool result. Got null/empty.",
+        errorCode: "malformed_response",
+      } as ClientResponse
+    }
+    // Mixed: continue, but the saveToolResult guard will skip the null rows.
+  } else {
+    if (typeof body.tool !== "string" || body.tool.length === 0) {
+      console.warn(`[tool-result] BLOCKED single payload — null/empty tool name (runId=${body.runId})`)
+      return {
+        status: "failed",
+        runId: body.runId,
+        error: "Tool name required. Got null/empty.",
+        errorCode: "malformed_response",
+      } as ClientResponse
+    }
+  }
+
   // We need the run's sysbasePath for archival — fetch it ahead of save.
   let sysbasePath: string | undefined
   try {

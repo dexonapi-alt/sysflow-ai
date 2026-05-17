@@ -9,8 +9,21 @@ interface ToolResultRecord {
 /**
  * Save a tool result to the database.
  * Stores a COMPRESSED version — strips raw file content to keep DB lean.
+ *
+ * Stage 1 of plan 2026-05-16-server-hardening-and-error-source-distinction.md:
+ * defensively rejects null/empty `tool` BEFORE hitting the DB. The
+ * `tool` column has a NOT NULL constraint (migration 011); without
+ * this guard a null tool causes a Postgres constraint-violation 500
+ * that the cli surfaces as a raw error to the user. The cli's
+ * `isKnownTool` gate (executor.ts) should catch these before they
+ * reach here, but the guard is belt-and-suspenders for any future
+ * code path that might bypass the cli (direct API calls, tests, etc).
  */
 export async function saveToolResult(runId: string, tool: string, result: Record<string, unknown>): Promise<void> {
+  if (typeof tool !== "string" || tool.length === 0) {
+    console.warn(`[tool-results] refused to persist row with null/empty tool name (runId=${runId})`)
+    return
+  }
   const compressed = compressToolResult(tool, result)
   await query(
     `INSERT INTO tool_results (run_id, tool, result) VALUES ($1, $2, $3)`,
