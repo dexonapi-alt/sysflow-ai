@@ -144,16 +144,19 @@ export class AnthropicProvider extends BaseProvider {
 
         this.clearRunState(payload.runId)
 
+        // Stage 2 of server-hardening plan: tag sysflow-infra errors.
         if (status === 401 || status === 403) {
-          return this.failedResponse(`Anthropic auth error (${status}). Check your ANTHROPIC_API_KEY.`)
+          return this.failedResponse(`Anthropic auth error (${status}). Check your ANTHROPIC_API_KEY.`, "sysflow_infra")
         }
         if (status === 400 && errBody.includes("max_tokens")) {
           return this.failedResponse(
             `Anthropic rejected the request: ${errBody.slice(0, 240)}. ` +
             `Try reducing the prompt size — Sonnet/Opus have a 200k context window but max_tokens output is capped at 8192.`,
+            "unknown"
           )
         }
-        return this.failedResponse(`Anthropic error ${status}: ${errBody.slice(0, 300)}`)
+        const source = status >= 500 ? "sysflow_infra" : "unknown"
+        return this.failedResponse(`Anthropic error ${status}: ${errBody.slice(0, 300)}`, source)
       }
 
       const data = await response.json() as {
@@ -200,10 +203,10 @@ export class AnthropicProvider extends BaseProvider {
       console.error("[anthropic] Error:", errMsg)
 
       if (errMsg.includes("ANTHROPIC_API_KEY")) {
-        return this.failedResponse("ANTHROPIC_API_KEY is not set in .env")
+        return this.failedResponse("ANTHROPIC_API_KEY is not set in .env", "sysflow_infra")
       }
 
-      return this.failedResponse(`Anthropic error: ${errMsg}`)
+      return this.failedResponse(`Anthropic error: ${errMsg}`, "unknown")
     }
   }
 }

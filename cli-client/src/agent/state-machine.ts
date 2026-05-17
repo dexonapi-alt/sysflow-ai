@@ -18,6 +18,12 @@ export type TerminalReason =
   | "prompt_too_long"
   | "malformed_response_exhausted"
   | "user_cancelled"
+  // Stage 2 of plan 2026-05-16-server-hardening-and-error-source-distinction.md:
+  // sysflow's own infrastructure failed (API quota exhausted, auth
+  // misconfigured, server-side bug). User action required (top up,
+  // /model swap, set env var). Non-recoverable from inside the agent
+  // loop — halting with a banner instead of retry-loop.
+  | "sysflow_infra"
 
 export type ContinueReason =
   | "next_turn"
@@ -63,6 +69,13 @@ export function classifyResponse(response: ServerResponse): Transition {
     case "failed": {
       const code = (response.errorCode as string) || ""
       const msg = (response.error || "").toLowerCase()
+      // Stage 2 of server-hardening plan: sysflow_infra errors are
+      // non-recoverable — auth / quota / sysflow-server-bug. Retrying
+      // would burn budget against the same root cause. Halt cleanly.
+      const errorSource = response.errorSource as string | undefined
+      if (errorSource === "sysflow_infra") {
+        return { terminal: true, reason: "sysflow_infra" }
+      }
       if (code === "session_expired" || msg.includes("session expired") || msg.includes("run not found")) {
         return { terminal: true, reason: "session_expired" }
       }

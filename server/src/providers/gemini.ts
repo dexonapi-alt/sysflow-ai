@@ -396,9 +396,10 @@ export class GeminiProvider extends BaseProvider {
       const errStatus = error.status || error.httpStatusCode || 0
       console.error("[gemini] Error:", errStatus, errMsg)
 
+      // Stage 2 of server-hardening plan: tag sysflow-infra errors.
       if (errMsg.includes("API key") || errMsg.includes("API_KEY_INVALID")) {
         this.clearRunState(payload.runId)
-        return this.failedResponse("Invalid GEMINI_API_KEY. Check your .env file.")
+        return this.failedResponse("Invalid GEMINI_API_KEY. Check your .env file.", "sysflow_infra")
       }
 
       // Rate limit — DON'T clear run state, signal for retry/fallback
@@ -407,7 +408,8 @@ export class GeminiProvider extends BaseProvider {
       }
 
       this.clearRunState(payload.runId)
-      return this.failedResponse(`Gemini error: ${errMsg}`)
+      const source = errStatus >= 500 ? "sysflow_infra" : "unknown"
+      return this.failedResponse(`Gemini error: ${errMsg}`, source)
     }
   }
 }

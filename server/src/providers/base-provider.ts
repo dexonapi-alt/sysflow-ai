@@ -1224,10 +1224,19 @@ export abstract class BaseProvider {
     return normalized
   }
 
-  failedResponse(error: string): NormalizedResponse {
+  /**
+   * Stage 2 of plan 2026-05-16-server-hardening-and-error-source-distinction.md:
+   * `errorSource` discriminator threaded through. Providers should pass
+   * `"sysflow_infra"` for their own API quota / auth / connection
+   * failures so the cli's error-reasoning chain doesn't try to "fix"
+   * them by mutating the user's project. Default `"unknown"` preserves
+   * legacy behaviour for any path that hasn't been updated yet.
+   */
+  failedResponse(error: string, errorSource: "sysflow_infra" | "user_machine" | "unknown" = "unknown"): NormalizedResponse {
     return {
       kind: "failed",
       error,
+      errorSource,
       usage: { inputTokens: 0, outputTokens: 0 }
     }
   }

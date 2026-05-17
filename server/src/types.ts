@@ -151,6 +151,30 @@ export interface NormalizedResponse {
    * nothing meaningful to deliberate about.
    */
   reasoningChain?: string[]
+  /**
+   * Stage 2 of plan 2026-05-16-server-hardening-and-error-source-distinction.md.
+   *
+   * Discriminator for where the error originated. Threaded from
+   * provider failure paths through to `ClientResponse` so the cli
+   * and the agent can distinguish:
+   *
+   *   - "sysflow_infra" — sysflow's own backend / API quota / auth /
+   *     DB connection failed. The user can't fix this from inside
+   *     their project — they must top up credits, switch models with
+   *     /model, set an env var, etc. The agent's error-reasoning
+   *     chain should NOT fire (recovery is impossible); the cli
+   *     surfaces a clear banner and halts the run.
+   *
+   *   - "user_machine" — tool execution failed on the user's machine
+   *     (file not found, permission denied, command not in PATH,
+   *     network unreachable from the user's box). The agent's
+   *     recovery chain SHOULD fire — these are the errors the
+   *     existing forced-error-reasoning plan was built for.
+   *
+   *   - "unknown" / undefined — fallback. Treated as user_machine
+   *     for the recovery path. Legacy code paths get this default.
+   */
+  errorSource?: "sysflow_infra" | "user_machine" | "unknown"
 }
 
 // ─── Task ───
@@ -336,6 +360,19 @@ export interface ClientResponse {
    * Cli accumulates per-run counts into RunSummary.
    */
   perTurnReasoningSource?: "structured" | "synthesised" | null
+  /**
+   * Stage 2 of plan 2026-05-16-server-hardening-and-error-source-distinction.md.
+   *
+   * Where the error originated. See the matching field on
+   * `NormalizedResponse` for the full taxonomy. When present on a
+   * `failed` envelope:
+   *   - "sysflow_infra" → cli renders a banner + halts; agent's
+   *     error-reasoning chain does NOT fire.
+   *   - "user_machine" → existing recovery path applies.
+   *   - "unknown" / absent → fallback to user_machine semantics
+   *     (preserves legacy behaviour).
+   */
+  errorSource?: "sysflow_infra" | "user_machine" | "unknown"
 }
 
 // ─── Database ───

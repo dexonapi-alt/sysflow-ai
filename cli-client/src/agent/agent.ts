@@ -788,6 +788,26 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
           await recordTelemetry("malformed_response_exhausted")
           throw new Error((response.error as string) || "malformed_response")
         }
+        case "sysflow_infra": {
+          // Stage 2 of plan 2026-05-16-server-hardening-and-error-source-distinction.md.
+          // Sysflow's own backend / API quota / auth / connection
+          // failed. The agent CANNOT recover from inside the loop —
+          // user action required (top up credits, /model swap, set
+          // env var). Halt cleanly with a distinct banner so the user
+          // doesn't confuse it with a project-side error.
+          spinner.stop()
+          console.log("")
+          console.log(colors.error("  ═══ SYSFLOW INFRASTRUCTURE ERROR ═══"))
+          console.log(colors.warning("  " + ((response.error as string) || "Unspecified sysflow backend failure")))
+          console.log("")
+          console.log(colors.muted("  This is a sysflow / API provider issue — not a problem with your project."))
+          console.log(colors.muted("  Take the suggested action and re-run. The agent will NOT try to 'fix' this from inside your project."))
+          console.log(colors.error("  ═══════════════════════════════════"))
+          console.log("")
+          cleanupDiffListener()
+          await recordTelemetry("sysflow_infra")
+          return response
+        }
         default: {
           spinner.stop()
           cleanupDiffListener()
