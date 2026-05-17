@@ -19,7 +19,16 @@
  * terminal-exit alongside the other per-run state.
  */
 
-import type { ToolResult, BatchToolResult } from "../types.js"
+/**
+ * Structural shape — the helper only needs `tool` + `result`; the
+ * full `ToolResult` / `BatchToolResult` types add an `id` field
+ * that's not relevant to extracting paths. Tests can pass minimal
+ * literals.
+ */
+interface ToolResultLike {
+  tool: string
+  result: Record<string, unknown>
+}
 
 /** Eligible repo states for the read-after-write inject. */
 const ELIGIBLE_REPO_STATES = new Set<string>(["empty", "small"])
@@ -58,8 +67,8 @@ export function clearReadAfterWriteState(runId: string): void {
  * success status; we walk that too.
  */
 export function extractSuccessfulWritePaths(
-  single: ToolResult | undefined,
-  batch: BatchToolResult[] | undefined,
+  single: ToolResultLike | undefined,
+  batch: ToolResultLike[] | undefined,
 ): string[] {
   const out: string[] = []
   const consider = (tool: string, result: Record<string, unknown>): void => {
