@@ -5,6 +5,7 @@ import { getTask, finalizeTask } from "../store/tasks.js"
 import { saveToolResult } from "../store/tool-results.js"
 import { collectStrippedImports, buildImportStrippedInject } from "../services/import-stripped-inject.js"
 import { runTscGate, buildTscFailedInject } from "../services/tsc-completion-gate.js"
+import { checkImpliedArtifacts, buildArtifactMissingInject } from "../services/completion-artifact-gate.js"
 import { persistModelUsage } from "../store/usage.js"
 import { maybeUpdateProjectMemory } from "../store/memory.js"
 import { recordRunAction, saveSessionEntry, getRunActions, clearRunActions } from "../store/sessions.js"
@@ -1423,6 +1424,41 @@ Do NOT reference these files in your next action. Do NOT try to read or edit the
         }
       } catch (err) {
         console.warn(`[tsc-gate] gate threw — degrading to accept completion: ${(err as Error).message}`)
+      }
+    }
+  }
+
+  // ─── Stage 4 of agent-code-correctness plan: prompt-implied artifact gate ───
+  // After tsc passes (or skips), check whether the prompt implied
+  // artifacts that don't exist on disk yet. Example: prompt mentions
+  // PostgreSQL but no schema.sql / migrations file exists. Blocks
+  // completion + injects directive listing each missing artifact
+  // with concrete file examples. Conservative keyword matching keeps
+  // false-positives low; gracefully no-ops when prompt is unambiguous.
+  if (normalized.kind === "completed" && !isFatal && run.cwd) {
+    const artifactGateOn = (() => {
+      try { return getFlag<boolean>("quality.completion_artifact_check_enabled", run.sysbasePath as string | undefined) }
+      catch { return true }
+    })()
+    if (artifactGateOn) {
+      try {
+        const result = await checkImpliedArtifacts(run.content as string, run.cwd as string)
+        if (!result.ok && result.missing.length > 0) {
+          const summary = result.missing.map((m) => m.kind).join(", ")
+          console.log(`[artifact-gate] BLOCKED completion: missing implied artifact(s): ${summary} — injecting directive + overriding to needs_tool`)
+          actionPlanner.injectContext(body.runId, buildArtifactMissingInject(result.missing))
+          normalized = {
+            kind: "needs_tool",
+            tool: "list_directory",
+            args: { path: "." },
+            content: `Completion blocked: ${result.missing.length} prompt-implied artifact${result.missing.length === 1 ? "" : "s"} missing (${summary}). Read the inject block and create the file(s) before declaring done again.`,
+            reasoning: "Prompt-implied artifact missing — overriding completion to force creation.",
+            reasoningChain: normalized.reasoningChain,
+            usage: normalized.usage,
+          }
+        }
+      } catch (err) {
+        console.warn(`[artifact-gate] check threw — degrading to accept completion: ${(err as Error).message}`)
       }
     }
   }

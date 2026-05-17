@@ -311,6 +311,16 @@ defineFlag("reasoning.project_init_max_iterations", 3, parseNumber)
 defineFlag("quality.precompletion_tsc_gate_enabled", true, parseBool)
 defineFlag("quality.precompletion_tsc_timeout_ms", 30_000, parseNumber)
 
+// Stage 4: when true (default), prompt-implied artifacts (DB schema
+// when prompt mentions postgres/mysql/sqlite/mongo/prisma, tests
+// when prompt mentions tests/testing standalone) are verified at
+// completion time. Missing artifacts block completion + inject a
+// `═══ COMPLETION BLOCKED ═══` directive. Closes the user-reported
+// case where the agent shipped a POS backend with no schema.sql
+// even though prompt explicitly mentioned PostgreSQL. Off-switch
+// in case the keyword matching over-fires.
+defineFlag("quality.completion_artifact_check_enabled", true, parseBool)
+
 // Stage 2 of agent-runtime-fixes plan: web_search 0-hit recovery.
 // When true (default), the cli executor tags empty `results` arrays
 // with `_errorCategory: "web_search_empty"` + a recovery hint, the
