@@ -59,6 +59,7 @@ const largeRepoPayload: ProjectInitPayload = {
 }
 
 function stepJson(step: Partial<ProjectInitStep> & { paragraph: string; done: boolean }): string {
+  // Stage 4 follow-up: expectedArtifacts default = [] for backward compat.
   return JSON.stringify({
     paragraph: step.paragraph,
     done: step.done,
@@ -67,6 +68,7 @@ function stepJson(step: Partial<ProjectInitStep> & { paragraph: string; done: bo
     keyMarkers: step.keyMarkers ?? [],
     investigationPlan: step.investigationPlan ?? [],
     skipConfigVerificationFor: step.skipConfigVerificationFor ?? [],
+    expectedArtifacts: step.expectedArtifacts ?? [],
     confidence: step.confidence ?? null,
     supersedes: step.supersedes ?? null,
   })
@@ -319,5 +321,104 @@ describe("runProjectInitChain — orchestrator", () => {
     const brief = await runProjectInitChain({ ...emptyPayload, maxIterations: 2 }, callBackend)
     expect(brief).not.toBeNull()
     expect(brief!.iterations).toBe(2)
+  })
+})
+
+// ─── Stage 4 follow-up of agent-code-correctness plan: expectedArtifacts schema ───
+
+describe("project-init reasoner — expectedArtifacts field", () => {
+  it("commits expectedArtifacts when the LLM includes them in the step", async () => {
+    const callBackend: ProjectInitLlmCall = async () => stepJson({
+      paragraph: "User wants a PG backend with tests.",
+      done: true,
+      repoState: "empty",
+      fileCount: 0,
+      keyMarkers: [],
+      investigationPlan: ["ls -la"],
+      expectedArtifacts: ["db_schema", "tests"],
+      confidence: "HIGH",
+    })
+    const brief = await runProjectInitChain({
+      directoryTree: [],
+      userMessage: "build a PG backend with tests",
+      platform: "linux",
+      model: "claude-sonnet",
+    }, callBackend)
+    expect(brief).not.toBeNull()
+    expect(brief!.expectedArtifacts).toEqual(["db_schema", "tests"])
+  })
+
+  it("commits empty expectedArtifacts when LLM decides no artifacts required (the common case)", async () => {
+    const callBackend: ProjectInitLlmCall = async () => stepJson({
+      paragraph: "User wants a CLI tool. No DB / tests requested.",
+      done: true,
+      repoState: "empty",
+      fileCount: 0,
+      keyMarkers: [],
+      investigationPlan: ["ls -la"],
+      expectedArtifacts: [],
+      confidence: "HIGH",
+    })
+    const brief = await runProjectInitChain({
+      directoryTree: [],
+      userMessage: "build a CLI tool",
+      platform: "linux",
+      model: "claude-sonnet",
+    }, callBackend)
+    expect(brief).not.toBeNull()
+    expect(brief!.expectedArtifacts).toEqual([])
+  })
+
+  it("commits prisma_schema specifically when prompt explicitly mentions Prisma", async () => {
+    const callBackend: ProjectInitLlmCall = async () => stepJson({
+      paragraph: "User wants Prisma-based app.",
+      done: true,
+      repoState: "empty",
+      fileCount: 0,
+      keyMarkers: [],
+      investigationPlan: ["ls -la"],
+      expectedArtifacts: ["prisma_schema"],
+      confidence: "HIGH",
+    })
+    const brief = await runProjectInitChain({
+      directoryTree: [],
+      userMessage: "build a Prisma app",
+      platform: "linux",
+      model: "claude-sonnet",
+    }, callBackend)
+    expect(brief).not.toBeNull()
+    expect(brief!.expectedArtifacts).toEqual(["prisma_schema"])
+  })
+
+  it("rejects expectedArtifacts entries not in the enum (defensive parse)", () => {
+    const raw = stepJson({
+      paragraph: "x",
+      done: true,
+      repoState: "empty",
+      fileCount: 0,
+      confidence: "HIGH",
+      expectedArtifacts: ["db_schema", "not_a_real_kind" as never],
+    })
+    // Schema rejects → parser returns null.
+    const out = parseProjectInitStep(raw)
+    expect(out).toBeNull()
+  })
+
+  it("defaults to empty array when expectedArtifacts is absent (legacy LLM output)", () => {
+    const raw = JSON.stringify({
+      paragraph: "x",
+      done: true,
+      repoState: "empty",
+      fileCount: 0,
+      keyMarkers: [],
+      investigationPlan: ["ls"],
+      skipConfigVerificationFor: [],
+      confidence: "HIGH",
+      supersedes: null,
+      // expectedArtifacts deliberately absent
+    })
+    const out = parseProjectInitStep(raw)
+    expect(out).not.toBeNull()
+    expect(out!.expectedArtifacts).toEqual([])
   })
 })

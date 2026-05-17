@@ -26,6 +26,26 @@ import { callReasonerBackend } from "./backends/index.js"
 import { pickReasonerBackend, type ReasonerBackend } from "../services/free-tier-policy.js"
 import { getPipelineSystemPrompt } from "./pipelines/index.js"
 
+/**
+ * Stage 4 follow-up of agent-code-correctness plan: completion
+ * artifact kinds the model can declare as expected. The completion
+ * gate enforces these on `kind: "completed"` responses — when the
+ * model committed `expectedArtifacts: ["db_schema"]` but no schema
+ * file exists on disk, completion is blocked with a directive to
+ * create one. Replaces hardcoded keyword matching with LLM judgment.
+ *
+ *   - "db_schema"      → SQL schema / migration file (postgres,
+ *                        mysql, sqlite, mongo, etc.)
+ *   - "prisma_schema"  → prisma/schema.prisma
+ *   - "tests"          → at least one *.test.{ts,js} / *.spec.{ts,js}
+ *
+ * Empty array means the LLM decided the prompt doesn't imply any
+ * required artifacts (CLI tool, automation script, web UI without
+ * DB, etc.) — gate skips.
+ */
+export const ARTIFACT_KINDS = ["db_schema", "prisma_schema", "tests"] as const
+export type ArtifactKind = (typeof ARTIFACT_KINDS)[number]
+
 export const projectInitStepSchema = z.object({
   paragraph: z.string().min(1).max(1200),
   done: z.boolean(),
@@ -34,6 +54,7 @@ export const projectInitStepSchema = z.object({
   keyMarkers: z.array(z.string().min(1).max(120)).max(20).default([]),
   investigationPlan: z.array(z.string().min(1).max(300)).max(8).default([]),
   skipConfigVerificationFor: z.array(z.string().min(1).max(120)).max(20).default([]),
+  expectedArtifacts: z.array(z.enum(ARTIFACT_KINDS)).max(8).default([]),
   confidence: z.enum(["HIGH", "MEDIUM", "LOW"]).nullable(),
   supersedes: z.number().int().min(0).nullable().optional(),
 })
@@ -46,6 +67,7 @@ export interface ProjectInitBrief {
   keyMarkers: string[]
   investigationPlan: string[]
   skipConfigVerificationFor: string[]
+  expectedArtifacts: ArtifactKind[]
   confidence: "HIGH" | "MEDIUM" | "LOW"
   iterations: number
   committedVia: "done_flag" | "step_cap"
@@ -163,6 +185,7 @@ export async function runProjectInitChain(
   let lastKeyMarkers: string[] = []
   let lastInvestigationPlan: string[] = []
   let lastSkipConfigVerificationFor: string[] = []
+  let lastExpectedArtifacts: ArtifactKind[] = []
   let lastConfidence: "HIGH" | "MEDIUM" | "LOW" | null = null
   let committedViaDoneFlag = false
   let iterations = 0
@@ -193,6 +216,7 @@ export async function runProjectInitChain(
     if (step.keyMarkers && step.keyMarkers.length > 0) lastKeyMarkers = step.keyMarkers
     if (step.investigationPlan && step.investigationPlan.length > 0) lastInvestigationPlan = step.investigationPlan
     if (step.skipConfigVerificationFor && step.skipConfigVerificationFor.length > 0) lastSkipConfigVerificationFor = step.skipConfigVerificationFor
+    if (step.expectedArtifacts && step.expectedArtifacts.length > 0) lastExpectedArtifacts = step.expectedArtifacts
     if (step.confidence) lastConfidence = step.confidence
 
     if (step.done) {
@@ -210,6 +234,7 @@ export async function runProjectInitChain(
     keyMarkers: lastKeyMarkers,
     investigationPlan: lastInvestigationPlan,
     skipConfigVerificationFor: lastSkipConfigVerificationFor,
+    expectedArtifacts: lastExpectedArtifacts,
     confidence: lastConfidence ?? "LOW",
     iterations,
     committedVia: committedViaDoneFlag ? "done_flag" : "step_cap",

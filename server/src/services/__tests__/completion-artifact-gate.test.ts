@@ -14,7 +14,9 @@ import {
   artifactExists,
   checkImpliedArtifacts,
   buildArtifactMissingInject,
+  impliedArtifactFromKind,
 } from "../completion-artifact-gate.js"
+import { setExpectedArtifacts, clearExpectedArtifacts } from "../setup-intelligence.js"
 
 describe("classifyImpliedArtifacts — keyword matching", () => {
   it("returns empty list for prompts without implied artifacts", () => {
@@ -228,5 +230,110 @@ describe("buildArtifactMissingInject", () => {
       kind: "db_schema", expected: "x", trigger: "y", examples: ["z"],
     }])
     expect(out).toContain("Do NOT declare 'completed' again")
+  })
+})
+
+// ─── LLM-driven tier (Stage 4 follow-up: LLM decides, gate enforces) ───
+
+describe("impliedArtifactFromKind", () => {
+  it("rehydrates db_schema metadata", () => {
+    const a = impliedArtifactFromKind("db_schema")
+    expect(a.kind).toBe("db_schema")
+    expect(a.expected).toContain("SQL schema")
+    expect(a.trigger).toContain("project-init reasoner")
+    expect(a.examples.length).toBeGreaterThan(0)
+  })
+
+  it("rehydrates prisma_schema metadata", () => {
+    const a = impliedArtifactFromKind("prisma_schema")
+    expect(a.kind).toBe("prisma_schema")
+    expect(a.examples).toContain("prisma/schema.prisma")
+  })
+
+  it("rehydrates tests metadata", () => {
+    const a = impliedArtifactFromKind("tests")
+    expect(a.kind).toBe("tests")
+    expect(a.examples.some((e) => e.includes(".test.") || e.includes(".spec."))).toBe(true)
+  })
+})
+
+describe("checkImpliedArtifacts — LLM-driven tier (Stage 4 follow-up)", () => {
+  let tmp: string
+  const RUN_ID = "test-llm-tier"
+  beforeEach(async () => {
+    tmp = await fs.mkdtemp(path.join(os.tmpdir(), "sysflow-llm-tier-"))
+    clearExpectedArtifacts(RUN_ID)
+  })
+  afterEach(async () => {
+    await fs.rm(tmp, { recursive: true, force: true })
+    clearExpectedArtifacts(RUN_ID)
+  })
+
+  it("LLM said no artifacts → gate skips even when prompt mentions postgres (no false positive)", async () => {
+    // The KEYWORD classifier would fire here. The LLM verdict wins.
+    setExpectedArtifacts(RUN_ID, [])
+    const r = await checkImpliedArtifacts("build a CLI that reads PG conn from env", tmp, RUN_ID)
+    expect(r.ok).toBe(true)
+    expect(r.expected).toEqual([])
+    expect(r.missing).toEqual([])
+  })
+
+  it("LLM said db_schema required → gate enforces (missing file → block)", async () => {
+    setExpectedArtifacts(RUN_ID, ["db_schema"])
+    const r = await checkImpliedArtifacts("build a PG-backed app", tmp, RUN_ID)
+    expect(r.ok).toBe(false)
+    expect(r.missing.map((a) => a.kind)).toEqual(["db_schema"])
+  })
+
+  it("LLM said db_schema required → gate passes when schema.sql exists", async () => {
+    setExpectedArtifacts(RUN_ID, ["db_schema"])
+    await fs.writeFile(path.join(tmp, "schema.sql"), "...", "utf8")
+    const r = await checkImpliedArtifacts("build a PG-backed app", tmp, RUN_ID)
+    expect(r.ok).toBe(true)
+    expect(r.missing).toEqual([])
+  })
+
+  it("LLM said multiple artifacts → gate enforces all", async () => {
+    setExpectedArtifacts(RUN_ID, ["db_schema", "tests"])
+    await fs.writeFile(path.join(tmp, "schema.sql"), "...", "utf8")
+    // tests missing
+    const r = await checkImpliedArtifacts("anything", tmp, RUN_ID)
+    expect(r.ok).toBe(false)
+    expect(r.missing.map((a) => a.kind)).toEqual(["tests"])
+  })
+
+  it("LLM tier WINS over keyword classifier even when prompt has DB keywords", async () => {
+    // Keyword classifier would say db_schema; LLM says no.
+    setExpectedArtifacts(RUN_ID, [])
+    const r = await checkImpliedArtifacts("build a tool similar to postgres", tmp, RUN_ID)
+    expect(r.ok).toBe(true)
+  })
+
+  it("falls back to keyword classifier when LLM didn't run (no per-run state)", async () => {
+    // Don't call setExpectedArtifacts — simulates project-init not firing.
+    const r = await checkImpliedArtifacts("build a PostgreSQL backend", tmp, RUN_ID)
+    expect(r.ok).toBe(false)
+    expect(r.expected.map((a) => a.kind)).toContain("db_schema")
+  })
+
+  it("falls back to keyword classifier when no runId provided", async () => {
+    const r = await checkImpliedArtifacts("build a PostgreSQL backend", tmp)
+    expect(r.ok).toBe(false)
+    expect(r.expected.map((a) => a.kind)).toContain("db_schema")
+  })
+
+  it("filters invalid kinds defensively from the LLM's array", async () => {
+    setExpectedArtifacts(RUN_ID, ["db_schema", "not_a_real_kind", "tests"])
+    const r = await checkImpliedArtifacts("anything", tmp, RUN_ID)
+    // Only the two valid kinds get classified.
+    expect(r.expected.map((a) => a.kind).sort()).toEqual(["db_schema", "tests"])
+  })
+
+  it("empty LLM list is meaningful (treated as 'no artifacts needed') — NOT same as missing state", async () => {
+    setExpectedArtifacts(RUN_ID, [])
+    // Prompt has postgres keyword — keyword classifier WOULD fire — but LLM-driven path says skip.
+    const r = await checkImpliedArtifacts("PostgreSQL setup guide explanation", tmp, RUN_ID)
+    expect(r.ok).toBe(true)
+    expect(r.expected).toEqual([])
   })
 })

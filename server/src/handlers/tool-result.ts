@@ -1442,7 +1442,7 @@ Do NOT reference these files in your next action. Do NOT try to read or edit the
     })()
     if (artifactGateOn) {
       try {
-        const result = await checkImpliedArtifacts(run.content as string, run.cwd as string)
+        const result = await checkImpliedArtifacts(run.content as string, run.cwd as string, body.runId)
         if (!result.ok && result.missing.length > 0) {
           const summary = result.missing.map((m) => m.kind).join(", ")
           console.log(`[artifact-gate] BLOCKED completion: missing implied artifact(s): ${summary} — injecting directive + overriding to needs_tool`)

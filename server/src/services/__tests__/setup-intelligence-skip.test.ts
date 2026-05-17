@@ -116,3 +116,71 @@ describe("detectConfigFile honours skip list when runId is passed", () => {
     expect(detectConfigFile("tailwind.config.js", RUN_ID)).toBeNull()
   })
 })
+
+// ─── Stage 4 follow-up of agent-code-correctness plan: expected-artifacts per-run state ───
+
+import {
+  setExpectedArtifacts,
+  getExpectedArtifacts,
+  clearExpectedArtifacts,
+} from "../setup-intelligence.js"
+
+describe("setExpectedArtifacts / getExpectedArtifacts", () => {
+  const RUN = "test-expected-artifacts-1"
+  beforeEach(() => { clearExpectedArtifacts(RUN) })
+
+  it("returns undefined when no list has been set (signals fallback path)", () => {
+    expect(getExpectedArtifacts(RUN)).toBeUndefined()
+  })
+
+  it("stores + retrieves the list verbatim", () => {
+    setExpectedArtifacts(RUN, ["db_schema", "tests"])
+    expect(getExpectedArtifacts(RUN)).toEqual(["db_schema", "tests"])
+  })
+
+  it("empty array is a meaningful 'LLM decided no artifacts' signal (not undefined)", () => {
+    setExpectedArtifacts(RUN, [])
+    expect(getExpectedArtifacts(RUN)).toEqual([])
+    // Distinct from undefined (no LLM verdict).
+    expect(getExpectedArtifacts("never-set")).toBeUndefined()
+  })
+
+  it("overwrites on repeated set", () => {
+    setExpectedArtifacts(RUN, ["db_schema"])
+    setExpectedArtifacts(RUN, ["tests"])
+    expect(getExpectedArtifacts(RUN)).toEqual(["tests"])
+  })
+
+  it("clearExpectedArtifacts drops the list", () => {
+    setExpectedArtifacts(RUN, ["db_schema"])
+    clearExpectedArtifacts(RUN)
+    expect(getExpectedArtifacts(RUN)).toBeUndefined()
+  })
+
+  it("clearRunSearches also drops the list (terminal cleanup path)", () => {
+    setExpectedArtifacts(RUN, ["db_schema"])
+    clearRunSearches(RUN)
+    expect(getExpectedArtifacts(RUN)).toBeUndefined()
+  })
+
+  it("isolates per-run (run A's list doesn't bleed into run B)", () => {
+    setExpectedArtifacts("run-a", ["db_schema"])
+    setExpectedArtifacts("run-b", ["tests"])
+    expect(getExpectedArtifacts("run-a")).toEqual(["db_schema"])
+    expect(getExpectedArtifacts("run-b")).toEqual(["tests"])
+    clearExpectedArtifacts("run-a")
+    clearExpectedArtifacts("run-b")
+  })
+
+  it("clones the input array (mutating after set doesn't affect storage)", () => {
+    const original = ["db_schema"]
+    setExpectedArtifacts(RUN, original)
+    original.push("tests")
+    expect(getExpectedArtifacts(RUN)).toEqual(["db_schema"])
+  })
+
+  it("noops on empty runId (defensive)", () => {
+    setExpectedArtifacts("", ["db_schema"])
+    expect(getExpectedArtifacts("")).toBeUndefined()
+  })
+})

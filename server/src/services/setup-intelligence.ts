@@ -192,6 +192,7 @@ export function markFrameworkSearched(runId: string, framework: string): void {
 export function clearRunSearches(runId: string): void {
   runSearches.delete(runId)
   configSkipList.delete(runId)
+  expectedArtifactsByRun.delete(runId)
 }
 
 // ─── Stage 1 of agent-runtime-fixes plan ───
@@ -222,6 +223,29 @@ export function isConfigSkipped(runId: string, filePath: string): boolean {
 
 export function clearConfigSkipList(runId: string): void {
   configSkipList.delete(runId)
+}
+
+// ─── Stage 4 follow-up of agent-code-correctness plan: LLM-driven artifact list ───
+//
+// The project-init reasoner commits an `expectedArtifacts` array
+// (e.g., `["db_schema", "tests"]`) when the prompt unambiguously
+// requires those artifacts. The completion gate reads this per-run
+// state instead of using hardcoded keyword matching. Empty / unset =
+// LLM decided no artifacts required → gate skips.
+
+const expectedArtifactsByRun = new Map<string, string[]>()
+
+export function setExpectedArtifacts(runId: string, artifacts: string[]): void {
+  if (!runId) return
+  expectedArtifactsByRun.set(runId, [...artifacts])
+}
+
+export function getExpectedArtifacts(runId: string): string[] | undefined {
+  return expectedArtifactsByRun.get(runId)
+}
+
+export function clearExpectedArtifacts(runId: string): void {
+  expectedArtifactsByRun.delete(runId)
 }
 
 // ─── Response Overrides ───
