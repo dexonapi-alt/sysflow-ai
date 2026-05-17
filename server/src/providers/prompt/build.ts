@@ -22,6 +22,7 @@ import { getLearnedMemorySection, type LearnedMemoryCtx } from "./sections/learn
 import { getInvestigationSection } from "./sections/investigation.js"
 import { getTaskLedgerSection, type TaskLedgerCtx } from "./sections/task-ledger.js"
 import { getProjectStateSection, type ProjectStateCtx } from "./sections/project-state.js"
+import { getNodeEsmRulesSection } from "./sections/node-esm-rules.js"
 
 export const SYSTEM_PROMPT_DYNAMIC_BOUNDARY = "═══ SYSTEM_PROMPT_DYNAMIC_BOUNDARY ═══"
 
@@ -57,6 +58,12 @@ export function buildSystemPrompt(ctx: PromptCtx = {}): BuiltPrompt {
     { id: "system_rules", priority: 10, cacheable: true, content: getSystemRulesSection({ runIntent: ctx.runIntent, complexity: ctx.complexity, gatingEnabled: ctx.gatingEnabled }) },
     { id: "tools", priority: 20, cacheable: true, content: getToolsSection() },
     { id: "task_guidelines", priority: 30, cacheable: true, content: getTaskGuidelinesSection() },
+    // Stage 1 of agent-code-correctness plan: Node-ESM + TypeScript
+    // import rules. Cacheable — rules are static. Sits after
+    // task_guidelines (general workflow) and before output_efficiency
+    // (formatting) so the model reads the IMPORT semantics before
+    // any per-turn output considerations.
+    { id: "node_esm_rules", priority: 35, cacheable: true, content: getNodeEsmRulesSection() },
     { id: "output_efficiency", priority: 40, cacheable: true, content: getOutputEfficiencySection() },
     // Stage 1 of command-first-investigation: investigation patterns
     // section. Non-cacheable because it reads ctx.platform to render
