@@ -299,6 +299,18 @@ defineFlag("memory.error_pattern_recall_enabled", true, parseBool)
 defineFlag("quality.project_init_reasoning_enabled", true, parseBool)
 defineFlag("reasoning.project_init_max_iterations", 3, parseNumber)
 
+// ─── Plan 2026-05-16-agent-code-correctness-and-completion-artifacts.md Stage 3 ───
+// When true (default), every `completed` response from a run that
+// authored ≥1 .ts/.tsx file gets gated on `tsc --noEmit` returning
+// zero errors. On failure: the response is overridden to needs_tool
+// + a `═══ TYPECHECK FAILED — FIX BEFORE COMPLETION ═══` block is
+// injected with the diagnostics. The agent must fix the errors
+// before completion succeeds. Gracefully skips when tsc isn't
+// installed or tsconfig.json is missing. Off-switch in case tsc
+// runtime cost becomes a problem on large monorepos.
+defineFlag("quality.precompletion_tsc_gate_enabled", true, parseBool)
+defineFlag("quality.precompletion_tsc_timeout_ms", 30_000, parseNumber)
+
 // Stage 2 of agent-runtime-fixes plan: web_search 0-hit recovery.
 // When true (default), the cli executor tags empty `results` arrays
 // with `_errorCategory: "web_search_empty"` + a recovery hint, the
