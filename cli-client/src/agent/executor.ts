@@ -25,7 +25,7 @@ import {
 import { runVerification } from "./verifier.js"
 import { createSnapshot, cleanupSnapshot, rollback, getSnapshot, detectGit } from "./git.js"
 import { lintFile, lintFiles, displayLintErrors, resetTscCache } from "./lint.js"
-import { partitionToolCalls, getToolMeta, groupForParallelExecution, KNOWN_TOOL_NAMES, isKnownTool, applyBatchCap, resolveBatchCap, buildBatchCapDeferralResult, type RepoState } from "./tool-meta.js"
+import { partitionToolCalls, getToolMeta, groupForParallelExecution, KNOWN_TOOL_NAMES, isKnownTool, applyBatchCap, resolveBatchCap, buildBatchCapDeferralResult, topoOrderParallelWrites, buildImportCycleResult, type RepoState } from "./tool-meta.js"
 import { validateToolInput } from "./validate-tool-input.js"
 import { checkPermissions, loadRules, saveRule, lookupAnswer, rememberAnswer, primaryPath, type Rule } from "./permissions.js"
 import { getSysbasePath, getPermissionMode, getSafeCommandsAutoApprove } from "../lib/sysbase.js"
@@ -544,6 +544,29 @@ function bumpBatchCapEnforced(): void {
   _batchCapEnforcedThisRun += 1
 }
 
+// ─── Stage 2 of accountability-and-parallel-execution-sequencing plan: topo-reorder counter ───
+//
+// Bumped each time `topoOrderParallelWrites` either reorders the
+// batch's writes (producer-before-consumer) OR rejects the batch
+// because of an import cycle. Spike on the per-run total = the
+// model is regularly emitting consumer-before-producer batches =
+// Stage 2 IS the reason imports stay resolved. Zero on a clean run
+// is expected (no cross-file relative imports inside a single batch).
+
+let _batchReorderedCountThisRun = 0
+
+export function getBatchReorderedCount(): number {
+  return _batchReorderedCountThisRun
+}
+
+export function resetBatchReorderedCount(): void {
+  _batchReorderedCountThisRun = 0
+}
+
+function bumpBatchReorderedCount(): void {
+  _batchReorderedCountThisRun += 1
+}
+
 // ─── Stage 4 of accountability-and-parallel-execution-sequencing plan: "already created" guard ───
 //
 // Cross-batch / cross-chunk re-creation tracker. The agent observably
@@ -866,13 +889,67 @@ export async function executeToolsBatch(
     // group while different-path ops still parallelise. Without this, two
     // edit_file calls targeting the same file race and one of them silently
     // loses its changes.
-    const groups = groupForParallelExecution(parallelTools)
+    // Stage 2 of accountability-and-parallel-execution-sequencing plan:
+    // topologically order the batch's write_file calls so producer
+    // files land on disk BEFORE consumer files (which relative-import
+    // them) are dispatched. Closes the bug where the import-sanitizer
+    // silently stripped references because the producer hadn't been
+    // written yet.
+    //
+    // `topoOrderParallelWrites` returns groups where:
+    //   - dependent writes are collapsed into one serial group (in
+    //     topo order), AND
+    //   - non-write tools / non-dependent writes keep their normal
+    //     parallel grouping (via groupForParallelExecution under the
+    //     hood).
+    //
+    // When a cycle is detected, the cycle members are EXCLUDED from
+    // the returned groups; we synthesise per-file failures here so
+    // the agent sees the cycle + can break it.
+    const topo = topoOrderParallelWrites(parallelTools)
+    if (topo.cycle) {
+      bumpBatchReorderedCount()
+      const cycleSet = new Set(topo.cycle)
+      for (const tc of parallelTools) {
+        if (tc.tool === "write_file" && cycleSet.has(tc.args.path as string)) {
+          rejectedResults.push({
+            id: tc.id,
+            tool: tc.tool,
+            result: buildImportCycleResult(tc.args.path as string, topo.cycle),
+          })
+        }
+      }
+      console.log(`[topo-sort] import cycle: ${topo.cycle.join(" → ")} — ${topo.cycle.length} write(s) rejected`)
+    } else if (topo.reordered) {
+      bumpBatchReorderedCount()
+      console.log(`[topo-sort] reordered ${parallelTools.filter((t) => t.tool === "write_file").length} writes producer-first`)
+    }
+    const groups = topo.groups
     const settledGroups = await Promise.allSettled(
       groups.map(async (group) => {
         const groupResults: Array<{ id: string; tool: string; result: Record<string, unknown> }> = []
         for (const tc of group) {
-          const result = await executeToolLocally(tc.tool, tc.args, runId)
-          groupResults.push({ id: tc.id, tool: tc.tool, result })
+          // Stage 2 of accountability-and-parallel-execution-sequencing
+          // plan: per-tool catch so a single failing tool inside a
+          // serial group doesn't reject the WHOLE group with no id
+          // attribution. The post-topo serial mega-group may contain
+          // multiple writes; without this catch, a failure midway
+          // through would surface as an attribution-less rejection and
+          // the downstream fallback would mis-index parallelTools[i].
+          try {
+            const result = await executeToolLocally(tc.tool, tc.args, runId)
+            groupResults.push({ id: tc.id, tool: tc.tool, result })
+          } catch (err) {
+            groupResults.push({
+              id: tc.id,
+              tool: tc.tool,
+              result: {
+                error: (err as Error).message,
+                success: false,
+                path: tc.args.path,
+              },
+            })
+          }
         }
         return groupResults
       })
