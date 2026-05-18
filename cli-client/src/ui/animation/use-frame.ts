@@ -118,7 +118,29 @@ function ensureResizeListener(): void {
   resizeListenerInstalled = true
   process.stdout.on("resize", () => {
     pausedUntilDateMs = Date.now() + RESIZE_PAUSE_MS
+    _scrollGlitchPauseFiredThisRun += 1
   })
+}
+
+// ─── Stage 6 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md ───
+//
+// Per-run counter for "how many times the resize-pause window fired
+// this run". Diagnostic for Stage 1's load-bearing fix — if this
+// counter is consistently > 0 on runs where users report glitches,
+// the debounce is firing as designed. Zero is the common case (no
+// resize events) and that's fine.
+//
+// Module-scoped because the resize listener (above) is also module-
+// scoped; agent.ts reads + resets via the exported helpers.
+
+let _scrollGlitchPauseFiredThisRun = 0
+
+export function getScrollGlitchPauseFiredCount(): number {
+  return _scrollGlitchPauseFiredThisRun
+}
+
+export function resetScrollGlitchPauseFiredCount(): void {
+  _scrollGlitchPauseFiredThisRun = 0
 }
 
 function start(): void {
@@ -225,6 +247,7 @@ export function _resetForTests(): void {
   subscribers.clear()
   stop()
   pausedUntilDateMs = 0
+  _scrollGlitchPauseFiredThisRun = 0
   if (motionUnsubscribe) {
     motionUnsubscribe()
     motionUnsubscribe = null

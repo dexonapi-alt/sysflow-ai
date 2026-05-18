@@ -200,6 +200,27 @@ export interface RunSummary {
    *  ClientResponse.insufficientReasoningRejectionCount). Spike = the
    *  model is emitting oversized batches with terse reasoning. */
   insufficientReasoningRejectionCount?: number
+  /** Stage 6 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md.
+   *  Count of times Stage 1's resize-pause window fired this run.
+   *  Diagnostic for the load-bearing scroll-glitch fix: if this counter
+   *  is consistently > 0 on runs where users report glitches, the
+   *  debounce is firing as designed. Zero is the common case. */
+  scrollGlitchPauseFiredCount?: number
+  /** Stage 6: latched true if Stage 2's spinner-label resolver returned
+   *  an action-aware label (vs falling through to the verb cycle) at
+   *  any point this run. False on runs with no tool dispatches. */
+  spinnerActionLabelFired?: boolean
+  /** Stage 6: latched true if Stage 5's run_command stream preview
+   *  rendered at any point this run. False on runs with no run_command
+   *  dispatches. */
+  streamPreviewEverShown?: boolean
+  /** Stage 6: latched true if Stage 4's sysflow_infra ErrorBanner
+   *  rendered this run. False on the common case (no infra failure). */
+  infraErrorBannerShown?: boolean
+  /** Stage 6: count of times the permission modal mounted this run.
+   *  Diagnostic for permission-mode UX: high counts on `ask` mode
+   *  runs suggest click-fatigue. */
+  permissionModalShownCount?: number
 }
 
 const PROMPT_PREVIEW_CHARS = 200
@@ -284,6 +305,12 @@ export async function recordRunSummary(sysbasePath: string | undefined | null, s
     reorderedBatchCount: summary.reorderedBatchCount ?? 0,
     alreadyCreatedRejectionCount: summary.alreadyCreatedRejectionCount ?? 0,
     insufficientReasoningRejectionCount: summary.insufficientReasoningRejectionCount ?? 0,
+    // Stage 6 of ui-ux-polish plan.
+    scrollGlitchPauseFiredCount: summary.scrollGlitchPauseFiredCount ?? 0,
+    spinnerActionLabelFired: summary.spinnerActionLabelFired ?? false,
+    streamPreviewEverShown: summary.streamPreviewEverShown ?? false,
+    infraErrorBannerShown: summary.infraErrorBannerShown ?? false,
+    permissionModalShownCount: summary.permissionModalShownCount ?? 0,
   }
   try {
     await fs.appendFile(file, JSON.stringify(entry) + "\n", "utf8")

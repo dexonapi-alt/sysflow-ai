@@ -32,6 +32,25 @@ const MAX_BOX_WIDTH = 80
 const DIFF_PREVIEW_LINES = 12
 
 /**
+ * Stage 6 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md:
+ * per-run counter — how many times the permission modal mounted this
+ * run. Diagnostic for the permission-mode UX: high counts on `ask`
+ * mode runs suggest the user is in click-fatigue territory; the
+ * Phase 14 fixes for read-only-command auto-approve land in this
+ * range.
+ */
+
+let _permissionModalShownCount = 0
+
+export function getPermissionModalShownCount(): number {
+  return _permissionModalShownCount
+}
+
+export function resetPermissionModalShownCount(): void {
+  _permissionModalShownCount = 0
+}
+
+/**
  * Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
  * (audit issue #6): pure helper that picks the permission-modal box
  * width based on the available terminal columns. Pre-Stage-5 the box
@@ -67,6 +86,8 @@ export async function askPermission({ tool, args }: PromptArgs): Promise<PromptR
   // (audit issue #5): announce modal control so InteractiveHints switches
   // its bottom-row keybindings to the permission-modal set.
   emitAgent({ type: "modal_active", modal: "permission" })
+  // Stage 6: per-run telemetry.
+  _permissionModalShownCount += 1
 
   const target = primaryPath(tool, args) ?? "(no path)"
   // Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
