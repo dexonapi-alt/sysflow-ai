@@ -113,6 +113,21 @@ export function Header({ model, user, chatTitle, planMode, cwd }: Props): React.
   // overlapping JSX branches that used to live here.
   const chunkMode = chunkRenderMode(chunk !== null, runIntent)
 
+  // Plan 2026-05-18-chunk-pulse-missing-diagnostic.md Stage 1 — log
+  // the reducer's chunk slot + chunkMode whenever they change.
+  // Confirms hypothesis (b) "emit fires but reducer doesn't store"
+  // vs (c) "chunk stored but Header renders hidden". Debounced via
+  // useEffect dependency so we don't log on every pulse tick.
+  // STAGE 3 WILL REMOVE THIS.
+  const lastLoggedRef = React.useRef<string>("")
+  React.useEffect(() => {
+    const sig = `chunk=${chunk?.index ?? null} runIntent=${runIntent} mode=${chunkMode}`
+    if (sig !== lastLoggedRef.current) {
+      lastLoggedRef.current = sig
+      console.log(`[chunk-pulse-diag] header-render: ${sig}`)
+    }
+  }, [chunk?.index, runIntent, chunkMode])
+
   return (
     <Box flexDirection="column">
       <Box>
