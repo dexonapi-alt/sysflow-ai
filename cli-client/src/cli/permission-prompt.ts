@@ -78,6 +78,46 @@ export function pickPermissionBoxWidth(columns: number | undefined): number {
   return target
 }
 
+/**
+ * Plan `2026-05-18-batch-heading-and-permission-label-polish.md` issue #4.
+ *
+ * Pure helper: given the resolved modal box width, how many chars of
+ * the `target` string can fit inside the longest dynamic line? The
+ * longest line is the `[A] allow always for this (tool on TARGET)`
+ * row — pre-Plan-2 a `target` like
+ * `node --check src/middleware/errorHandler.js` would push the
+ * closing paren past the box's right edge, truncating mid-word.
+ *
+ * Budget calculation: boxWidth is the count of `─` segments between
+ * the `╭` / `╰`. The line interior content (between `│  ` left and
+ * `│` right) has roughly `boxWidth - 4` chars to play with. Subtract
+ * the fixed `[A] allow always for this (TOOL on )` overhead and the
+ * remaining is target's budget.
+ *
+ * Returns the truncated target with ellipsis when overflow, or the
+ * verbatim target when it fits.
+ *
+ * Exported for direct tests.
+ */
+export function truncateTargetForPermissionLabel(
+  target: string,
+  tool: string,
+  boxWidth: number,
+): string {
+  if (typeof target !== "string" || target.length === 0) return target
+  // Conservative budget: boxWidth interior minus the longest fixed
+  // overhead (the [A] line). Pad by 2 cols for left/right safety.
+  const fixedOverhead = `[A] allow always for this (${tool} on )`.length + 2
+  const budget = boxWidth - fixedOverhead
+  if (budget <= 4) {
+    // Box is so narrow there's no room to render the target sensibly.
+    // Truncate aggressively to avoid wrap.
+    return target.length > 4 ? target.slice(0, 3) + "…" : target
+  }
+  if (target.length <= budget) return target
+  return target.slice(0, budget - 1) + "…"
+}
+
 export async function askPermission({ tool, args }: PromptArgs): Promise<PromptResult> {
   // Stop the agent's spinner so the modal paints on a clean line and isn't
   // overdrawn by the next dot animation tick.
@@ -89,12 +129,18 @@ export async function askPermission({ tool, args }: PromptArgs): Promise<PromptR
   // Stage 6: per-run telemetry.
   _permissionModalShownCount += 1
 
-  const target = primaryPath(tool, args) ?? "(no path)"
+  const rawTarget = primaryPath(tool, args) ?? "(no path)"
   // Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
   // (audit issue #6): read the terminal width once on modal entry and
   // size the box to match. The box reads at-modal-mount, so a resize
   // mid-modal won't re-flow — acceptable for a short-lived prompt.
   const boxWidth = pickPermissionBoxWidth(process.stdout.columns)
+  // Plan 2026-05-18-batch-heading-and-permission-label-polish.md issue #4:
+  // truncate the dynamic target so the longest line (the [A] allow
+  // always for this row) fits inside the resolved box width. Pre-Plan-2
+  // the user saw `[A] allow always for this (run_c` truncated mid-word
+  // when a long `node --check src/...js` command came through.
+  const target = truncateTargetForPermissionLabel(rawTarget, tool, boxWidth)
 
   console.log("")
   drawHeader(" PERMISSION ", boxWidth)
