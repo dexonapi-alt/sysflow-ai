@@ -81,28 +81,71 @@ export async function askOffCourse(evidence: OffCourseEvidence): Promise<OffCour
   console.log("  " + colors.warning(BOX.v) + "  " + colors.success("[c]") + " continue (override — keep going)")
   console.log("  " + colors.warning(BOX.v) + "  " + colors.warning("[b]") + " backtrack (rollback to chunk " + evidence.lastGoodChunkIndex + ")")
   console.log("  " + colors.warning(BOX.v) + "  " + colors.accent("[r]") + " redirect (give a corrected direction)")
+  console.log("  " + colors.warning(BOX.v) + "  " + colors.muted("[q]") + " " + colors.muted("cancel (collapse to continue — Esc also works)"))
   console.log("  " + colors.warning(BOX.bl + BOX.h.repeat(BOX_WIDTH) + BOX.br))
-  process.stdout.write("  > ")
 
-  const key = await readSingleKey()
-  process.stdout.write(key + "\n")
-
-  if (key === "c" || key === "C") {
-    resumeSpinner()
-    return { action: "continue" }
+  // Stage 4 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+  // (audit issue #4): explicit q / Esc handling + restricted defaults.
+  // Pre-Stage-4: any non-c/b key collapsed to redirect (mis-press → 60s
+  // text-entry the user had to escape by typing an empty line, which
+  // was buried in the docstring). Now: only r / R triggers redirect;
+  // q / Q / Esc explicitly collapse to continue; other keys re-prompt
+  // so the user knows their press didn't take.
+  let key: string
+  for (let attempt = 0; attempt < 3; attempt++) {
+    process.stdout.write("  > ")
+    key = await readSingleKey()
+    process.stdout.write(key + "\n")
+    const action = classifyOffCourseKey(key)
+    if (action === "continue") {
+      resumeSpinner()
+      return { action: "continue" }
+    }
+    if (action === "backtrack") {
+      console.log(colors.warning(`  ↩ rolling back to chunk ${evidence.lastGoodChunkIndex}…`))
+      resumeSpinner()
+      return { action: "backtrack" }
+    }
+    if (action === "redirect") {
+      console.log("")
+      const text = await askForText("  Tell me what to fix: ")
+      resumeSpinner()
+      if (!text) return { action: "continue" } // empty redirect collapses to continue
+      return { action: "redirect", text }
+    }
+    // action === "unknown" → re-prompt
+    console.log(colors.muted("  unrecognised key — press [c] continue, [b] backtrack, [r] redirect, or [q]/Esc to cancel"))
   }
-  if (key === "b" || key === "B") {
-    console.log(colors.warning(`  ↩ rolling back to chunk ${evidence.lastGoodChunkIndex}…`))
-    resumeSpinner()
-    return { action: "backtrack" }
-  }
-  // Default to redirect — covers `r` and any other key (mistype = chance to re-direct
-  // is safer than mistype = silent continue).
-  console.log("")
-  const text = await askForText("  Tell me what to fix: ")
+  // Exhausted re-prompt budget — fall through to safe default.
   resumeSpinner()
-  if (!text) return { action: "continue" } // empty redirect collapses to continue
-  return { action: "redirect", text }
+  return { action: "continue" }
+}
+
+/**
+ * Stage 4 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+ * (audit issue #4): pure key classifier for the off-course modal.
+ *
+ * Pre-Stage-4 the modal had a wide "default → redirect" branch that
+ * trapped mis-presses into a 60-second text-entry prompt the user
+ * couldn't easily back out of. Stage 4 narrows the redirect branch
+ * to `r` / `R` only, adds explicit `q` / `Q` / Esc handling that
+ * collapses to `continue` (the safe default — the agent keeps going,
+ * the user can interrupt later via Ctrl+C), and routes any other key
+ * to `unknown` so the caller re-prompts instead of acting silently.
+ *
+ * Esc is `` (raw 0x1b).
+ *
+ * Pure; exported for direct tests.
+ */
+export type OffCourseClassifiedKey = "continue" | "backtrack" | "redirect" | "unknown"
+
+export function classifyOffCourseKey(key: string): OffCourseClassifiedKey {
+  if (key === "c" || key === "C") return "continue"
+  if (key === "b" || key === "B") return "backtrack"
+  if (key === "r" || key === "R") return "redirect"
+  // The Esc key arrives as the raw 0x1B byte (one char). Embedded as a literal in the string below.
+  if (key === "q" || key === "Q" || key === "") return "continue"
+  return "unknown"
 }
 
 function drawHeader(label: string, width: number): void {

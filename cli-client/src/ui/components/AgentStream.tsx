@@ -3,6 +3,7 @@ import { Box, Static, Text } from "ink"
 import { useAgentEvents } from "../hooks/useAgentEvents.js"
 import { Spinner } from "./Spinner.js"
 import { ActionCard } from "./ActionCard.js"
+import { ErrorBanner } from "./ErrorBanner.js"
 import { ReasoningPeek } from "./ReasoningPeek.js"
 import { Typewriter } from "../animation/primitives/index.js"
 import { palette } from "../theme.js"
@@ -23,7 +24,7 @@ import { formatRunningCardsForSpinner } from "../spinner-label-format.js"
  * actively-running card and the spinner re-render each frame.
  */
 export function AgentStream(): React.ReactElement {
-  const { log, spinnerText, toolCards, assistantMessage, reasoningBrief } = useAgentEvents()
+  const { log, spinnerText, toolCards, assistantMessage, reasoningBrief, infraError } = useAgentEvents()
 
   // Partition cards: settled ones go to <Static> (no per-frame redraw),
   // the in-flight one (if any) stays in the live region. There's at most
@@ -81,6 +82,15 @@ export function AgentStream(): React.ReactElement {
         <Box marginTop={0}>
           <Spinner text={resolveSpinnerLabel(toolCards, spinnerText) || undefined} />
         </Box>
+      )}
+      {/*
+        Stage 4 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+        (audit issue #1): sysflow_infra error banner rendered in the live
+        region instead of agent.ts writing 5+ raw console.log lines (the
+        gotcha-104 risk class).
+      */}
+      {infraError && (
+        <ErrorBanner title={infraError.title} message={infraError.message} hint={infraError.hint} />
       )}
     </Box>
   )

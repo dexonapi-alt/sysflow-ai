@@ -98,9 +98,15 @@ export interface AgentEventState {
    *  non-implement runs (`simple` Q&A, `summary`, `bug`). Most-recent
    *  wins; `clear` wipes it for a fresh prompt. */
   runIntent: "simple" | "summary" | "bug" | "implement" | null
+  /** Stage 4 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+   *  (audit issue #1): sysflow-infrastructure error banner. Set when
+   *  `agent.ts` emits the `infra_error` event on a terminal-exit reason
+   *  of `sysflow_infra`. The <AgentStream> renders an <ErrorBanner>
+   *  block in the live region. Null when no infra error fired. */
+  infraError: { title: string; message: string; hint: string | null } | null
 }
 
-const INITIAL: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null, runStartedAt: null, runIntent: null }
+const INITIAL: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null, runStartedAt: null, runIntent: null, infraError: null }
 
 let nextLogId = 1
 
@@ -224,6 +230,20 @@ export function reduceAgentEvent(prev: AgentEventState, event: AgentEvent): Agen
         && event.intent !== "implement"
       ) return prev
       return { ...prev, runIntent: event.intent }
+    }
+    case "infra_error": {
+      // Stage 4 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+      // (audit issue #1). Defensive: require a non-empty title so a
+      // malformed emission can't produce a blank banner.
+      if (typeof event.title !== "string" || event.title.length === 0) return prev
+      return {
+        ...prev,
+        infraError: {
+          title: event.title,
+          message: typeof event.message === "string" ? event.message : "",
+          hint: typeof event.hint === "string" && event.hint.length > 0 ? event.hint : null,
+        },
+      }
     }
     default:
       return prev

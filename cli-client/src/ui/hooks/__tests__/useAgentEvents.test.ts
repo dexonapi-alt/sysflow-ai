@@ -1,9 +1,55 @@
 import { describe, it, expect, beforeEach } from "vitest"
 import { reduceAgentEvent, _resetIdsForTests, type AgentEventState } from "../useAgentEvents.js"
 
-const initial: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null, runStartedAt: null, runIntent: null }
+const initial: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null, runStartedAt: null, runIntent: null, infraError: null }
 
 beforeEach(() => _resetIdsForTests())
+
+// Stage 4 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md (audit issue #1).
+describe("reduceAgentEvent — infra_error event", () => {
+  it("sets the infraError slot from a well-formed event", () => {
+    const after = reduceAgentEvent(initial, {
+      type: "infra_error",
+      title: "SYSFLOW INFRASTRUCTURE ERROR",
+      message: "OpenRouter returned 402: insufficient credits",
+      hint: "Top up at openrouter.ai/credits and re-run.",
+    })
+    expect(after.infraError).toEqual({
+      title: "SYSFLOW INFRASTRUCTURE ERROR",
+      message: "OpenRouter returned 402: insufficient credits",
+      hint: "Top up at openrouter.ai/credits and re-run.",
+    })
+  })
+
+  it("normalises a missing hint to null (JSON-safe)", () => {
+    const after = reduceAgentEvent(initial, {
+      type: "infra_error",
+      title: "X",
+      message: "Y",
+    })
+    expect(after.infraError).toEqual({ title: "X", message: "Y", hint: null })
+  })
+
+  it("ignores events with an empty title (defensive)", () => {
+    const after = reduceAgentEvent(initial, {
+      type: "infra_error",
+      title: "",
+      message: "still no banner",
+    })
+    expect(after.infraError).toBeNull()
+  })
+
+  it("clear wipes the infraError slot (fresh prompt)", () => {
+    const withBanner = reduceAgentEvent(initial, {
+      type: "infra_error",
+      title: "X",
+      message: "Y",
+    })
+    expect(withBanner.infraError).not.toBeNull()
+    const cleared = reduceAgentEvent(withBanner, { type: "clear" })
+    expect(cleared.infraError).toBeNull()
+  })
+})
 
 describe("reduceAgentEvent — log + spinner", () => {
   it("appends log entries with auto-incrementing ids", () => {

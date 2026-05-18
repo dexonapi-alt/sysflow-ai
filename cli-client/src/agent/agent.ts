@@ -852,16 +852,34 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
           // user action required (top up credits, /model swap, set
           // env var). Halt cleanly with a distinct banner so the user
           // doesn't confuse it with a project-side error.
+          //
+          // Stage 4 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+          // (audit issue #1): emit a structured `infra_error` event so
+          // <AgentStream> can render an <ErrorBanner> in the live region.
+          // Pre-Stage-4 the cli wrote 5+ raw console.log lines here — same
+          // gotcha-104 risk class as raw cursor-up writes. Legacy mode
+          // (shouldRenderInlineForLegacy() === true) still uses the
+          // inline path so terminals without Ink stay readable.
           sysflowInfraErrorCount = 1
           spinner.stop()
-          console.log("")
-          console.log(colors.error("  ═══ SYSFLOW INFRASTRUCTURE ERROR ═══"))
-          console.log(colors.warning("  " + ((response.error as string) || "Unspecified sysflow backend failure")))
-          console.log("")
-          console.log(colors.muted("  This is a sysflow / API provider issue — not a problem with your project."))
-          console.log(colors.muted("  Take the suggested action and re-run. The agent will NOT try to 'fix' this from inside your project."))
-          console.log(colors.error("  ═══════════════════════════════════"))
-          console.log("")
+          const errorMsg = (response.error as string) || "Unspecified sysflow backend failure"
+          const hint = "This is a sysflow / API provider issue — not a problem with your project. Take the suggested action and re-run. The agent will NOT try to 'fix' this from inside your project."
+          if (shouldRenderInlineForLegacy()) {
+            console.log("")
+            console.log(colors.error("  ═══ SYSFLOW INFRASTRUCTURE ERROR ═══"))
+            console.log(colors.warning("  " + errorMsg))
+            console.log("")
+            console.log(colors.muted("  " + hint))
+            console.log(colors.error("  ═══════════════════════════════════"))
+            console.log("")
+          } else {
+            emitAgent({
+              type: "infra_error",
+              title: "SYSFLOW INFRASTRUCTURE ERROR",
+              message: errorMsg,
+              hint,
+            })
+          }
           cleanupDiffListener()
           await recordTelemetry("sysflow_infra")
           return response
