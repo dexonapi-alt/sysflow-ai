@@ -77,11 +77,18 @@ export class OpenRouterProvider extends BaseProvider {
       const MAX_RETRIES = 2
       let response: Response | undefined
       let lastError: Error | undefined
-      // Default headroom stays — the right way to spend less is to make the
-      // AGENT chunk work across turns (see task-guidelines.ts CHUNKING),
-      // not to cap responses preemptively. The 402 affordability retry below
-      // is a safety net for accounts that genuinely can't afford the request.
-      let maxTokensCap = this.getAdaptiveMaxTokens(32768)
+      // 2026-05-18: base cap lowered from 32768 → 8192.
+      // The pre-fix default trusted "the agent will chunk work" to bound
+      // per-turn output. But chunked-loop bounds work to ≤5 files
+      // (~3-6k tokens of code) per chunk, so 32768 always over-asked. A
+      // user with limited credits would 402 on the FIRST request even
+      // though the actual response would never have needed that much.
+      // 8192 matches Anthropic's default cap, comfortably holds a
+      // chunked response (5 files + reasoning + plan + envelope), and
+      // halves the affordable threshold a user needs to start the run.
+      // The 402 affordability retry below is still the safety net for
+      // accounts that can't even afford 8192.
+      let maxTokensCap = this.getAdaptiveMaxTokens(8192)
 
       for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
         try {
@@ -169,8 +176,32 @@ export class OpenRouterProvider extends BaseProvider {
           return this.failedResponse(`OpenRouter auth error (${status}). Check your OPENROUTER_API_KEY.`, "sysflow_infra")
         }
         if (status === 402) {
+          // The 402 envelope reaches here in two distinct shapes (per
+          // classify402Terminal):
+          //   "insufficient_credits" — body literally says credits are
+          //     exhausted; no retry would help.
+          //   "below_meaningful_threshold" — body parses an affordable
+          //     number but it's below MEANINGFUL_AFFORDABLE_THRESHOLD.
+          //     The user MAY still have some credits — they just don't
+          //     cover the request's current max_tokens setting at the
+          //     active model's rate.
+          // Pre-fix the message said "out of credits" for both, which
+          // mis-classifies the second case and confuses users who can
+          // still re-prompt (because the next request might fit, or
+          // because chunked-loop reduces output per turn). Surface the
+          // affordable number directly when we have it so the user can
+          // judge whether to top up, switch to /model gemini-flash, or
+          // wait for the chunked-loop to land a smaller request.
+          const terminal = classify402Terminal(errBody)
+          const affordable = parseAffordableTokens(errBody)
+          const explanation =
+            terminal === "insufficient_credits"
+              ? `OpenRouter says your credits are exhausted.`
+              : affordable !== null
+                ? `OpenRouter could only afford ${affordable} tokens on this request, which is below the minimum needed to retry usefully. You may still have remaining credit — the agent's next request might fit, or chunked-loop will land a smaller request — but this turn won't complete.`
+                : `OpenRouter rejected this request as too large for your remaining credit balance.`
           return this.failedResponse(
-            `OpenRouter is out of credits and even the lowest affordable max_tokens would be too small to be useful. ` +
+            `${explanation} ` +
             `Top up at https://openrouter.ai/settings/credits, switch model with /model gemini-flash, ` +
             `or set GEMINI_API_KEY in server/.env (free tier from Google AI Studio). Original error: ${errBody.slice(0, 200)}`,
             "sysflow_infra"
@@ -248,14 +279,23 @@ export function parseAffordableTokens(errBody: string): number | null {
  *   - "insufficient_credits" — the body says credits are exhausted
  *     without an affordable number. No retry will succeed.
  *   - "below_meaningful_threshold" — the affordable number IS present
- *     but too small for any practical request (< 4096 tokens — won't
- *     hold a meaningful response even after the 90% safety margin).
+ *     but too small for a practical chunked response.
  *   - null — affordable number is high enough that lowering max_tokens
  *     is genuinely worth retrying.
  *
+ * 2026-05-18: threshold lowered from 4096 → 2048. User repro showed
+ * "affordable=2708, requested=6608" failing as "out of credits" even
+ * though the user had remaining credits — just not enough for the
+ * 32768 default cap. At 2048, the retry path fires for affordable
+ * ≥ 2048 (resulting max_tokens ≥ 1843 after the 90% margin), giving
+ * the chunked-loop a chance to land a smaller request rather than
+ * surfacing a misleading infra error. Chunked-loop bounds work to
+ * ≤5 files per chunk so 1843-2400 max_tokens is workable for typical
+ * agent turns.
+ *
  * Pure; exported for tests.
  */
-export const MEANINGFUL_AFFORDABLE_THRESHOLD = 4096
+export const MEANINGFUL_AFFORDABLE_THRESHOLD = 2048
 
 export function classify402Terminal(errBody: string): "insufficient_credits" | "below_meaningful_threshold" | null {
   if (!errBody || typeof errBody !== "string") return null
