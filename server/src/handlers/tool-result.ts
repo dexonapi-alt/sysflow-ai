@@ -64,6 +64,23 @@ import { synthesizeAwarenessHaltResponse } from "../services/awareness-halt-synt
 import { runVerificationGate, gateSignals } from "../services/verification-gate.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 
+/**
+ * Plan `2026-05-18-awareness-heuristic-accuracy.md` Stage 2: tool names
+ * that count as "investigation" for the `no_investigation_before_write`
+ * heuristic, in addition to safe-read-only `run_command` invocations.
+ * The user repro: agent called `list_directory(.)` + `list_directory(sysbase)`
+ * before writing — that IS investigation, but the pre-Stage-2 heuristic
+ * only watched `run_command`, so it false-fired.
+ */
+const INVESTIGATION_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "list_directory",
+  "read_file",
+  "batch_read",
+  "search_code",
+  "search_files",
+  "file_exists",
+])
+
 /** Track how many times completion was rejected per run (prevent infinite loops) */
 const completionRejections = new Map<string, number>()
 const MAX_COMPLETION_REJECTIONS = 3
@@ -2181,12 +2198,24 @@ function buildDetectorInput(runId: string, originalPrompt: string): DetectorInpu
   // first write/edit index from the existing actions log. No separate
   // tracker needed — runLog.actions already records every tool call with
   // its primary args (tool name + command + path).
+  //
+  // Plan 2026-05-18-awareness-heuristic-accuracy.md Stage 2:
+  // ALSO count structured-read tool calls (`list_directory`,
+  // `read_file`, `batch_read`, `search_code`, `search_files`,
+  // `file_exists`) as investigation. The pre-Stage-2 heuristic
+  // false-fired on agents that investigated via structured tools
+  // before writing — `list_directory(.)` is investigation, not
+  // hallucination.
   let investigationCommandCount = 0
+  let investigationToolCount = 0
   let firstWriteOrEditIndex = -1
   for (let i = 0; i < runLog.actions.length; i++) {
     const a = runLog.actions[i]
     if (a.tool === "run_command" && typeof a.command === "string" && isSafeReadOnlyCommand(a.command)) {
       investigationCommandCount += 1
+    }
+    if (INVESTIGATION_TOOL_NAMES.has(a.tool as string)) {
+      investigationToolCount += 1
     }
     if (firstWriteOrEditIndex < 0 && (a.tool === "write_file" || a.tool === "edit_file" || a.tool === "batch_write")) {
       firstWriteOrEditIndex = i
@@ -2237,6 +2266,7 @@ function buildDetectorInput(runId: string, originalPrompt: string): DetectorInpu
     completionMessage: null,
     plannedChunkCount: null,
     investigationCommandCount,
+    investigationToolCount,
     firstWriteOrEditIndex,
     complexity,
     recentActions,

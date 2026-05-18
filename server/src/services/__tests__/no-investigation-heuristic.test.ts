@@ -94,6 +94,60 @@ describe("no_investigation_before_write heuristic", () => {
   })
 })
 
+// Plan 2026-05-18-awareness-heuristic-accuracy.md Stage 2.
+describe("no_investigation_before_write — structured tool calls also count as investigation", () => {
+  it("does NOT fire when investigationToolCount > 0 even if investigationCommandCount === 0 (user repro: 2× list_directory before writes)", () => {
+    const sigs = detectDivergence(baseInput({
+      filesModified: ["src/index.ts"],
+      firstWriteOrEditIndex: 2,
+      investigationCommandCount: 0,
+      investigationToolCount: 2,
+    }))
+    expect(sigs.some((s) => s.category === "no_investigation_before_write")).toBe(false)
+  })
+
+  it("does NOT fire when mixed: 1 safe-read run_command + 1 list_directory (sum is what matters)", () => {
+    const sigs = detectDivergence(baseInput({
+      filesModified: ["src/App.tsx"],
+      firstWriteOrEditIndex: 2,
+      investigationCommandCount: 1,
+      investigationToolCount: 1,
+    }))
+    expect(sigs.some((s) => s.category === "no_investigation_before_write")).toBe(false)
+  })
+
+  it("STILL fires when both counts are 0 (no investigation of any kind)", () => {
+    const sigs = detectDivergence(baseInput({
+      filesModified: ["src/App.tsx"],
+      firstWriteOrEditIndex: 0,
+      investigationCommandCount: 0,
+      investigationToolCount: 0,
+    }))
+    expect(sigs.some((s) => s.category === "no_investigation_before_write")).toBe(true)
+  })
+
+  it("STILL fires when investigationToolCount is undefined and run_command count is 0 (back-compat)", () => {
+    // No investigationToolCount in the input — older callers / tests.
+    const sigs = detectDivergence(baseInput({
+      filesModified: ["src/App.tsx"],
+      firstWriteOrEditIndex: 0,
+      investigationCommandCount: 0,
+      // investigationToolCount omitted on purpose
+    }))
+    expect(sigs.some((s) => s.category === "no_investigation_before_write")).toBe(true)
+  })
+
+  it("only a single read_file before a write is enough to suppress (one is not zero)", () => {
+    const sigs = detectDivergence(baseInput({
+      filesModified: ["src/App.tsx"],
+      firstWriteOrEditIndex: 1,
+      investigationCommandCount: 0,
+      investigationToolCount: 1,
+    }))
+    expect(sigs.some((s) => s.category === "no_investigation_before_write")).toBe(false)
+  })
+})
+
 describe("server-side isSafeReadOnlyCommand mirror", () => {
   it("matches the cli-client allowlist for canonical investigation commands", () => {
     expect(isSafeReadOnlyCommand("git status")).toBe(true)

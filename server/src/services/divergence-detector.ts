@@ -81,6 +81,22 @@ export interface DetectorInput {
    */
   investigationCommandCount?: number
   /**
+   * Plan `2026-05-18-awareness-heuristic-accuracy.md` Stage 2: count of
+   * STRUCTURED-read tool calls the agent has run this run —
+   * `list_directory`, `read_file`, `batch_read`, `search_code`,
+   * `search_files`, `file_exists`. The user-reported repro: agent did
+   * `list_directory(.)` + `list_directory(sysbase)` before writing, but
+   * `no_investigation_before_write` still fired because the pre-Stage-2
+   * heuristic only counted safe-read-only `run_command` invocations.
+   * That form of investigation is just as valid.
+   *
+   * Summed with `investigationCommandCount` for the threshold check —
+   * either kind counts as "the agent did investigation". Optional for
+   * back-compat with the existing detector tests that only set
+   * `investigationCommandCount`.
+   */
+  investigationToolCount?: number
+  /**
    * Stage 4: index of the FIRST write_file / edit_file / batch_write
    * action in the run log. -1 (or undefined) when nothing has been
    * written yet. The heuristic fires when this is set AND
@@ -317,7 +333,13 @@ export function detectDivergence(input: DetectorInput): DivergenceSignal[] {
   // for a legitimate reason (e.g. user gave specific instructions). The
   // off-course modal won't fire on this alone — it needs the cumulative
   // decay to drop below `awareness.threshold_off_course`.
-  const investigationCount = input.investigationCommandCount ?? 0
+  // Plan 2026-05-18-awareness-heuristic-accuracy.md Stage 2: sum
+  // safe-read-only `run_command` invocations AND structured-read tool
+  // calls (list_directory, read_file, batch_read, search_code,
+  // search_files, file_exists). Either form is genuine investigation;
+  // the pre-Stage-2 heuristic only counted run_command and false-fired
+  // on agents that investigated via structured tools.
+  const investigationCount = (input.investigationCommandCount ?? 0) + (input.investigationToolCount ?? 0)
   const firstWriteIdx = input.firstWriteOrEditIndex ?? -1
   if (
     firstWriteIdx >= 0
