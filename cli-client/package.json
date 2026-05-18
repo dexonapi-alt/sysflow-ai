@@ -9,7 +9,7 @@
   "main": "src/index.ts",
   "scripts": {
     "start": "tsx src/index.ts",
-    "dev": "tsx --watch src/index.ts",
+    "dev": "tsc --noEmit --watch --preserveWatchOutput",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

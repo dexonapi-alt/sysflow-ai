@@ -68,6 +68,23 @@ async function main(): Promise<void> {
   }
 
   if (args.length === 0) {
+    // 2026-05-18: defensive non-TTY guard. Ink's `useInput()` requires
+    // stdin in raw mode, which fails when the process is launched
+    // under a stdin-multiplexing parent (turbo dev's --parallel mode,
+    // CI runners, `npm run dev` from the monorepo root, etc.). The
+    // pre-fix path mounted Ink anyway and the user saw a raw
+    // `Raw mode is not supported on the current process.stdin` stack
+    // trace from deep inside react-reconciler. Bail early with a
+    // friendly message + a hint at the legacy escape hatch.
+    if (inkEnabled && !process.stdin.isTTY) {
+      console.error("  error: sysflow CLI needs an interactive terminal (raw-mode stdin).")
+      console.error("")
+      console.error("  Looks like you're running through a stdin-multiplexing parent")
+      console.error("  (turbo / npm run dev / CI). Run `sys` directly in your terminal instead.")
+      console.error("  Set SYS_LEGACY=1 (or pass --legacy) to fall back to the non-Ink renderer,")
+      console.error("  which has limited interactivity but doesn't require raw mode.")
+      process.exit(1)
+    }
     if (inkEnabled) {
       const { startInkUi } = await import("./ui/start.js")
       await startInkUi()
@@ -80,6 +97,14 @@ async function main(): Promise<void> {
   const parsed = parseCliInput(args)
 
   if (parsed.mode === "ui") {
+    // 2026-05-18: same non-TTY guard as the args-empty path above —
+    // explicit `sys ui` invocation under a piped stdin should fail
+    // with a friendly message, not a deep react-reconciler stack.
+    if (inkEnabled && !process.stdin.isTTY) {
+      console.error("  error: sysflow CLI needs an interactive terminal (raw-mode stdin).")
+      console.error("  Run `sys` directly in your terminal, or set SYS_LEGACY=1 for the non-Ink fallback.")
+      process.exit(1)
+    }
     if (inkEnabled) {
       const { startInkUi } = await import("./ui/start.js")
       await startInkUi()
