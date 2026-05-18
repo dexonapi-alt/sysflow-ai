@@ -357,3 +357,28 @@ Past bugs and non-obvious constraints worth preserving so the next contributor d
   Multi-card aggregation: same file-tool → `writing N files`, mixed → `running N tools`. The `reason` tool's per-tool verb is `thinking through it` to match the cycle's vocabulary so the transition reads as the same activity.
 - **Prevention:** when wiring a new visual surface to existing state, prefer composing from existing reducer slots over adding new events. The user-reported pattern was solvable by filtering `toolCards` by `status === "running"` — no new bus protocol needed. New events are a code smell; existing state usually carries the info if you look.
 - **Test guards:** `cli-client/src/ui/__tests__/spinner-label-format.test.ts` (30 tests: per-tool formatters + multi-card aggregation + resolver priority composition + idle fallback).
+
+## Off-course modal evidence rendered stale signals from earlier turns
+
+- **Source:** plan `applied/2026-05-18-awareness-heuristic-accuracy.md` (Stage 1)
+- **Symptom:** user trace (2026-05-18 Express scaffold):
+
+  ```
+  ● Write(package.json)        ← package.json with "express": "^4..." just landed
+  ● Read(package.json)
+  ╭── OFF COURSE ──────────────────────────────────────────────────╮
+  │ Evidence:
+  │   [major] user asked for express but no related files / mentions …
+  ```
+
+  The `intent_keyword_absent: express` complaint kept appearing in the modal even AFTER `package.json` with `"express"` as a dep had been written — the Stage-2 structural-signal check on the awareness-and-verification-correctness plan was satisfying the keyword on the current turn, but the modal still showed the stale complaint.
+
+- **Root cause:** `synthesizeAwarenessHaltResponse` rendered the modal evidence by slicing the dedupe'd tail of the FULL signal history accumulated by `confidence-tracker.recordSignals()`. The history is append-only — once `intent_keyword_absent: express` fired on turn 2 (before any files existed), it stayed in the history forever. Slicing the tail produced evidence that contradicted what the current turn's detector actually verified.
+
+  The score-decay still legitimately considers the cumulative history. The bug was on the EVIDENCE-rendering side: modal evidence should show what's TRUE NOW, not what's stuck in history.
+
+- **Fix:** `AwarenessHaltInputs.currentTurnSignals` (optional) — the array returned by THIS turn's `detectDivergence`. When provided, the synthesis renders the modal evidence from that list (deduped) instead of slicing historical signals. Both call sites in `tool-result.ts` (per-step path + chunk-boundary path) plumb their just-detected signals through. Back-compat: callers that don't pass it fall back to the historical dedupe+slice.
+
+- **Prevention:** when surfacing aggregated state to the user, distinguish "for scoring" (cumulative history) from "for display" (current-turn snapshot). The same signal field doing both jobs is the trap. Treat the score as a stateful accumulator and the modal evidence as a stateless render of the current detector verdict — they're DIFFERENT semantics that look similar at the API boundary.
+
+- **Test guards:** `server/src/services/__tests__/awareness-halt-synthesis.test.ts` — `currentTurnSignals override` describe block (6 tests pinning override-beats-history, empty-current-turn → empty-modal-evidence, back-compat fallback, dedup behaviour, user-repro express scaffold case).

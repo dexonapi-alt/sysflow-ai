@@ -1,7 +1,7 @@
 # Awareness heuristic accuracy: stale signals + investigation count
 
 - **Created:** 2026-05-18
-- **Status:** in-progress
+- **Status:** implemented (2026-05-18)
 - **Scope:** Two visible heuristic-accuracy bugs from 2026-05-18 user testing — `intent_keyword_absent: express` fires even though `package.json` was just written WITH express as a dependency, and `no_investigation_before_write` fires even though the agent did 2× `list_directory` first.
 
 ## Goal
@@ -87,3 +87,20 @@ Three stages = ~3 PRs.
 - Full confidence-tracker auto-resolve path (auto-clear signals when underlying condition flips). Deferred to a separate plan if the modal-evidence filter alone doesn't recover the trust signal.
 - Adjusting heuristic weights. The fix is on the INPUT side (don't fire false positives), not the SCORING side.
 - Cross-run signal persistence. Each run starts fresh; no need to plumb history through restarts.
+
+## Completion notes
+
+Shipped across 3 PRs (#134, #135, this one).
+
+- **Stage 1 (#134)** — `AwarenessHaltInputs.currentTurnSignals` (optional) lets `synthesizeAwarenessHaltResponse` render the modal evidence from THIS turn's just-detected signals instead of slicing the cumulative history. Both call sites in `tool-result.ts` (per-step + chunk-boundary) plumb their detector output through. Diagnostic log fires when `intent_keyword_absent` triggers on the per-step path, surfacing the content-snippet index state for the (a)/(b)/(c) hypothesis localisation. Back-compat preserved: historical dedupe+slice is the fallback. +7 tests.
+- **Stage 2 (#135)** — `DetectorInput.investigationToolCount` field; heuristic 7 sums it with `investigationCommandCount` against the zero-check. `buildDetectorInput` populates the new field from `runLog.actions` filtered through the new `INVESTIGATION_TOOL_NAMES` set (`list_directory`, `read_file`, `batch_read`, `search_code`, `search_files`, `file_exists`). +5 tests.
+- **Stage 3 (this PR)** — Decisions entry: "Investigation = safe-read `run_command` OR structured-read tool calls" (sums both counts, lists the canonical tool names, explains why structured-read tools count, why post-write `_verification` / `_lint` don't). Gotcha entry: "Off-course modal evidence rendered stale signals from earlier turns" (full user-repro, root cause, fix, prevention rule, test-guard reference). Plan moved to `.claude/plans/applied/`.
+
+Plan 3 deliberately did NOT touch the score-decay side of the stale-signal problem — only the modal-evidence rendering side. The score still considers the full history (which is fine: the heuristic that fired turns ago WAS evidence at the time). If the score reaching `blocked` is itself stale, that's a separate plan.
+
+Stage 2's design avoided introducing a new "investigation = true/false" boolean. Two counts gives the heuristic room to evolve later (e.g. weighted scoring: "n structured reads + m run_commands"). For now both > 0 is treated equivalently — a single read is enough to suppress.
+
+Open follow-ups (NOT in this plan):
+
+- Auto-detect when an `intent_keyword_absent` signal in history has been satisfied on a later turn and either decay it out of the score, or stop counting it for threshold purposes. The modal-evidence fix is the user-visible part; the score-decay can wait for repro.
+- Counting `read_file` on a directory it just `list_directory`'d as a single investigation gesture (currently counts as 2). Not worth the complexity for the heuristic — the noise is downward (more investigation looks more compliant), not upward.
