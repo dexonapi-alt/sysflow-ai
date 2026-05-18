@@ -1176,3 +1176,87 @@ Four mechanical gates + one LLM verdict prevent the agent from declaring "comple
   - `quality.precompletion_tsc_gate_enabled` (default `true`)
   - `quality.precompletion_tsc_timeout_ms` (default `30000`)
   - `quality.completion_artifact_check_enabled` (default `true`)
+
+## Batch sequencing + accountability
+
+- **Source:** plan `applied/2026-05-16-accountability-and-parallel-execution-sequencing.md`
+
+Five orthogonal gates fire across the tool-batch lifecycle to force the agent to reason per file, write in dependency order, verify what it wrote, and not duplicate effort across the same run. Each gate is independent; together they replace the pre-plan "agent blasts 11 parallel tools without reasoning" pattern with "agent reasons each file, writes ≤ 3 at a time in correct dependency order, reads back, then continues".
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│  agent emits N tool calls in one response                              │
+│       │                                                                 │
+│       ▼                                                                 │
+│  ┌──── Stage 5 (server-side, pre-cli-dispatch) ──────────────────┐     │
+│  │  per-file-reasoning gate:                                       │     │
+│  │     if tools.length > 3 AND non-empty reasoning < tools.length  │     │
+│  │     → reject + inject INSUFFICIENT REASONING prompt             │     │
+│  │     → re-call adapter (max 3 rejections per run)                │     │
+│  └─────────────────────────────────────────────────────────────────┘     │
+│       │                                                                 │
+│       ▼                                                                 │
+│  ┌──── Stage 1 (cli-side) ──────────────────────────────────────┐      │
+│  │  parallel-batch-cap:                                          │      │
+│  │     cap = 3 (default) or 5 (existing-large repoState)         │      │
+│  │     N > cap → execute first cap, defer rest with synthetic    │      │
+│  │     batch_cap_enforced failure results                        │      │
+│  └───────────────────────────────────────────────────────────────┘      │
+│       │                                                                 │
+│       ▼                                                                 │
+│  ┌──── Stage 2 (cli-side, intra-batch) ─────────────────────────┐      │
+│  │  topo-sort writes by relative-import deps:                    │      │
+│  │     producer-before-consumer order via Kahn's algorithm       │      │
+│  │     dependent writes collapse into ONE serial group           │      │
+│  │     import cycle → synthetic import_cycle failures + exclude  │      │
+│  │     from execution                                            │      │
+│  └───────────────────────────────────────────────────────────────┘      │
+│       │                                                                 │
+│       ▼                                                                 │
+│  ┌──── Stage 4 (cli-side, per-write) ───────────────────────────┐      │
+│  │  already-created guard:                                       │      │
+│  │     per-run Set<path> of successful writes                    │      │
+│  │     2nd write of same path → synthetic already_created        │      │
+│  │     failure unless _acknowledge_overwrite: true               │      │
+│  │     delete_file removes path so create→delete→recreate works  │      │
+│  └───────────────────────────────────────────────────────────────┘      │
+│       │                                                                 │
+│       ▼                                                                 │
+│  cli executes batch → tool_result lands on server                       │
+│       │                                                                 │
+│       ▼                                                                 │
+│  ┌──── Stage 3 (server-side, post-tool-result) ─────────────────┐      │
+│  │  read-after-write inject (one-shot per run):                  │      │
+│  │     if repoState ∈ {empty, small} AND ≥ 1 successful write    │      │
+│  │     AND latch === "pending":                                  │      │
+│  │     → inject READ-AFTER-WRITE REQUIRED block via              │      │
+│  │       actionPlanner.injectContext                             │      │
+│  │     → mark latch fired (subsequent batches use chunked-loop   │      │
+│  │       reflector instead)                                      │      │
+│  └───────────────────────────────────────────────────────────────┘      │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### Composition notes
+
+- **Stage 5 fires BEFORE Stage 1** — the server gate sees the model's raw response; rejecting there forces the model to either shrink the batch OR add per-file paragraphs before the cli even sees the tool list. Stage 1's cap is the SAFETY NET when Stage 5 hits its rejection cap or when the model emits exactly 4-N tools with one paragraph (e.g. 4 tools / 4 paragraphs passes Stage 5 but Stage 1 still caps to 3 + defers 1).
+- **Stage 2 operates within Stage 1's executed batch** — by the time topo-sort runs, the batch is already at most 3-5 tools (cap). The dep graph builds across just those.
+- **Stage 4 is orthogonal** — it gates each individual write regardless of batch composition or order.
+- **Stage 3 reads the batch's outcome** — its `writtenPaths` list comes from the cli's executed batch (after Stage 1 + 2's filtering + Stage 4's gating).
+
+### Key files (one source of truth per concern)
+
+- Per-file-reasoning gate: `server/src/services/per-file-reasoning-guard.ts` (`validatePerFileReasoning` + `buildInsufficientReasoningPrompt`)
+- Batch cap + topo sort: `cli-client/src/agent/tool-meta.ts` (`applyBatchCap` / `resolveBatchCap` / `topoOrderParallelWrites` / `extractRelativeImports` / `resolveRelativeImport`)
+- Already-created guard: `cli-client/src/agent/executor.ts` (`shouldGuardAlreadyCreated` + `buildAlreadyCreatedResult` + per-run `_createdPathsPerRun` Map)
+- Read-after-write inject: `server/src/services/read-after-write-inject.ts` (`shouldFireReadAfterWriteInject` + `buildReadAfterWriteInject` + per-run latch)
+- Wiring: `executeToolsBatch` in `cli-client/src/agent/executor.ts` for cli-side gates; `tool-result.ts` + `user-message.ts` for server-side gates.
+- Telemetry: `RunSummary.maxBatchSize / batchCapEnforcedCount / reorderedBatchCount / alreadyCreatedRejectionCount / insufficientReasoningRejectionCount`
+- Flags:
+  - `quality.parallel_batch_cap_default` (default `3`)
+  - `quality.parallel_batch_cap_existing_large` (default `5`)
+  - `quality.parallel_batch_topo_sort_enabled` (default `true`)
+  - `quality.read_after_write_on_fresh_scaffold` (default `true`)
+  - `quality.already_created_guard_enabled` (default `true`)
+  - `quality.per_file_reasoning_required_enabled` (default `true`)
+  - `quality.per_file_reasoning_threshold` (default `3`)

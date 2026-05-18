@@ -34,7 +34,7 @@ import { renderReasoningBrief, renderDecisionBrief } from "../cli/reasoning-disp
 import { classifyResponse, makeRetryBudget, noteSuccess, type RetryBudget } from "./state-machine.js"
 import { recordRunSummary } from "./usage-log.js"
 import { getReasoningPeekExpansions, resetReasoningPeekExpansions } from "../ui/components/ReasoningPeek.js"
-import { getNullToolRejections, resetNullToolRejections, getImportsStrippedCount, resetImportsStrippedCount, getDotfileFilterCorrections, resetDotfileFilterCorrections, getAlreadyCreatedRejectionCount, resetAlreadyCreatedRejectionCount, clearCreatedPaths } from "./executor.js"
+import { getNullToolRejections, resetNullToolRejections, getImportsStrippedCount, resetImportsStrippedCount, getDotfileFilterCorrections, resetDotfileFilterCorrections, getAlreadyCreatedRejectionCount, resetAlreadyCreatedRejectionCount, clearCreatedPaths, getBatchCapEnforcedCount, resetBatchCapEnforcedCount, getBatchReorderedCount, resetBatchReorderedCount } from "./executor.js"
 import { getWindowsShellErrorsCaught, resetWindowsShellErrorsCaught } from "./tools.js"
 import { getNonRetryable5xxCount, resetNonRetryable5xxCount } from "../lib/server.js"
 import { estimateTokens as cliEstimateTokens } from "./token-estimate.js"
@@ -521,6 +521,11 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   // when Stage 3's off-course modal renders.
   let intentKeywordContentMatchesPeak = 0
   let awarenessModalShownThisRun = false
+  // Stage 6 of accountability-and-parallel-execution-sequencing plan:
+  // peak observed batch size (tools.length across all turns) +
+  // server-side insufficient-reasoning rejection peak.
+  let maxBatchSizeObserved = 0
+  let insufficientReasoningRejectionPeak = 0
   // Stage 4 of reasoning-chain-provider-parity plan: distribution
   // counters for structured-vs-synthesised per-turn reasoning. Bumped
   // each turn based on the server-side classification surfaced on
@@ -693,6 +698,12 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       intentKeywordContentMatches: intentKeywordContentMatchesPeak,
       awarenessModalShown: awarenessModalShownThisRun,
       windowsShellErrorsCaught: getWindowsShellErrorsCaught(),
+      // Stage 6 of accountability-and-parallel-execution-sequencing plan.
+      maxBatchSize: maxBatchSizeObserved,
+      batchCapEnforcedCount: getBatchCapEnforcedCount(),
+      reorderedBatchCount: getBatchReorderedCount(),
+      alreadyCreatedRejectionCount: getAlreadyCreatedRejectionCount(),
+      insufficientReasoningRejectionCount: insufficientReasoningRejectionPeak,
     })
     resetReasoningPeekExpansions()
     resetNullToolRejections()
@@ -704,6 +715,9 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
     // Stage 4 of accountability-and-parallel-execution-sequencing plan.
     resetAlreadyCreatedRejectionCount()
     if (currentRunId) clearCreatedPaths(currentRunId)
+    // Stage 6 of accountability-and-parallel-execution-sequencing plan.
+    resetBatchCapEnforcedCount()
+    resetBatchReorderedCount()
     unregisterSpinner()
   }
 
@@ -915,6 +929,21 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
         const intentMatches = (response as Record<string, unknown>).intentKeywordContentMatches
         if (typeof intentMatches === "number" && intentMatches > intentKeywordContentMatchesPeak) {
           intentKeywordContentMatchesPeak = intentMatches
+        }
+        // Stage 6 of accountability-and-parallel-execution-sequencing
+        // plan: peak-wins capture for the server-side
+        // per-file-reasoning rejection counter.
+        const pfRejections = (response as Record<string, unknown>).insufficientReasoningRejectionCount
+        if (typeof pfRejections === "number" && pfRejections > insufficientReasoningRejectionPeak) {
+          insufficientReasoningRejectionPeak = pfRejections
+        }
+        // Stage 6: track the maximum tools[] batch size observed.
+        // Inspects the response from the just-completed turn so the
+        // wide-batch pattern shows up in telemetry even when Stage 1's
+        // cli-side cap deferred the tail.
+        const responseTools = (response as Record<string, unknown>).tools
+        if (Array.isArray(responseTools) && responseTools.length > maxBatchSizeObserved) {
+          maxBatchSizeObserved = responseTools.length
         }
         // Stage 3 of forced-error-reasoning plan: when a turn's response
         // carries `errorReasoningParagraphs`, emit a reasoning_brief

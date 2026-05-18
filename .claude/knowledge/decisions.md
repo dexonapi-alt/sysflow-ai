@@ -771,3 +771,69 @@ Plus the `sysbase*` prefix rule (kept from the original filter). Anything starti
 **Mirrored on both sides.** The cli filters at capture time (`cli-client/src/agent/executor.ts`); the server filters again at ingest time (`server/src/services/context-manager.ts`). A literal-sync test in each suite asserts the lists match — if either side drifts the staleness desync returns. Both files export `NOISE_TOP_LEVEL_ENTRIES` + `isNoiseTopLevelEntry(name)` from the same constant.
 
 **Why not auto-discover noise?** A `.gitignore`-aware filter would be cleaner but adds I/O on every turn (.gitignore could change mid-run); the hard-coded set is a per-build snapshot of what the agent doesn't author at the top level. New noise entries are a one-line addition; the cost of the list growing slightly stale is far less than a false-stale signal eroding agent confidence.
+
+## Parallel batches cap at 3 tools by default on implement runs
+
+- **Source:** plan `applied/2026-05-16-accountability-and-parallel-execution-sequencing.md` (Stage 1)
+
+The user-reported pattern: agent emitted 11 parallel tool calls in one response (3 mkdirs + 8 writes), the cli executed them via `Promise.allSettled`, the agent never reasoned per file ("no accountability per file"). The combined batch shipped one `tool_result`, the server emitted the next response, the agent declared scaffold complete — none of the per-file decisions were ever surfaced or considered.
+
+Stage 1 caps the cli-side per-turn batch size:
+
+- **Default cap: 3** for `repoState ∈ {null, "empty", "small", "existing-small"}` (the common case — fresh scaffolds and small projects where per-file accountability matters most).
+- **Relaxed cap: 5** for `repoState === "existing-large"` (wide edits across a known codebase are more likely legitimate; the model has richer context).
+
+When the agent emits `tools.length > cap`, the cli executes the first `cap` (in order) and DEFERS the rest with synthetic `_errorCategory: "batch_cap_enforced"` failure results. The deferral results merge into the same `tool_result` payload alongside the real outcomes — the agent's NEXT turn sees both the executed batch's real results AND the deferral messages, and can either re-emit the deferred tools (with reasoning) or revise the plan entirely.
+
+**Why a hard cap instead of a soft warning?**
+
+- Soft warnings get ignored by the model. System-level enforcement is the only reliable lever (see decision `## System-level enforcement beats prompt-level guidance for free models`).
+- The cap forces a NATURAL pause between batches where reasoning happens. Without the pause, the model never has a chance to look at its own decisions.
+
+**Why 3 and not 1?**
+
+- A cap of 1 would multiply latency by N (each file = one round-trip). The 3-batch default lets the model still get parallelism on truly independent files (e.g. a config file + an entrypoint + a test) while bounding the per-batch reasoning load.
+
+**Why 5 for existing-large?**
+
+- Wide edits on existing code (refactors, framework migrations) commonly touch 4-5 related files at once. The relaxed cap accepts that the model has more context to draw on.
+
+**Alternatives rejected:**
+
+- *Sequential execution always*: too slow for legitimately parallel writes (independent files).
+- *Configurable per-run via flag only*: still useful but the default cap is the load-bearing piece.
+- *No cap, just warnings*: the user-reported pattern is exactly what "warnings only" produces.
+
+The cap composes with Stage 5 (server-side per-file-reasoning gate at the same threshold of 3) — Stage 5 catches the model's raw response before the cli sees it, Stage 1 caps the wire-side batch as the safety net.
+
+## Producer-before-consumer ordering inside batches
+
+- **Source:** plan `applied/2026-05-16-accountability-and-parallel-execution-sequencing.md` (Stage 2)
+
+When the agent emits `write_file(src/index.ts, "import { auth } from './routes/auth'")` AND `write_file(src/routes/auth.ts, ...)` in the same parallel batch, the cli's pre-Stage-2 `groupForParallelExecution` puts each different path in its own group and runs them via `Promise.allSettled`. If `index.ts` lands on disk (and the import-sanitizer runs) BEFORE `routes/auth.ts` exists, the sanitizer sees the unresolved reference and silently strips it.
+
+Stage 2 topologically sorts `write_file` calls within a batch:
+
+1. Extract relative imports (`./X`, `../X`) from every `write_file`'s content via a static-import regex.
+2. Resolve each import against the batch's other write paths (with `.ts/.tsx/.js/.jsx/.mjs/.cjs` + `/index.{ext}` expansion).
+3. Build a consumer→producer edge map.
+4. Kahn's algorithm to sort producers first.
+5. If a cycle is detected (DFS three-colour) → synthesise `_errorCategory: "import_cycle"` failures for the cycle members and exclude them from execution; the agent has to break the cycle (extract a shared interface, invert one dep) on retry.
+6. Collapse the topo-ordered writes into ONE serial group so they execute sequentially (producer lands BEFORE consumer is dispatched). Non-write tools (`create_directory`) keep parallel grouping.
+
+**Alternatives rejected:**
+
+- *Rely on the import-sanitizer to retry imports*: the sanitizer strips silently, doesn't retry. The agent never knew about the stripped reference.
+- *Ask the model to self-order in the prompt*: System-level enforcement beats prompt-level guidance (see prior decision).
+- *Two-pass execution (write all, then verify imports)*: increases latency, doesn't solve the race condition for the in-flight write.
+
+**Why static-import regex, not AST parsing?**
+
+- Cheap (no parser dependency, no overhead per turn).
+- Catches the user-reported pattern (`import { auth } from "./routes/auth"`).
+- Misses dynamic `import("./X")` and AST-only edge cases — but dynamic imports rarely participate in batch races, and AST parsing would slow every turn.
+
+**Why collapse into ONE serial group instead of multiple ordered groups?**
+
+- Simpler than chaining promises across groups.
+- The collapsed group is bounded by Stage 1's cap (max 5 writes on existing-large), so serialising those 5 sequentially is ~milliseconds of added latency.

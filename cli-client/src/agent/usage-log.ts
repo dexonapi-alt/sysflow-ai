@@ -174,6 +174,32 @@ export interface RunSummary {
    *  emitting bash forms PowerShell rejects = Stage 4.1's platform-
    *  aware prompt isn't fully landing yet. */
   windowsShellErrorsCaught?: number
+  /** Stage 6 of plan 2026-05-16-accountability-and-parallel-execution-sequencing.md.
+   *  Largest `tools[]` batch size observed on a response this run.
+   *  Distribution-wise, high values mean the model is reaching for
+   *  parallel scaffold patterns; Stage 1's cli-side cap (3 by
+   *  default, 5 for existing-large) keeps the actual wire-side
+   *  batch bounded regardless. Defaults to 0. */
+  maxBatchSize?: number
+  /** Stage 6: per-run count of cli batches where Stage 1's cap was
+   *  enforced (at least one tool deferred). Diagnostic for
+   *  "is the agent regularly trying to emit oversized batches?". */
+  batchCapEnforcedCount?: number
+  /** Stage 6: per-run count of cli batches where Stage 2's topo
+   *  sort reordered the writes OR rejected an import cycle.
+   *  Diagnostic for "does the model commonly emit consumer-before-
+   *  producer batches?". Spike on free-tier = the rules-in-prompt
+   *  aren't landing; reactive topo-sort doing real work. */
+  reorderedBatchCount?: number
+  /** Stage 6: per-run count of Stage 4 already-created-guard
+   *  rejections. Spike = the model is re-writing files it already
+   *  wrote within the run. */
+  alreadyCreatedRejectionCount?: number
+  /** Stage 6: peak per-run count of Stage 5 per-file-reasoning
+   *  gate rejections (server-side; surfaced via
+   *  ClientResponse.insufficientReasoningRejectionCount). Spike = the
+   *  model is emitting oversized batches with terse reasoning. */
+  insufficientReasoningRejectionCount?: number
 }
 
 const PROMPT_PREVIEW_CHARS = 200
@@ -252,6 +278,12 @@ export async function recordRunSummary(sysbasePath: string | undefined | null, s
     intentKeywordContentMatches: summary.intentKeywordContentMatches ?? 0,
     awarenessModalShown: summary.awarenessModalShown ?? false,
     windowsShellErrorsCaught: summary.windowsShellErrorsCaught ?? 0,
+    // Stage 6 of accountability-and-parallel-execution-sequencing plan.
+    maxBatchSize: summary.maxBatchSize ?? 0,
+    batchCapEnforcedCount: summary.batchCapEnforcedCount ?? 0,
+    reorderedBatchCount: summary.reorderedBatchCount ?? 0,
+    alreadyCreatedRejectionCount: summary.alreadyCreatedRejectionCount ?? 0,
+    insufficientReasoningRejectionCount: summary.insufficientReasoningRejectionCount ?? 0,
   }
   try {
     await fs.appendFile(file, JSON.stringify(entry) + "\n", "utf8")
