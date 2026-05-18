@@ -27,6 +27,11 @@ build/
 # Logs
 *.log
 npm-debug.log*
+# 2026-05-18: file-logger output directory. Server writes
+# `server-<date>.log` here in dev; cli writes here when
+# SYSFLOW_LOG_DIR is pointed at the repo. Ignore the whole dir so
+# any README / structure inside doesn't accidentally get committed.
+.sysflow-logs/
 
 # Sysbase (local agent memory per project)
 sysbase/

@@ -1,3 +1,11 @@
+// 2026-05-18: file logger mirrors console.* to a daily-rotated file
+// under `~/.sysflow/logs/` (or SYSFLOW_LOG_DIR when set). Init BEFORE
+// any other imports' top-level side effects so startup messages are
+// captured. Default is `~/.sysflow/logs/` because the cli runs from
+// arbitrary user-project dirs; set SYSFLOW_LOG_DIR=<repo>/.sysflow-logs
+// when launching from dev for a shared logs view with the server.
+import { initFileLogger } from "./lib/file-logger.js"
+initFileLogger()
 import fs from "node:fs"
 import { parseCliInput } from "./cli/parser.js"
 import { ensureSysbase, setSelectedModel } from "./lib/sysbase.js"
