@@ -1,4 +1,10 @@
 import "dotenv/config"
+// 2026-05-18: file logger taps console.log/warn/error and mirrors to a
+// daily-rotated file under `<repo>/.sysflow-logs/` (or SYSFLOW_LOG_DIR
+// when set). Init BEFORE any other imports' top-level side effects so
+// startup messages (db connection, route registration) are captured.
+import { initFileLogger } from "./lib/file-logger.js"
+initFileLogger()
 import Fastify from "fastify"
 import cors from "@fastify/cors"
 import { agentRunRoute } from "./routes/agent.js"
