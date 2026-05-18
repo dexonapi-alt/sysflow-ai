@@ -6,6 +6,7 @@ import { ActionCard } from "./ActionCard.js"
 import { ReasoningPeek } from "./ReasoningPeek.js"
 import { Typewriter } from "../animation/primitives/index.js"
 import { palette } from "../theme.js"
+import { formatRunningCardsForSpinner } from "../spinner-label-format.js"
 
 /**
  * Renders the agent's output stream as Ink components.
@@ -78,12 +79,43 @@ export function AgentStream(): React.ReactElement {
       )}
       {spinnerText !== null && (
         <Box marginTop={0}>
-          <Spinner text={spinnerText || undefined} />
+          <Spinner text={resolveSpinnerLabel(toolCards, spinnerText) || undefined} />
         </Box>
       )}
     </Box>
   )
 }
+
+/**
+ * Stage 2 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md:
+ * label resolution priority for the spinner.
+ *
+ *   1. If at least one tool card is `status === "running"` → derive
+ *      an action-aware label via `formatRunningCardsForSpinner`. The
+ *      explicit `spinnerText` from agent.ts is usually a generic
+ *      placeholder ("thinking…", "executing N tools…") set BEFORE
+ *      tool_start fires; the per-tool label is more informative
+ *      once cards mount.
+ *   2. Otherwise → use the explicit `spinnerText` so phase-specific
+ *      labels ("retrying after rate limit…", "asking openrouter-auto
+ *      via Gemini…") stay visible.
+ *   3. Empty string → falls through to RichSpinner's verb cycle
+ *      (the existing idle fallback).
+ *
+ * Pure — exported via `_resolveSpinnerLabelForTests` so the contract
+ * can be asserted without mounting Ink.
+ */
+function resolveSpinnerLabel(
+  toolCards: ReadonlyArray<{ tool: string; args?: Record<string, unknown>; status: string }>,
+  explicitText: string,
+): string {
+  const derived = formatRunningCardsForSpinner(toolCards)
+  if (derived !== null) return derived
+  return explicitText
+}
+
+/** Test-only re-export. The pure resolver above is the contract under test. */
+export const _resolveSpinnerLabelForTests = resolveSpinnerLabel
 
 function colorFor(level: string): string | undefined {
   switch (level) {
