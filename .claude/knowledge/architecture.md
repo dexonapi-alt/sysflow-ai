@@ -499,6 +499,95 @@ The bus is uni-directional (`emitAgent` only). The cli's input loop (`useInput` 
 - Composition root: `cli-client/src/ui/App.tsx`
 - Kill switches: env `SYS_INK=1` to mount Ink; `--no-motion` flag or `SYS_NO_MOTION=1` to freeze animations
 
+### Frame loop hardening (Stage 1 of 2026-05-18 polish plan)
+
+Two extensions added to the shared frame scheduler in `use-frame.ts` to close the user-reported minimize-during-summary scroll-storm bug:
+
+```
+FrameCallback signature extended:
+  type FrameCallback = (nowMs: number) => boolean | void
+  → returning `false` self-unsubscribes from the pump
+  → callers like <Typewriter> detach once their reveal completes
+  → settled animations contribute ZERO per-frame work
+
+Resize-pause window:
+  process.stdout.on("resize") → pausedUntilDateMs = Date.now() + 150
+  pump() short-circuits while paused
+  burst-safe: rapid resizes push the window forward without compounding
+  Ink's own resize re-render runs unimpeded; only per-frame work suspends
+```
+
+### Action-aware spinner labels (Stage 2 of 2026-05-18 polish plan)
+
+The spinner label resolves via a pure helper composed from existing reducer state — no new events or slots.
+
+```
+resolveSpinnerLabel(toolCards, explicitText):
+  if any toolCards.status === "running" → derived label via
+                                            formatRunningCardsForSpinner()
+  else if explicitText                  → explicit phase label
+                                            (set by agent.ts spinner.text = …)
+  else                                   → empty (RichSpinner verb cycle)
+
+Per-tool label vocabulary (verb-first to match the verb cycle so the
+cycle-to-action transition reads as the same activity):
+  read_file       → "reading <path>"
+  batch_read      → "reading N files"
+  write_file      → "writing <path>"
+  batch_write     → "writing N files"
+  edit_file       → "editing <path>"
+  run_command     → "running <cmd>"           (truncated at 40 chars)
+  search_code     → "searching for \"<pattern>\""  (truncated at 30 chars)
+  web_search      → "searching the web for \"<query>\""
+  reason          → "thinking through it"     (matches verb cycle vocab)
+
+Multi-card aggregation:
+  1 running             → formatToolForSpinner of that tool
+  N same file-tool      → "writing 3 files" / "reading 4 files"
+  N same non-file tool  → "running 2 actions"
+  N mixed tools         → "running N tools"
+```
+
+### Audit-driven polish surfaces (Stages 4 + 5 of 2026-05-18 plan)
+
+Five rendered-surface fixes layered on top of the Phase 12 / Phase 14 base:
+
+- **`<ErrorBanner>`** (cli-client/src/ui/components/ErrorBanner.tsx) — structured replacement for the pre-Stage-4 raw `console.log` chain on the `sysflow_infra` terminal-exit path. Reducer slot `infraError`; emitter `agent.ts` gates on `shouldRenderInlineForLegacy()`.
+- **Multi-line ActionCard errors** — pure `formatErrorLines(error, maxLines=3, maxCharsPerLine=100)` helper renders up to 3 error lines with `(+N more)` tail. tsc / eslint multi-line output is no longer clipped to line 1.
+- **Awareness badge surfaces `lastSignal`** — pure `formatAwarenessTail(snapshot)` helper. When state ≠ on_track, appends `(<category>: <detail>)` in muted parens. The Phase 11 reducer's `lastSignal` is now visible.
+- **`<InteractiveHints>` modal-mode** — new events `modal_active` / `modal_dismissed`; reducer slot `activeModal`. Permission + off-course modals each get their own hint table entry. Hints reflect what's actually listening for keys.
+- **`<StreamPreview>`** (cli-client/src/ui/components/StreamPreview.tsx) — live preview of the last 5 lines of a running `run_command`'s stdout+stderr stream. Event `tool_stream`; reducer slot `streamPreview`; `createStreamPreviewEmitter()` in `tools.ts` debounces at 250ms; cleared on next `tool_end`.
+
+### Off-course modal safety (Stage 4 of 2026-05-18 plan)
+
+Pure key classifier in `off-course-prompt.ts`:
+
+```
+classifyOffCourseKey(key):
+  c / C       → continue
+  b / B       → backtrack
+  r / R       → redirect (narrowed)
+  q / Q / Esc → continue (explicit safe cancel)
+  other       → unknown (caller re-prompts up to 3 times before
+                falling through to continue)
+```
+
+Pre-Stage-4 the default-on-unknown collapsed to redirect, trapping mis-presses in a 60s text-entry prompt.
+
+### Width-aware permission modal (Stage 5 of 2026-05-18 plan)
+
+Pure `pickPermissionBoxWidth(columns)` clamps to `[32 .. 80]` with 4 cols of headroom. Replaces the pre-Stage-5 hardcoded 64-col box that wrapped on narrow terminals and under-used wide terminals.
+
+### Telemetry — 2026-05-18 polish counters (Stage 6)
+
+Five new `RunSummary` fields surface the new code paths:
+
+- `scrollGlitchPauseFiredCount: number` — count of SIGWINCH-triggered pauses (Stage 1).
+- `spinnerActionLabelFired: boolean` — latched true if action-aware label ever fired (Stage 2).
+- `streamPreviewEverShown: boolean` — latched true if `run_command` stream preview ever fired (Stage 5).
+- `infraErrorBannerShown: boolean` — latched true if the structured ErrorBanner rendered (Stage 4).
+- `permissionModalShownCount: number` — count of permission-modal mounts (Stage 5 surface).
+
 ## Premium CLI components (Phase 14)
 
 - **Source:** plan `applied/2026-05-07-phase-14-premium-cli-experience.md`

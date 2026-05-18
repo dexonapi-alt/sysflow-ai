@@ -844,4 +844,72 @@ describe("recordRunSummary", () => {
     expect(entry.maxBatchSize).toBe(1)
     expect(entry.batchCapEnforcedCount).toBe(0)
   })
+
+  // ─── Stage 6 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md ───
+
+  it("persists Stage 6 ui-ux telemetry: scroll-glitch / spinner-action / stream-preview / infra-banner / permission-modal", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-ui-ux-6-1",
+      prompt: "scaffold a backend",
+      model: "openrouter-auto",
+      durationMs: 30_000,
+      stepCount: 12,
+      toolCount: 14,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+      scrollGlitchPauseFiredCount: 2,
+      spinnerActionLabelFired: true,
+      streamPreviewEverShown: true,
+      infraErrorBannerShown: false,
+      permissionModalShownCount: 3,
+    })
+    const [entry] = await readEntries()
+    expect(entry.scrollGlitchPauseFiredCount).toBe(2)
+    expect(entry.spinnerActionLabelFired).toBe(true)
+    expect(entry.streamPreviewEverShown).toBe(true)
+    expect(entry.infraErrorBannerShown).toBe(false)
+    expect(entry.permissionModalShownCount).toBe(3)
+  })
+
+  it("defaults Stage 6 ui-ux telemetry to 0 / false when omitted (legacy run)", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-ui-ux-6-2",
+      prompt: "x",
+      model: "openrouter-auto",
+      durationMs: 1,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 0,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "completed",
+    })
+    const [entry] = await readEntries()
+    expect(entry.scrollGlitchPauseFiredCount).toBe(0)
+    expect(entry.spinnerActionLabelFired).toBe(false)
+    expect(entry.streamPreviewEverShown).toBe(false)
+    expect(entry.infraErrorBannerShown).toBe(false)
+    expect(entry.permissionModalShownCount).toBe(0)
+  })
+
+  it("persists infra-banner latched true on a sysflow_infra run", async () => {
+    await recordRunSummary(tmp, {
+      runId: "r-ui-ux-6-3",
+      prompt: "...",
+      model: "openrouter-auto",
+      durationMs: 500,
+      stepCount: 0,
+      toolCount: 0,
+      errorCount: 1,
+      estimatedInputTokens: 0,
+      estimatedOutputTokens: 0,
+      terminalReason: "sysflow_infra",
+      infraErrorBannerShown: true,
+    })
+    const [entry] = await readEntries()
+    expect(entry.infraErrorBannerShown).toBe(true)
+    expect(entry.terminalReason).toBe("sysflow_infra")
+  })
 })

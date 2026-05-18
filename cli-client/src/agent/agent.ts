@@ -35,6 +35,10 @@ import { classifyResponse, makeRetryBudget, noteSuccess, type RetryBudget } from
 import { recordRunSummary } from "./usage-log.js"
 import { getReasoningPeekExpansions, resetReasoningPeekExpansions } from "../ui/components/ReasoningPeek.js"
 import { getNullToolRejections, resetNullToolRejections, getImportsStrippedCount, resetImportsStrippedCount, getDotfileFilterCorrections, resetDotfileFilterCorrections, getAlreadyCreatedRejectionCount, resetAlreadyCreatedRejectionCount, clearCreatedPaths, getBatchCapEnforcedCount, resetBatchCapEnforcedCount, getBatchReorderedCount, resetBatchReorderedCount } from "./executor.js"
+import { getScrollGlitchPauseFiredCount, resetScrollGlitchPauseFiredCount } from "../ui/animation/use-frame.js"
+import { getSpinnerActionLabelFired, resetSpinnerActionLabelFired } from "../ui/spinner-label-format.js"
+import { getStreamPreviewEverShown, resetStreamPreviewEverShown } from "./tools.js"
+import { getPermissionModalShownCount, resetPermissionModalShownCount } from "../cli/permission-prompt.js"
 import { getWindowsShellErrorsCaught, resetWindowsShellErrorsCaught } from "./tools.js"
 import { getNonRetryable5xxCount, resetNonRetryable5xxCount } from "../lib/server.js"
 import { estimateTokens as cliEstimateTokens } from "./token-estimate.js"
@@ -526,6 +530,12 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
   // server-side insufficient-reasoning rejection peak.
   let maxBatchSizeObserved = 0
   let insufficientReasoningRejectionPeak = 0
+  // Stage 6 of ui-ux-polish plan: latch for the sysflow_infra
+  // structured-banner path. Module-level latches in use-frame.ts /
+  // spinner-label-format.ts / tools.ts / permission-prompt.ts cover
+  // the other Stage 6 counters; this one lives on the agent state
+  // because it's set inline at the terminal-exit path below.
+  let infraErrorBannerShownThisRun = false
   // Stage 4 of reasoning-chain-provider-parity plan: distribution
   // counters for structured-vs-synthesised per-turn reasoning. Bumped
   // each turn based on the server-side classification surfaced on
@@ -704,6 +714,12 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       reorderedBatchCount: getBatchReorderedCount(),
       alreadyCreatedRejectionCount: getAlreadyCreatedRejectionCount(),
       insufficientReasoningRejectionCount: insufficientReasoningRejectionPeak,
+      // Stage 6 of ui-ux-polish plan.
+      scrollGlitchPauseFiredCount: getScrollGlitchPauseFiredCount(),
+      spinnerActionLabelFired: getSpinnerActionLabelFired(),
+      streamPreviewEverShown: getStreamPreviewEverShown(),
+      infraErrorBannerShown: infraErrorBannerShownThisRun,
+      permissionModalShownCount: getPermissionModalShownCount(),
     })
     resetReasoningPeekExpansions()
     resetNullToolRejections()
@@ -718,6 +734,11 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
     // Stage 6 of accountability-and-parallel-execution-sequencing plan.
     resetBatchCapEnforcedCount()
     resetBatchReorderedCount()
+    // Stage 6 of ui-ux-polish plan: reset the per-run telemetry latches.
+    resetScrollGlitchPauseFiredCount()
+    resetSpinnerActionLabelFired()
+    resetStreamPreviewEverShown()
+    resetPermissionModalShownCount()
     unregisterSpinner()
   }
 
@@ -879,6 +900,10 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
               message: errorMsg,
               hint,
             })
+            // Stage 6 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md:
+            // latch — used by RunSummary to mark this run as having
+            // surfaced the structured infra-error banner.
+            infraErrorBannerShownThisRun = true
           }
           cleanupDiffListener()
           await recordTelemetry("sysflow_infra")

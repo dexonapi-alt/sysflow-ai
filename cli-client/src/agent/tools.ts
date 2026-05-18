@@ -686,6 +686,20 @@ interface StreamPreviewEmitter {
   flush(): void
 }
 
+// Stage 6 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md:
+// per-run latch — true if at least one tool_stream event fired during
+// the run. Diagnostic for Stage 5 issue #7's wiring.
+
+let _streamPreviewEverShown = false
+
+export function getStreamPreviewEverShown(): boolean {
+  return _streamPreviewEverShown
+}
+
+export function resetStreamPreviewEverShown(): void {
+  _streamPreviewEverShown = false
+}
+
 function createStreamPreviewEmitter(): StreamPreviewEmitter {
   const ring: string[] = []
   let pending = false
@@ -699,6 +713,9 @@ function createStreamPreviewEmitter(): StreamPreviewEmitter {
       timer = null
     }
     if (ring.length === 0) return
+    // Stage 6 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md:
+    // latch that we emitted at least one stream preview this run.
+    _streamPreviewEverShown = true
     emitAgent({ type: "tool_stream", lines: ring.slice() })
   }
 

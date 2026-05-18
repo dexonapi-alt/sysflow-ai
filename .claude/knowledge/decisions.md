@@ -837,3 +837,48 @@ Stage 2 topologically sorts `write_file` calls within a batch:
 
 - Simpler than chaining promises across groups.
 - The collapsed group is bounded by Stage 1's cap (max 5 writes on existing-large), so serialising those 5 sequentially is ~milliseconds of added latency.
+
+## RichSpinner label resolution order
+
+- **Source:** plan `applied/2026-05-18-ui-ux-polish-and-action-aware-spinner.md` (Stage 2)
+
+The spinner label resolves via a 3-tier priority composed in `<AgentStream>`'s `resolveSpinnerLabel`:
+
+1. **Action-aware label** — if any tool card is `status === "running"`, derive a label from its tool + args via `formatRunningCardsForSpinner`. Reads as `writing src/index.ts`, `running npm install`, `reading 3 files`, etc.
+2. **Explicit phase label** — fall back to the `spinnerText` set by `agent.ts` via `spinner.text = …`. Used for phase-specific labels the bus can't derive (`retrying after rate limit…`, `asking openrouter-auto via Gemini…`).
+3. **Verb cycle** — empty label → `<RichSpinner>` runs its 22-verb cycle (`thinking…`, `weighing options…`, `polishing…`, etc.). The idle fallback.
+
+**Action-aware wins over explicit text by design.** When a tool dispatch starts, `agent.ts` typically has just set `spinner.text = "executing 3 tools…"` — a generic placeholder. The per-tool label is strictly more informative. The explicit text remains the source of truth when NO tool is in flight (e.g. waiting on a model response between turns), so phase-specific labels still surface.
+
+**Alternatives rejected:**
+
+- *New `tool_dispatch_start` / `tool_dispatch_settle` events + `currentTool` reducer slot* — the original plan proposed this. On review, the existing `tool_start` / `tool_end` events already track the same info via `toolCards.status`. Filtering by status gives the in-flight list without a new bus protocol.
+- *Compose explicit text + action-aware label* (e.g. `"asking openrouter-auto · writing src/index.ts"`) — too long for the spinner row; the user can read the running ActionCards directly for the dispatch detail.
+- *Verb cycle ALWAYS* (pre-Stage-2) — disconnected from agent action; the user-reported pattern.
+
+**Why per-tool verbs match the cycle vocabulary:** `reason` → `"thinking through it"` because the cycle's most common verb is `"thinking…"`. The cycle-to-action transition reads as the same activity, not a context swap. Other verbs (`reading`, `writing`, `editing`, `running`, `searching`, `listing`) are already in the cycle, so the user's eye registers continuity.
+
+## useFrame listeners detach on completion + pause during resize
+
+- **Source:** plan `applied/2026-05-18-ui-ux-polish-and-action-aware-spinner.md` (Stage 1)
+
+The shared frame scheduler in `cli-client/src/ui/animation/use-frame.ts` has two extensions that close the user-reported minimize-during-summary scroll-storm bug:
+
+**1. Return-false detach.** `FrameCallback` now returns `boolean | void`; returning `false` self-unsubscribes from the pump. `<Typewriter>` returns `false` once `count >= text.length` AND skips `setState` when `count` hasn't advanced. A settled Typewriter contributes ZERO per-frame work.
+
+Persistently-throwing subscribers also get auto-detached so one bad callback can't burn cycles forever (previously they silently caught + kept firing).
+
+**2. Resize-pause window.** A `process.stdout.on("resize")` listener (installed lazily in `start()`) pushes `pausedUntilDateMs` forward 150ms on every fire. While `Date.now() < pausedUntilDateMs`, `pump()` short-circuits — subscribers stay attached, just not fired. Burst-safe: rapid resize events from terminal minimize/restore extend the window without compounding.
+
+**Why these two layers compose:**
+
+- Layer 1 minimises the per-frame work that COULD compound during a resize. If Typewriter's per-frame setState had already detached when the reveal completed, there would be no setState storm to clog Ink during resize.
+- Layer 2 explicitly halts per-frame work for ~150ms after SIGWINCH. Even if a subscriber is legitimately mid-animation (a Pulse triggered just before the resize), the pause lets Ink's own resize re-render complete cleanly without competing per-frame writes.
+
+**Alternatives rejected:**
+
+- *Separate `useResizeDebounce` hook* the plan originally proposed — duplicates state; consumers would need to check the flag manually. Pause-at-pump-layer is the single source of truth.
+- *Date.now() vs nowMs() for the pause clock* — `Date.now()` chosen because (a) the pause is a pure wall-clock concern (150ms NTP-correction risk is acceptable) and (b) it's consistently shimmed by `vi.useFakeTimers` + `vi.setSystemTime`, which made the resize-pause tests deterministic without firing the setInterval pump as a side-effect.
+- *React.memo boundary around Typewriter in AgentStream* — the per-frame setState burst the original plan worried about is eliminated by Layer 1's detach. The memo would be defensive but unnecessary now.
+
+**Why `Date.now()` not `performance.now()`:** `nowMs()` (which uses `performance.now()` if available) is the right choice for animation cadence — monotonic, immune to NTP correction. But the pause window is a discrete wall-clock budget; `Date.now()` is sufficient and `vi.useFakeTimers` shims it by default while it doesn't shim `performance.now()` without `toFake: ["performance"]`. Test ergonomics matter; the production correctness doesn't change.

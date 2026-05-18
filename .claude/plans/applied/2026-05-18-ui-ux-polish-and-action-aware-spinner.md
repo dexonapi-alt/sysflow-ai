@@ -1,7 +1,7 @@
 # UI/UX polish + action-aware spinner + scroll-glitch fix
 
 - **Created:** 2026-05-18
-- **Status:** in-progress
+- **Status:** implemented (2026-05-18)
 - **Scope:** Fix two specific user-reported UI bugs (uncontrollable scroll on terminal minimize during summary typeout; spinner verb cycle decoupled from agent actions) plus a broader polish sweep across the cli's rendered surfaces. Diagnose root causes — don't patch around symptoms.
 
 ## Goal
@@ -198,3 +198,18 @@ Each stage = one PR off `main`. ~1,100 LOC + ~30 new tests across six stages (St
 - **Phase 19 task display selectivity** — orthogonal; Stage 3 audit may surface a redundant edge case but won't change the core gating.
 - **Awareness plan** — off-course modal is in Stage 3's audit surface list; any change here composes additively with the awareness plan's modal triggering logic.
 - **Accountability plan** — ToolCard rendering for batches (3-tool cap) is in Stage 3's audit surface list; the cap affects density which Stage 5 may need to tune.
+
+## Completion notes
+
+Shipped 2026-05-18 across six PRs:
+
+- **PR #126 — Stage 1 — Scroll glitch root-cause fix.** Two-layer fix in `cli-client/src/ui/animation/use-frame.ts`: return-false detach + 150ms resize-pause window. `<Typewriter>` self-unsubscribes on completion. 11 new tests.
+- **PR #127 — Stage 2 — Action-aware spinner labels.** New pure `spinner-label-format.ts` module + `resolveSpinnerLabel` composition in `<AgentStream>`. Per-tool verb-first labels + multi-card aggregation. 30 new tests. **Plan deviation:** the proposed `tool_dispatch_start` / `tool_dispatch_settle` events + `currentTool` reducer slot were dropped — existing `tool_start` / `tool_end` events + `toolCards` array already carry the info. Less bus-protocol churn, same outcome.
+- **PR #128 — Stage 3 — UI/UX audit sweep.** Doc-only. Produced `.claude/plans/applied/2026-05-18-ui-ux-audit-findings.md` cataloguing 10 issues with severity classifications. Stage 4 + 5 scope locked.
+- **PR #129 — Stage 4 — Targeted polish A.** 4 audit issues: #1 sysflow_infra `<ErrorBanner>` (load-bearing, gotcha-104 class), #2 multi-line ActionCard errors, #3 awareness `lastSignal` in badge, #4 off-course Esc/q cancel. 23 new tests.
+- **PR #130 — Stage 5 — Targeted polish B.** 4 audit issues: #5 InteractiveHints modal-mode, #6 width-aware permission prompt, #7 `run_command` `<StreamPreview>` (the big item), #8 Header chunk-pulse cleanup. 32 new tests.
+- **PR #131 — Stage 6 — Telemetry + KB + plan archive.** 5 new `RunSummary` fields (`scrollGlitchPauseFiredCount` / `spinnerActionLabelFired` / `streamPreviewEverShown` / `infraErrorBannerShown` / `permissionModalShownCount`). KB entries (1 architecture extension + 2 decisions + 2 gotchas). Plan + audit doc archived.
+
+**Findings doc deferred items (issues #9, #10) remain deferred.** Audit-findings re-evaluated after Stages 4 + 5 ship; the niche `r`-toggle conflict and narrow-terminal target truncation are still low-priority. If a user reports either, they can be picked up as a follow-up.
+
+**Net diff:** 6 PRs, ~100 new tests, 2 new components (`<ErrorBanner>`, `<StreamPreview>`), 4 new pure helper modules, 5 new event types on the agent-events bus, 5 new RunSummary fields. Two legitimate user-reported UI bugs closed (scroll glitch + spinner-disconnect) + 8 audit-derived polish items shipped.

@@ -176,6 +176,7 @@ interface RunningCardLike {
 export function formatRunningCardsForSpinner(cards: ReadonlyArray<RunningCardLike>): string | null {
   const running = cards.filter((c) => c.status === "running")
   if (running.length === 0) return null
+  bumpActionLabelFiredThisRun()
   if (running.length === 1) return formatToolForSpinner(running[0].tool, running[0].args)
 
   const uniqueTools = new Set(running.map((c) => c.tool))
@@ -196,6 +197,31 @@ export function formatRunningCardsForSpinner(cards: ReadonlyArray<RunningCardLik
   }
 
   return `running ${running.length} tools`
+}
+
+// ─── Stage 6 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md ───
+//
+// Per-run latch — true if `formatRunningCardsForSpinner` ever returned
+// a non-null action-aware label during the run. Diagnostic for Stage 2:
+// if the latch stays false across runs we'd expect it to flip true on
+// (e.g. runs with tool dispatches), the wiring's broken.
+//
+// Module-scoped because `formatRunningCardsForSpinner` is the canonical
+// fire site. Boolean (latch, not count) keeps the per-run record
+// compact; the audit only asks "did it ever fire", not "how many turns".
+
+let _spinnerActionLabelFiredThisRun = false
+
+function bumpActionLabelFiredThisRun(): void {
+  _spinnerActionLabelFiredThisRun = true
+}
+
+export function getSpinnerActionLabelFired(): boolean {
+  return _spinnerActionLabelFiredThisRun
+}
+
+export function resetSpinnerActionLabelFired(): void {
+  _spinnerActionLabelFiredThisRun = false
 }
 
 function truncate(s: string, max: number): string {

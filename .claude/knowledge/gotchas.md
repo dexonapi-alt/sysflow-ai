@@ -331,3 +331,29 @@ Past bugs and non-obvious constraints worth preserving so the next contributor d
   - **Stage 6 (telemetry):** 5 new RunSummary fields (`maxBatchSize`, `batchCapEnforcedCount`, `reorderedBatchCount`, `alreadyCreatedRejectionCount`, `insufficientReasoningRejectionCount`) so the gates' firing frequency is observable on disk.
 - **Prevention:** parallel-batch operations need per-file thinking surface (reasoning chain ≥ batch size) AND per-file ordering (topo sort) AND post-batch verification (read-back inject). Soft warnings get ignored; system-level enforcement (reject + re-call) is the load-bearing pattern. When designing a new batched operation, ask: "what's the per-item reasoning requirement, ordering constraint, and verification point?" — if any one is absent, the agent will skip it on free-tier models.
 - **Test guards:** `cli-client/src/agent/__tests__/batch-cap.test.ts` (18 tests: cap math), `cli-client/src/agent/__tests__/topo-ordering.test.ts` (35 tests: import resolution + cycle detection), `cli-client/src/agent/__tests__/already-created-guard.test.ts` (23 tests: per-run path tracking), `server/src/services/__tests__/read-after-write-inject.test.ts` (30 tests: latch + repoState gating), `server/src/services/__tests__/per-file-reasoning-guard.test.ts` (22 tests: predicate + prompt).
+
+## Terminal minimize during summary typeout caused uncontrollable scroll
+
+- **Source:** plan `applied/2026-05-18-ui-ux-polish-and-action-aware-spinner.md` (Stage 1)
+- **Symptom:** when the user minimized the terminal while the agent was rendering its final summary (Typewriter-driven `assistant_message`), restoring the terminal triggered a continuous upward scroll that the user couldn't control. Only killing the process recovered. Buffer became unreadable.
+- **Root cause (two compounding):**
+  1. **`<Typewriter>` never detached from `useFrame`'s per-frame loop after reveal completed.** Every frame after completion still fired `setCount(text.length)`, accumulating Ink reconcile work even though no visible change occurred.
+  2. **On terminal minimize/restore, SIGWINCH fires** (often multiple times in close succession). Ink's resize handler triggers a full re-render. Combined with the per-frame setState burst from #1, Ink emitted a flood of VT100 cursor sequences that corrupted the scrollback buffer — same class as gotcha-104 (`Raw \x1b[nA cursor-up writes corrupt Ink's render zone`) but via a different path (per-frame setState compounding, not raw stdout writes).
+- **Fix (two layers in `cli-client/src/ui/animation/use-frame.ts`):**
+  1. **Return-false detach.** `FrameCallback` signature extended to `(nowMs) => boolean | void`. Returning `false` self-unsubscribes from the pump. `<Typewriter>` returns `false` once the reveal completes AND skips `setState` when `count` hasn't advanced. Settled Typewriters contribute zero per-frame work.
+  2. **Resize-pause window.** SIGWINCH listener extends `pausedUntilDateMs = Date.now() + 150ms` on every fire. `pump()` short-circuits while paused. Burst-safe: rapid resize events extend the window without compounding. Ink's own resize re-render runs unimpeded; only per-frame work suspends.
+- **Prevention:** any subscriber to a shared per-frame scheduler MUST detach when its work is settled. Long-lived per-frame setState calls on settled state are a latent scroll-storm waiting for a resize event. When designing new animation primitives, ask: "what's the completion signal, and does the loop honour it?" If the primitive has a one-shot reveal (Typewriter, Pulse, Fade), it MUST detach at completion.
+- **Test guards:** `cli-client/src/ui/animation/__tests__/use-frame.test.ts` (11 new tests: return-false detach + resize-pause window — 4 detach behaviours + 4 pause-window behaviours + burst-safe extension + per-tool isolation).
+
+## Spinner verb cycle ran during tool dispatch, hiding the actual action
+
+- **Source:** plan `applied/2026-05-18-ui-ux-polish-and-action-aware-spinner.md` (Stage 2)
+- **Symptom:** user reported: *"the spinner label just keep changing word without a meaningful ai actions it didn't even realize what the agent does it just randomly changing labels in an interval."* The Phase 14 `<RichSpinner>` cycled through 22 verbs on a 3-second timer regardless of what the agent was actually doing. Mid-`write_file` it showed `polishing…` or `weighing options…`.
+- **Root cause:** the spinner label source was the explicit `spinnerText` event emitted by `agent.ts`. `agent.ts` only set generic labels (`thinking…`, `executing N tools…`). The reducer never observed the in-flight tool dispatch — even though `tool_start` / `tool_end` events already tracked it.
+- **Fix:** pure `resolveSpinnerLabel(toolCards, explicitText)` in `<AgentStream>`. Priority:
+  1. Running tool card → action-aware label via `formatRunningCardsForSpinner` (verb-first vocabulary: `writing src/index.ts`, `reading 3 files`, `running npm install`, `searching for "express"`).
+  2. Explicit phase label (`retrying after rate limit…`).
+  3. Empty → verb cycle (idle fallback).
+  Multi-card aggregation: same file-tool → `writing N files`, mixed → `running N tools`. The `reason` tool's per-tool verb is `thinking through it` to match the cycle's vocabulary so the transition reads as the same activity.
+- **Prevention:** when wiring a new visual surface to existing state, prefer composing from existing reducer slots over adding new events. The user-reported pattern was solvable by filtering `toolCards` by `status === "running"` — no new bus protocol needed. New events are a code smell; existing state usually carries the info if you look.
+- **Test guards:** `cli-client/src/ui/__tests__/spinner-label-format.test.ts` (30 tests: per-tool formatters + multi-card aggregation + resolver priority composition + idle fallback).
