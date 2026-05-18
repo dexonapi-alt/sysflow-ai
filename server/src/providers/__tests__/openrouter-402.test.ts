@@ -33,19 +33,28 @@ describe("classify402Terminal — non-recoverable 402 detection", () => {
     expect(classify402Terminal("You have used all your credits.")).toBe("insufficient_credits")
   })
 
-  it("returns 'below_meaningful_threshold' when affordable < 4096", () => {
+  it("returns 'below_meaningful_threshold' when affordable is well under the bar", () => {
     const body = `can only afford 445 tokens`
     expect(classify402Terminal(body)).toBe("below_meaningful_threshold")
   })
 
-  it("returns 'below_meaningful_threshold' for the user's repro (445)", () => {
-    // From the actual user repro body: "...can only afford 445."
+  it("returns 'below_meaningful_threshold' for the user's small-affordable repro (445)", () => {
+    // From an actual user repro body: "...can only afford 445."
     const body = `{"error":{"message":"This request requires more credits, or fewer max_tokens. You requested up to 32768 tokens, but can only afford 445."}}`
     expect(classify402Terminal(body)).toBe("below_meaningful_threshold")
   })
 
-  it("returns null when affordable is at the threshold (4096)", () => {
+  it("returns null when affordable is at the threshold (boundary; retry path can fire)", () => {
     expect(classify402Terminal(`can only afford ${MEANINGFUL_AFFORDABLE_THRESHOLD} tokens`)).toBeNull()
+  })
+
+  it("2026-05-18 user repro: affordable=2708 falls through to retry (was failing pre-fix at threshold=4096)", () => {
+    // Before this PR the threshold was 4096; 2708 < 4096 classified as
+    // terminal and the run surfaced "out of credits" misleadingly. Now
+    // 2708 ≥ threshold (2048) so the affordability retry fires with
+    // max_tokens=2437 and the chunked-loop can land a smaller request.
+    const body = `{"error":{"message":"This request requires more credits, or fewer max_tokens. You requested up to 6608 tokens, but can only afford 2708."}}`
+    expect(classify402Terminal(body)).toBeNull()
   })
 
   it("returns null when affordable is well above the threshold (legacy retry path)", () => {
