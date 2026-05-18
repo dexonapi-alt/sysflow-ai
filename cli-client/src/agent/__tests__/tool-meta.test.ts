@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { partitionToolCalls, batchHasSiblingAborter, getToolMeta, groupForParallelExecution } from "../tool-meta.js"
+import { partitionToolCalls, batchHasSiblingAborter, getToolMeta, groupForParallelExecution, classifyBatchDispatch, formatBatchHeading } from "../tool-meta.js"
 
 describe("partitionToolCalls", () => {
   it("puts read tools in parallel, run_command in serial", () => {
@@ -120,5 +120,75 @@ describe("getToolMeta", () => {
     const m = getToolMeta("nonexistent")
     expect(m.isConcurrencySafe).toBe(false)
     expect(m.defaultPermission).toBe("ask")
+  })
+})
+
+// Plan 2026-05-18-batch-heading-and-permission-label-polish.md issue #5.
+describe("classifyBatchDispatch — shape of an execution batch", () => {
+  it("returns 'parallel' for all-concurrency-safe tools", () => {
+    const tools = [
+      { id: "1", tool: "read_file", args: { path: "a" } },
+      { id: "2", tool: "write_file", args: { path: "b" } },
+    ]
+    expect(classifyBatchDispatch(tools)).toBe("parallel")
+  })
+
+  it("returns 'serial' for all-concurrency-unsafe tools", () => {
+    const tools = [
+      { id: "1", tool: "run_command", args: { command: "ls" } },
+      { id: "2", tool: "run_command", args: { command: "pwd" } },
+    ]
+    expect(classifyBatchDispatch(tools)).toBe("serial")
+  })
+
+  it("returns 'mixed' when both kinds present (user repro: batch_read + node --check)", () => {
+    const tools = [
+      { id: "1", tool: "batch_read", args: { paths: ["a", "b"] } },
+      { id: "2", tool: "run_command", args: { command: "node --check a.js" } },
+      { id: "3", tool: "run_command", args: { command: "node --check b.js" } },
+    ]
+    expect(classifyBatchDispatch(tools)).toBe("mixed")
+  })
+
+  it("returns 'parallel' for an empty batch (defensive)", () => {
+    expect(classifyBatchDispatch([])).toBe("parallel")
+  })
+})
+
+describe("formatBatchHeading — structured { verb, detail }", () => {
+  it("parallel form: 'parallel' + '(N tools)'", () => {
+    const tools = [
+      { id: "1", tool: "read_file", args: {} },
+      { id: "2", tool: "read_file", args: {} },
+    ]
+    expect(formatBatchHeading(tools)).toEqual({ verb: "parallel", detail: "(2 tools)" })
+  })
+
+  it("serial form: 'serial' + '(N tools)'", () => {
+    const tools = [
+      { id: "1", tool: "run_command", args: {} },
+      { id: "2", tool: "run_command", args: {} },
+    ]
+    expect(formatBatchHeading(tools)).toEqual({ verb: "serial", detail: "(2 tools)" })
+  })
+
+  it("mixed form: 'mixed' + '(P parallel + S serial)' so the user can predict the dispatch pattern", () => {
+    const tools = [
+      { id: "1", tool: "batch_read", args: {} },
+      { id: "2", tool: "run_command", args: {} },
+      { id: "3", tool: "run_command", args: {} },
+    ]
+    expect(formatBatchHeading(tools)).toEqual({
+      verb: "mixed",
+      detail: "(1 parallel + 2 serial)",
+    })
+  })
+
+  it("singleton mixed (1+1) renders cleanly", () => {
+    const tools = [
+      { id: "1", tool: "read_file", args: {} },
+      { id: "2", tool: "run_command", args: {} },
+    ]
+    expect(formatBatchHeading(tools)).toEqual({ verb: "mixed", detail: "(1 parallel + 1 serial)" })
   })
 })

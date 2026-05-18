@@ -6,6 +6,7 @@ import { callServer, callServerStream, type ServerError } from "../lib/server.js
 import { ensureSysbase, getSelectedModel, getSysbasePath, getReasoningEnabled, getAuthToken, getPlanMode, getTaskDisplaySelective } from "../lib/sysbase.js"
 import { executeTool, executeToolsBatch } from "./executor.js"
 import { isSafeReadOnlyCommand } from "./safe-commands.js"
+import { formatBatchHeading } from "./tool-meta.js"
 import { readFileTool, computeLineDiff } from "./tools.js"
 import { clearRunDiffs } from "./diff.js"
 import { getOrBuildIndex, compactTree } from "./indexer.js"
@@ -1507,8 +1508,13 @@ async function handleNeedsTool(
     }
 
     console.log("")
-    const batchLabel = hasCommands ? "batch" : "parallel"
-    console.log(colors.accent(`    ${BOX.tl}${BOX.h}${BOX.h} ${batchLabel} `) + colors.muted(`(${toolCalls!.length} tools)`))
+    // Plan 2026-05-18-batch-heading-and-permission-label-polish.md issue #5:
+    // partition-aware heading reads `parallel (N)` / `serial (N)` /
+    // `mixed (P parallel + S serial)` so the user can predict the
+    // dispatch pattern. Pre-Plan-2 a mixed batch (e.g. read + run_command)
+    // collapsed to "batch", hiding that the run_command would be serialised.
+    const heading = formatBatchHeading(toolCalls!)
+    console.log(colors.accent(`    ${BOX.tl}${BOX.h}${BOX.h} ${heading.verb} `) + colors.muted(heading.detail))
 
     for (let i = 0; i < toolCalls!.length; i++) {
       const tc = toolCalls![i]

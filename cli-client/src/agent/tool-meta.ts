@@ -103,6 +103,65 @@ export function partitionToolCalls(tools: ToolCallEntry[]): { parallel: ToolCall
   return { parallel, serial }
 }
 
+/**
+ * Plan `2026-05-18-batch-heading-and-permission-label-polish.md` issue #5.
+ *
+ * Classify a batch's dispatch shape from the tool list, so the cli's
+ * `╭── … (N tools)` heading reflects what'll actually happen on the
+ * wire instead of always reading `batch`.
+ *
+ *   "parallel" — every tool is concurrency-safe; the executor will
+ *                run them via Promise.allSettled.
+ *   "serial"   — every tool is concurrency-unsafe; the executor will
+ *                run them one-at-a-time (run_command path).
+ *   "mixed"    — both kinds present; the executor runs the parallel
+ *                group first, then drains serial.
+ *
+ * Pre-Plan-2 the heading was decided by `hasCommands ? "batch" : "parallel"`
+ * which collapsed every mixed batch into a single "batch" label, hiding
+ * the fact that the run_command items are serialised behind the parallel
+ * group. Users reading "batch" expected parallel; some saw a sequential
+ * series of permission prompts and were confused.
+ *
+ * Pure; exported for direct tests.
+ */
+export type BatchDispatchShape = "parallel" | "serial" | "mixed"
+
+export function classifyBatchDispatch(tools: ReadonlyArray<ToolCallEntry>): BatchDispatchShape {
+  const { parallel, serial } = partitionToolCalls([...tools])
+  if (parallel.length === 0 && serial.length > 0) return "serial"
+  if (serial.length === 0 && parallel.length > 0) return "parallel"
+  if (parallel.length > 0 && serial.length > 0) return "mixed"
+  // Empty batch — render as "parallel" by convention (the heading
+  // accommodates 0 tools cleanly).
+  return "parallel"
+}
+
+export interface BatchHeading {
+  /** The shape verb — "parallel" / "serial" / "mixed". Rendered in accent. */
+  verb: string
+  /** The parenthetical count — `(N tools)` or `(P parallel + S serial)`. Rendered in muted. */
+  detail: string
+}
+
+/**
+ * Pure: structured heading for a batch shape. Keeps the verb + detail
+ * separable so the cli can preserve the existing accent/muted colour
+ * split when rendering.
+ *
+ * `mixed` form surfaces BOTH counts so the user can predict the
+ * dispatch pattern (e.g. one batch_read parallel + two run_command
+ * serial).
+ */
+export function formatBatchHeading(tools: ReadonlyArray<ToolCallEntry>): BatchHeading {
+  const { parallel, serial } = partitionToolCalls([...tools])
+  const shape = classifyBatchDispatch(tools)
+  if (shape === "mixed") {
+    return { verb: "mixed", detail: `(${parallel.length} parallel + ${serial.length} serial)` }
+  }
+  return { verb: shape, detail: `(${tools.length} tools)` }
+}
+
 /** Does the batch contain any tool whose error should cancel siblings? */
 export function batchHasSiblingAborter(tools: ToolCallEntry[]): boolean {
   return tools.some((tc) => getToolMeta(tc.tool).abortsSiblingsOnError)
