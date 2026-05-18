@@ -738,7 +738,12 @@ export async function executeTool(
     console.warn(`[executor] BLOCKED unknown tool: "${String(toolRaw)}" — synthesising validation failure`)
     const safeName = typeof toolRaw === "string" && toolRaw.length > 0 ? toolRaw : "(invalid)"
     const result = buildUnknownToolFailure(toolRaw)
-    const payload = { type: "tool_result", runId, tool: safeName, result }
+    // 2026-05-18 (Plan 4 Stage 3): thread the original args through so
+    // the server's ingestToolResult can capture write_file content (and
+    // similar) into the content-snippet index. `args` may be invalid
+    // shape since this is the unknown-tool path; pass it through anyway
+    // for completeness — the server's call sites coerce defensively.
+    const payload = { type: "tool_result", runId, tool: safeName, args, result }
     let serverResponse: Record<string, unknown>
     try {
       serverResponse = await callServerStream(payload, onPhase)
@@ -750,7 +755,12 @@ export async function executeTool(
   }
 
   const result = await executeToolLocally(tool, args, runId)
-  const payload = { type: "tool_result", runId, tool, result }
+  // 2026-05-18 (Plan 4 Stage 3): include the original args so the server
+  // can ingest write_file content / edit_file new_string into the
+  // per-run content-snippet index. Pre-fix the cli only sent `result`,
+  // and the server fell back to using `result` as args — which broke
+  // the structural-signal check on `intent_keyword_absent`.
+  const payload = { type: "tool_result", runId, tool, args, result }
 
   let serverResponse: Record<string, unknown>
   try {
@@ -818,12 +828,20 @@ export async function executeToolsBatch(
     // All tools rejected — send only the synthesised failures so the
     // agent's next turn sees the rejections + can retry with valid
     // tool names. Skips git snapshot + permission flow entirely.
+    // 2026-05-18 (Plan 4 Stage 3): enrich each rejected entry with its
+    // original args so the server can ingest them uniformly. The
+    // rejection path doesn't execute the tool, so args is what the
+    // model sent — straight from the original `tools` array.
+    const rejectedArgsById = new Map<string, Record<string, unknown>>()
+    for (const tc of tools) rejectedArgsById.set(tc.id, tc.args)
+    const enrichedRejected = rejectedResults.map((r) => ({ ...r, args: rejectedArgsById.get(r.id) ?? {} }))
     const payload = {
       type: "tool_result",
       runId,
-      tool: rejectedResults[0].tool,
-      result: rejectedResults[0].result,
-      toolResults: rejectedResults,
+      tool: enrichedRejected[0].tool,
+      args: enrichedRejected[0].args,
+      result: enrichedRejected[0].result,
+      toolResults: enrichedRejected,
     }
     try { return await callServerStream(payload, onPhase) } catch { return callServer(payload) }
   }
@@ -1234,12 +1252,32 @@ export async function executeToolsBatch(
   // tool_result handler sees the full picture — including which tools
   // were rejected so the agent gets feedback on its next turn.
   const mergedResults = [...allResults, ...rejectedResults]
+
+  // 2026-05-18 (Plan 4 Stage 3): build an id→args map and enrich each
+  // result entry so the server's ingestToolResult / recordRunAction
+  // see the ORIGINAL tool args (where write_file's `content` lives,
+  // among others). Synthetic results (_lint, _verification, _rollback)
+  // have no matching tc in the original `tools` array — they get
+  // `args: {}` since they're not user-emitted tools and don't need
+  // ingestion. `tools` here is the post-batch-cap list (executed +
+  // pre-cap deferrals).
+  const argsById = new Map<string, Record<string, unknown>>()
+  for (const tc of tools) argsById.set(tc.id, tc.args)
+  // Also include any tools that were rejected pre-execution (their
+  // args are still in the original batch — `originalTools` would be
+  // ideal but we don't track it separately; the rejection paths above
+  // already enriched their own results in the all-rejected branch).
+  const enrichedResults = mergedResults.map((r) => ({
+    ...r,
+    args: (r as { args?: Record<string, unknown> }).args ?? argsById.get(r.id) ?? {},
+  }))
   const payload = {
     type: "tool_result",
     runId,
-    tool: mergedResults[0]?.tool || tools[0].tool,      // backwards compat
-    result: mergedResults[0]?.result || {},
-    toolResults: mergedResults,
+    tool: enrichedResults[0]?.tool || tools[0].tool,      // backwards compat
+    args: enrichedResults[0]?.args || {},                  // 2026-05-18: matches body.tool
+    result: enrichedResults[0]?.result || {},
+    toolResults: enrichedResults,
     directoryTree: refreshedTree,
   }
 
