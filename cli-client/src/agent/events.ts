@@ -85,6 +85,26 @@ export type AgentEvent =
   // live region. Falls through to inline console.log only when
   // shouldRenderInlineForLegacy() returns true.
   | { type: "infra_error"; title: string; message: string; hint?: string }
+  // ── Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md ──
+  // Audit issue #5: modal-state events. When askPermission /
+  // askOffCourse take stdin control, the cli emits one of these so the
+  // InteractiveHints row can show modal-aware keybindings instead of
+  // the idle ones (`↑ history` / `/ commands`) which do nothing during
+  // the modal. Paired with `modal_dismissed` on modal exit.
+  | { type: "modal_active"; modal: "permission" | "offcourse" }
+  | { type: "modal_dismissed" }
+  // ── Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md ──
+  // Audit issue #7: surface run_command stdout/stderr while the command
+  // is still running. Pre-Stage-5 a long `npm install` left the user
+  // staring at the spinner for 30+ seconds with no visibility — output
+  // only appeared after the close handler.
+  //
+  // `lines` is the most-recent N lines (typically 5) from the merged
+  // stdout+stderr stream, in chronological order. Each emission REPLACES
+  // the prior preview (no append — the consumer always sees the tail).
+  // Cleared by the next `tool_end` (assumed to be the run_command
+  // settling) OR by `clear`.
+  | { type: "tool_stream"; lines: string[] }
 
 const emitter = new EventEmitter()
 emitter.setMaxListeners(20)

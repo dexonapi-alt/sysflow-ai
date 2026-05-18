@@ -11,6 +11,7 @@ import { colors, BOX } from "./render.js"
 import { primaryPath, type PermissionDecision } from "../agent/permissions.js"
 import { computeDiff } from "../agent/diff.js"
 import { pauseSpinner, resumeSpinner } from "./spinner-control.js"
+import { emitAgent } from "../agent/events.js"
 
 export interface PromptArgs {
   tool: string
@@ -25,25 +26,64 @@ export interface PromptResult {
   pattern?: string
 }
 
-const BOX_WIDTH = 64
+const DEFAULT_BOX_WIDTH = 64
+const MIN_BOX_WIDTH = 32
+const MAX_BOX_WIDTH = 80
 const DIFF_PREVIEW_LINES = 12
+
+/**
+ * Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+ * (audit issue #6): pure helper that picks the permission-modal box
+ * width based on the available terminal columns. Pre-Stage-5 the box
+ * was hardcoded to 64 cols, which:
+ *   - wrapped on narrow terminals (60-col iTerm2 split panes)
+ *   - under-used wide terminals (120-col single panes truncated diff
+ *     lines that were perfectly readable)
+ *
+ * Width policy:
+ *   - clamp to [MIN_BOX_WIDTH .. MAX_BOX_WIDTH]
+ *   - leave 4 cols of terminal headroom (2-col left indent + 2-col
+ *     right safety margin)
+ *   - fall back to DEFAULT_BOX_WIDTH when columns is 0 / undefined
+ *     (non-TTY or stub)
+ *
+ * Exported for direct tests.
+ */
+export function pickPermissionBoxWidth(columns: number | undefined): number {
+  if (typeof columns !== "number" || !Number.isFinite(columns) || columns <= 0) {
+    return DEFAULT_BOX_WIDTH
+  }
+  const target = columns - 4
+  if (target < MIN_BOX_WIDTH) return MIN_BOX_WIDTH
+  if (target > MAX_BOX_WIDTH) return MAX_BOX_WIDTH
+  return target
+}
 
 export async function askPermission({ tool, args }: PromptArgs): Promise<PromptResult> {
   // Stop the agent's spinner so the modal paints on a clean line and isn't
   // overdrawn by the next dot animation tick.
   pauseSpinner()
+  // Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+  // (audit issue #5): announce modal control so InteractiveHints switches
+  // its bottom-row keybindings to the permission-modal set.
+  emitAgent({ type: "modal_active", modal: "permission" })
 
   const target = primaryPath(tool, args) ?? "(no path)"
+  // Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+  // (audit issue #6): read the terminal width once on modal entry and
+  // size the box to match. The box reads at-modal-mount, so a resize
+  // mid-modal won't re-flow — acceptable for a short-lived prompt.
+  const boxWidth = pickPermissionBoxWidth(process.stdout.columns)
 
   console.log("")
-  drawHeader(" PERMISSION ", BOX_WIDTH)
+  drawHeader(" PERMISSION ", boxWidth)
   console.log("  " + colors.warning(BOX.v) + " " + colors.bright.bold(tool) + " " + colors.muted(target))
 
   // Inline diff preview for write_file / edit_file. Lets the user see the
   // exact +/- lines before granting permission instead of clicking
   // [Tab → diff] AFTER the fact.
   if (tool === "write_file" || tool === "edit_file") {
-    const preview = await renderDiffInline(args)
+    const preview = await renderDiffInline(args, boxWidth)
     if (preview.length > 0) {
       console.log("  " + colors.warning(BOX.v))
       for (const line of preview) console.log(line)
@@ -55,7 +95,7 @@ export async function askPermission({ tool, args }: PromptArgs): Promise<PromptR
   console.log("  " + colors.warning(BOX.v) + "  " + colors.success("[A]") + " allow always for this " + colors.muted(`(${tool} on ${target})`))
   console.log("  " + colors.warning(BOX.v) + "  " + colors.error("[d]") + " deny once")
   console.log("  " + colors.warning(BOX.v) + "  " + colors.error("[D]") + " deny always")
-  console.log("  " + colors.warning(BOX.bl + BOX.h.repeat(BOX_WIDTH) + BOX.br))
+  console.log("  " + colors.warning(BOX.bl + BOX.h.repeat(boxWidth) + BOX.br))
   process.stdout.write("  > ")
 
   const key = await readSingleKey()
@@ -79,6 +119,10 @@ export async function askPermission({ tool, args }: PromptArgs): Promise<PromptR
       break
   }
 
+  // Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md:
+  // release modal control so InteractiveHints reverts to the working /
+  // idle hint set.
+  emitAgent({ type: "modal_dismissed" })
   resumeSpinner()
   return result
 }
@@ -99,8 +143,12 @@ function drawHeader(label: string, width: number): void {
  * Build a few lines of `+ added / - removed` preview for a write/edit. Returns
  * an array of pre-formatted lines (already prefixed with the box `│ `). Empty
  * array means "no diff to show" (e.g., couldn't read source, or no change).
+ *
+ * Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+ * (audit issue #6): takes the modal's resolved box width so diff lines
+ * truncate to the same right edge as the rest of the modal.
  */
-async function renderDiffInline(args: Record<string, unknown>): Promise<string[]> {
+async function renderDiffInline(args: Record<string, unknown>, boxWidth: number): Promise<string[]> {
   const filePath = args.path as string | undefined
   if (!filePath) return []
 
@@ -136,10 +184,10 @@ async function renderDiffInline(args: Record<string, unknown>): Promise<string[]
         continue
       }
       if (line.type === "add") {
-        lines.push(verticalBar + colors.success("+ ") + colors.success(truncate(line.content, BOX_WIDTH - 4)))
+        lines.push(verticalBar + colors.success("+ ") + colors.success(truncate(line.content, boxWidth - 4)))
         printed += 1
       } else if (line.type === "remove") {
-        lines.push(verticalBar + colors.error("- ") + colors.error(truncate(line.content, BOX_WIDTH - 4)))
+        lines.push(verticalBar + colors.error("- ") + colors.error(truncate(line.content, boxWidth - 4)))
         printed += 1
       }
       // skip context lines in the inline preview to keep it tight

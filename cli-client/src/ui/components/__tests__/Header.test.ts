@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { awarenessGlyph, formatAwarenessTail } from "../Header.js"
+import { awarenessGlyph, formatAwarenessTail, chunkRenderMode } from "../Header.js"
 
 describe("awarenessGlyph", () => {
   it("returns ✔ for on_track", () => {
@@ -46,5 +46,28 @@ describe("formatAwarenessTail — surfaces lastSignal context when state ≠ on_
 
   it("trims surrounding whitespace before measuring", () => {
     expect(formatAwarenessTail({ state: "blocked", confidence: 25, lastSignal: "   some signal   " })).toBe("some signal")
+  })
+})
+
+// Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md (audit issue #8).
+describe("chunkRenderMode — exhaustive 3-mode chunk-cell render decision", () => {
+  it("returns 'hidden' when no chunk_plan has fired", () => {
+    expect(chunkRenderMode(false, null)).toBe("hidden")
+    expect(chunkRenderMode(false, "implement")).toBe("hidden")
+    expect(chunkRenderMode(false, "simple")).toBe("hidden")
+  })
+
+  it("returns 'implement-pulse' when chunk present AND runIntent is 'implement'", () => {
+    expect(chunkRenderMode(true, "implement")).toBe("implement-pulse")
+  })
+
+  it("returns 'implement-pulse' when chunk present AND runIntent is null (pre-classified)", () => {
+    expect(chunkRenderMode(true, null)).toBe("implement-pulse")
+  })
+
+  it("returns 'internal-indicator' for non-implement classified runs with chunks", () => {
+    expect(chunkRenderMode(true, "simple")).toBe("internal-indicator")
+    expect(chunkRenderMode(true, "summary")).toBe("internal-indicator")
+    expect(chunkRenderMode(true, "bug")).toBe("internal-indicator")
   })
 })

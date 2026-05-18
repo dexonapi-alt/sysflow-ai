@@ -56,6 +56,42 @@ export function awarenessGlyph(state: AwarenessSnapshot["state"]): string {
 }
 
 /**
+ * Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+ * (audit issue #8): pure helper that picks the chunk-cell render
+ * mode based on (a) whether a chunk_plan has fired and (b) the run's
+ * classified intent.
+ *
+ * Three exhaustive modes:
+ *
+ *   "implement-pulse"     — runIntent === "implement" (with chunk present)
+ *                           OR pre-classification window (chunk present,
+ *                           runIntent still null — legacy / pre-Phase-19
+ *                           path). Renders the colored <Pulse>.
+ *   "internal-indicator"  — chunk present, runIntent classified to a
+ *                           non-implement value (simple Q&A, summary, bug).
+ *                           Renders the muted "· thinking through it" cell
+ *                           so the user still sees activity without the
+ *                           multi-step-plan cue.
+ *   "hidden"              — no chunk_plan has fired yet. Nothing to render.
+ *
+ * Pre-Stage-5 these three modes were tangled across three conditional
+ * branches in the JSX with overlapping conditions. The helper makes the
+ * decision exhaustive + testable; the JSX collapses to one switch.
+ *
+ * Exported for direct tests.
+ */
+export type ChunkRenderMode = "implement-pulse" | "internal-indicator" | "hidden"
+
+export function chunkRenderMode(
+  chunkPresent: boolean,
+  runIntent: "simple" | "summary" | "bug" | "implement" | null,
+): ChunkRenderMode {
+  if (!chunkPresent) return "hidden"
+  if (runIntent === "implement" || runIntent === null) return "implement-pulse"
+  return "internal-indicator"
+}
+
+/**
  * Map a confidence score (0–100) to the position along the green→red
  * gradient (0–1). Slightly exponential so high-confidence scores cluster
  * at the green end — a 90 should still feel solidly green, not "near
@@ -72,13 +108,10 @@ export function Header({ model, user, chatTitle, planMode, cwd }: Props): React.
   const folder = path.basename(cwd ?? process.cwd())
   const { awareness, chunk, runIntent } = useAgentEvents()
 
-  // Phase 19: surface a tiny muted "thinking through it" cell when the
-  // agent has internal task structure (chunk_plan has fired) but the
-  // task box is gated off (runIntent is non-implement, e.g. simple Q&A
-  // with chunked memory recall happening behind the scenes). Lets the
-  // user see that work IS happening even though the multi-step plan
-  // ceiling isn't being rendered.
-  const showInternalTaskIndicator = chunk !== null && runIntent !== null && runIntent !== "implement"
+  // Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+  // (audit issue #8): single exhaustive helper replaces the three
+  // overlapping JSX branches that used to live here.
+  const chunkMode = chunkRenderMode(chunk !== null, runIntent)
 
   return (
     <Box flexDirection="column">
@@ -103,7 +136,7 @@ export function Header({ model, user, chatTitle, planMode, cwd }: Props): React.
             <AwarenessBadge snapshot={awareness} />
           </>
         )}
-        {chunk && runIntent === "implement" && (
+        {chunkMode === "implement-pulse" && chunk && (
           <>
             <Text color={palette.muted}>  ·  </Text>
             <Pulse flash={palette.accent} settle={palette.muted} triggerKey={chunk.pulseKey}>
@@ -111,22 +144,7 @@ export function Header({ model, user, chatTitle, planMode, cwd }: Props): React.
             </Pulse>
           </>
         )}
-        {chunk && runIntent !== "implement" && runIntent === null && (
-          // Pre-Phase-19 path: no intent classified yet (legacy or
-          // mid-run before the cli reducer observed the first response).
-          // Render the chunk pulse normally so we don't regress the
-          // visible-progress signal in that window.
-          <>
-            <Text color={palette.muted}>  ·  </Text>
-            <Pulse flash={palette.accent} settle={palette.muted} triggerKey={chunk.pulseKey}>
-              {`▸ ${chunk.index}`}
-            </Pulse>
-          </>
-        )}
-        {showInternalTaskIndicator && (
-          // Phase 19: non-implement run with internal task structure.
-          // Tiny muted indicator instead of the chunk pulse so the user
-          // sees activity without the "this is a multi-step plan" cue.
+        {chunkMode === "internal-indicator" && (
           <>
             <Text color={palette.muted}>  ·  </Text>
             <Text color={palette.muted}>{`· thinking through it`}</Text>

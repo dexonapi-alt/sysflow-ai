@@ -658,6 +658,88 @@ export const INTERACTIVE_PATTERNS = [
 
 const COMMAND_TIMEOUT_MS = 30_000
 
+// ─── Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md: live stream preview ───
+//
+// `createStreamPreviewEmitter()` returns a small stateful helper that
+// the run_command child-process handlers feed raw stdout/stderr chunks
+// into. The helper maintains a rolling ring of the most-recent
+// non-empty stream lines and debounces emission to `tool_stream` events
+// — at most one emit every STREAM_DEBOUNCE_MS (default 250ms).
+//
+// Pre-Stage-5 the agent ran a 30s `npm install` and the user saw only
+// the static `● Bash(npm install)` card + the spinner. No progress
+// feedback. With this helper the user sees the last 5 lines of stream
+// output update live under the running card.
+//
+// The emitter is intentionally LOCAL to each runCommandTool call
+// (closure, not module-level) so multiple parallel commands don't
+// pollute each other's previews — though run_command is in the serial
+// path so parallel commands shouldn't actually happen.
+
+const STREAM_PREVIEW_LINES = 5
+const STREAM_DEBOUNCE_MS = 250
+
+interface StreamPreviewEmitter {
+  /** Feed raw stdout/stderr chunk text. Splits on newlines internally. */
+  consume(chunk: string): void
+  /** Flush any pending emission immediately (called by the close handler). */
+  flush(): void
+}
+
+function createStreamPreviewEmitter(): StreamPreviewEmitter {
+  const ring: string[] = []
+  let pending = false
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let lineBuffer = ""
+
+  const emit = (): void => {
+    pending = false
+    if (timer) {
+      clearTimeout(timer)
+      timer = null
+    }
+    if (ring.length === 0) return
+    emitAgent({ type: "tool_stream", lines: ring.slice() })
+  }
+
+  const schedule = (): void => {
+    if (pending) return
+    pending = true
+    timer = setTimeout(emit, STREAM_DEBOUNCE_MS)
+  }
+
+  return {
+    consume(chunk: string): void {
+      if (!chunk) return
+      lineBuffer += chunk
+      // Drain complete lines from the buffer; keep the unfinished tail.
+      const nl = lineBuffer.lastIndexOf("\n")
+      if (nl === -1) return
+      const complete = lineBuffer.slice(0, nl)
+      lineBuffer = lineBuffer.slice(nl + 1)
+      for (const raw of complete.split("\n")) {
+        const trimmed = raw.replace(/\r$/, "").trim()
+        if (trimmed.length === 0) continue
+        ring.push(trimmed)
+        while (ring.length > STREAM_PREVIEW_LINES) ring.shift()
+      }
+      schedule()
+    },
+    flush(): void {
+      // If a partial line is in the buffer, surface it too (final emit).
+      if (lineBuffer.length > 0) {
+        const final = lineBuffer.trim()
+        lineBuffer = ""
+        if (final.length > 0) {
+          ring.push(final)
+          while (ring.length > STREAM_PREVIEW_LINES) ring.shift()
+        }
+      }
+      emit()
+    },
+  }
+}
+
 // ─── Stage 5 of awareness-and-verification-correctness plan: Windows shell error counter ───
 //
 // Bumped each time runCommandTool's close handler detects a PowerShell
@@ -944,11 +1026,30 @@ export async function runCommandTool(
     let stdout = ""
     let stderr = ""
 
-    child.stdout.on("data", (d: Buffer) => { stdout += d.toString() })
-    child.stderr.on("data", (d: Buffer) => { stderr += d.toString() })
+    // Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+    // (audit issue #7): debounced live preview of the merged stream.
+    // Emits the most-recent STREAM_PREVIEW_LINES non-empty lines via
+    // a `tool_stream` event so <AgentStream> renders <StreamPreview>
+    // under the running ActionCard. 250ms debounce keeps the event rate
+    // sane for high-volume tools (npm install, webpack builds).
+    const streamPreviewState = createStreamPreviewEmitter()
+    child.stdout.on("data", (d: Buffer) => {
+      const chunk = d.toString()
+      stdout += chunk
+      streamPreviewState.consume(chunk)
+    })
+    child.stderr.on("data", (d: Buffer) => {
+      const chunk = d.toString()
+      stderr += chunk
+      streamPreviewState.consume(chunk)
+    })
 
     const timer = setTimeout(() => {
       child.kill("SIGTERM")
+      // Stage 5 (audit issue #7): final flush before resolving the
+      // timed-out result so the user sees whatever partial output
+      // landed before SIGTERM.
+      streamPreviewState.flush()
       resolve({
         stdout: stdout.slice(-2000),
         stderr: stderr.slice(-2000),
@@ -959,6 +1060,12 @@ export async function runCommandTool(
 
     child.on("close", (code) => {
       clearTimeout(timer)
+      // Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+      // (audit issue #7): final flush so any partial-line tail in the
+      // stream buffer reaches the UI before the card settles. The
+      // reducer clears the preview slot on the next tool_end, so this
+      // flush is the last chance for the user to see late output.
+      streamPreviewState.flush()
       // Stage 4 of awareness-and-verification-correctness plan:
       // even with exit code 0, treat the command as failed when
       // stderr contains PowerShell cmdlet-binding error markers

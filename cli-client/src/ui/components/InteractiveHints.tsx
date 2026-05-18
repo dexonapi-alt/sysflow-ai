@@ -28,16 +28,26 @@ import { useAgentEvents } from "../hooks/useAgentEvents.js"
 import { pickHints, formatHints, type HintState } from "../state/hints.js"
 
 /** Pure: derive the hint state from the reducer slots the row cares
- *  about. Exported so tests can assert the mapping without rendering
- *  Ink. Today's mapping is `spinnerText !== null → working`; future
- *  stages can layer in modal / typing states. */
-export function deriveHintState(spinnerText: string | null): HintState {
+ *  about. Exported so tests can assert the mapping without rendering Ink.
+ *
+ *  Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+ *  (audit issue #5): modal state wins over spinner state. When a
+ *  raw-TTY modal has stdin control, idle keys (`↑ history`, `/ commands`)
+ *  do nothing — the hint row showing them was actively misleading.
+ *  Permission and off-course each get their own hint shape.
+ */
+export function deriveHintState(
+  spinnerText: string | null,
+  activeModal: "permission" | "offcourse" | null,
+): HintState {
+  if (activeModal === "permission") return "permission_modal"
+  if (activeModal === "offcourse") return "offcourse_modal"
   return spinnerText !== null ? "working" : "idle"
 }
 
 export function InteractiveHints(): React.ReactElement | null {
-  const { spinnerText } = useAgentEvents()
-  const state = deriveHintState(spinnerText)
+  const { spinnerText, activeModal } = useAgentEvents()
+  const state = deriveHintState(spinnerText, activeModal)
   const hints = pickHints(state)
   const text = formatHints(hints)
   if (text.length === 0) return null

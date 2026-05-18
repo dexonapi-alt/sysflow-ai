@@ -25,6 +25,7 @@
 import readline from "node:readline"
 import { colors, BOX } from "./render.js"
 import { pauseSpinner, resumeSpinner } from "./spinner-control.js"
+import { emitAgent } from "../agent/events.js"
 
 export interface OffCourseEvidence {
   /** Top divergence signals to surface inline. Empty array is allowed but unusual. */
@@ -50,6 +51,10 @@ const MAX_SIGNAL_LINES = 5
 
 export async function askOffCourse(evidence: OffCourseEvidence): Promise<OffCourseResult> {
   pauseSpinner()
+  // Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+  // (audit issue #5): announce modal control so InteractiveHints
+  // switches to the off-course keybinding hints.
+  emitAgent({ type: "modal_active", modal: "offcourse" })
 
   console.log("")
   drawHeader(" OFF COURSE ", BOX_WIDTH)
@@ -91,6 +96,16 @@ export async function askOffCourse(evidence: OffCourseEvidence): Promise<OffCour
   // was buried in the docstring). Now: only r / R triggers redirect;
   // q / Q / Esc explicitly collapse to continue; other keys re-prompt
   // so the user knows their press didn't take.
+  // Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+  // (audit issue #5): one consolidated exit helper that fires the modal
+  // dismissal event before returning. Keeps the four return sites below
+  // honest about releasing modal control.
+  const dismiss = (result: OffCourseResult): OffCourseResult => {
+    emitAgent({ type: "modal_dismissed" })
+    resumeSpinner()
+    return result
+  }
+
   let key: string
   for (let attempt = 0; attempt < 3; attempt++) {
     process.stdout.write("  > ")
@@ -98,27 +113,23 @@ export async function askOffCourse(evidence: OffCourseEvidence): Promise<OffCour
     process.stdout.write(key + "\n")
     const action = classifyOffCourseKey(key)
     if (action === "continue") {
-      resumeSpinner()
-      return { action: "continue" }
+      return dismiss({ action: "continue" })
     }
     if (action === "backtrack") {
       console.log(colors.warning(`  ↩ rolling back to chunk ${evidence.lastGoodChunkIndex}…`))
-      resumeSpinner()
-      return { action: "backtrack" }
+      return dismiss({ action: "backtrack" })
     }
     if (action === "redirect") {
       console.log("")
       const text = await askForText("  Tell me what to fix: ")
-      resumeSpinner()
-      if (!text) return { action: "continue" } // empty redirect collapses to continue
-      return { action: "redirect", text }
+      if (!text) return dismiss({ action: "continue" }) // empty redirect collapses to continue
+      return dismiss({ action: "redirect", text })
     }
     // action === "unknown" → re-prompt
     console.log(colors.muted("  unrecognised key — press [c] continue, [b] backtrack, [r] redirect, or [q]/Esc to cancel"))
   }
   // Exhausted re-prompt budget — fall through to safe default.
-  resumeSpinner()
-  return { action: "continue" }
+  return dismiss({ action: "continue" })
 }
 
 /**
