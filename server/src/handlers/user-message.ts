@@ -490,15 +490,20 @@ export async function handleUserMessage(body: UserMessageBody): Promise<ClientRe
   // gets stashed on the response (Stage 4 will inject it into the model
   // prompt so the main model honours the planner's file list).
   //
-  // Trivial-task short-circuit: skip when the implement brief lists ≤3
-  // build-plan steps — those tasks fit in one chunk anyway.
+  // 2026-05-18 (Plan 4 Stage 3): trivial-task threshold tightened from
+  // ≤3 to ≤1 steps. The pre-Stage-3 threshold blocked the chunked-loop
+  // for buildPlans like ["create package.json", "set up Express",
+  // "configure Postgres"] — 3 high-level bullets that expand to 15-25
+  // actual files at execution time. Real "trivial" is a single-step
+  // plan ("rename function in one file"); 2-3 steps deserve chunked
+  // structure for the file ordering + reflector verification.
   let chunkPlanBrief: ChunkPlanBrief | null = null
   try {
     const chunkedLoopOn = getFlag<boolean>("reasoning.chunked_loop_enabled", body.sysbasePath)
     const briefPipeline = (reasoningBrief as { pipeline?: string } | null)?.pipeline
     const implementBrief = (reasoningBrief as { implementBrief?: { buildPlan?: unknown[] } } | null)?.implementBrief
     const buildPlanSteps = Array.isArray(implementBrief?.buildPlan) ? implementBrief!.buildPlan!.length : 0
-    const isTrivial = buildPlanSteps > 0 && buildPlanSteps <= 3
+    const isTrivial = buildPlanSteps === 1
 
     if (chunkedLoopOn && briefPipeline === "implement" && !isTrivial) {
       const planResult = await runReasoning({

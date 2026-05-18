@@ -1,7 +1,7 @@
 # Chunk pulse missing on implement runs — diagnostic + fix
 
 - **Created:** 2026-05-18
-- **Status:** in-progress
+- **Status:** implemented (2026-05-18)
 - **Scope:** Visible bug from 2026-05-18 user testing — the Header's chunk-pulse cell (`▸ N`) never rendered during a clear implement-class scaffold run (Express POS backend), even though `chunk_plan` events SHOULD have fired multiple times.
 
 ## Goal
@@ -84,3 +84,24 @@ Branch-specific fixes once the diagnostic localises the root cause:
 ## Why diagnostic-first
 
 The fix is small but the cause space is wide. Shipping a "fix" without first narrowing branch (a/b/c) risks fixing the wrong thing. The Stage 1 logs are deletable and cost ~10 lines; well worth it to land the right fix.
+
+## Completion notes
+
+Shipped across PRs #137 (Stage 1 diagnostic), #138 (Stage 2 integration test + helper extraction), and this PR (Stage 3 root-cause fix + log cleanup).
+
+**Stage 1 (#137)** added `[chunk-pulse-diag]` console logs at: initial-response observation, initial emit gate + emit, per-turn response observation, per-turn emit gate + emit, and Header render (debounced via useRef). No behaviour change.
+
+**Stage 2 (#138)** extracted the cli's emit decision into a pure helper `chunkPlanEventFromResponse(response, chunkIndex, inkActive)` and wired both observer sites through it. Added 10 integration tests walking the full chain (server response shape → event extraction → reducer → render mode). All 10 passed, definitively ruling out branches (b) reducer-payload-mismatch and (c) chunkRenderMode-regression.
+
+**Stage 3 (this PR)** — the user's diagnostic-test trace from PR #137 surfaced branch (a) confirmed: `chunkPlanBrief=absent` on every turn (initial + per-turn). Root cause turned out to be two server-side bugs interacting:
+
+1. **Chunk-plan pipeline gate too aggressive.** `user-message.ts:503` skipped the chunked-loop entirely when the preflight reasoning brief's `implementBrief.buildPlan` had ≤3 high-level steps (`isTrivial` shortcut). For scaffold-class prompts ("build Express POS with Postgres") the buildPlan summary is 2-3 bullets but expands to 15-25 files. With chunked-loop skipped, `recordChunkStart` never fires → `activeChunks === 0` → `tool-result.ts` chunked-loop block never runs → no `chunkPlanBrief` ever attached. Fix: tighten threshold from `≤3` to `=1`. Real "trivial" is a single-step plan; 2-3 steps deserve chunked structure.
+2. **Tool-result `args` not threaded cli→server.** Bonus bug surfaced during Stage 3 investigation: `tool-result.ts` was calling `ingestToolResult(body.runId, body.tool, body.result, body.result)` — passing `body.result` for BOTH the args param AND the result param. Worked accidentally for tools whose result echoed back `path` (e.g. write_file at executor.ts:263) but failed for `args.content` which is never echoed. This broke the structural-signal check in the divergence detector — package.json content wasn't captured into `contentSnippets`, so `intent_keyword_absent: express` fired falsely even after the agent wrote a package.json with `"express"` in deps. Fix: add optional `args` field to `ToolResultBody` (and `toolResults[].args` for batch); cli builds an `argsById` map at payload construction and enriches each result entry; server call sites use `body.args ?? body.result` (fallback preserves back-compat for older cli builds).
+
+Stage 3 also removed the temporary `[chunk-pulse-diag]` logs from Stage 1.
+
+Plan 4 closes the four 2026-05-18 visible-bug plans (#1 off-course modal display, #2 batch heading + permission label, #3 awareness heuristic accuracy, #4 chunk pulse missing).
+
+Tests added in Stage 3:
+- `server/src/handlers/__tests__/tool-result-args-threading.test.ts` — 5 tests pinning the new args-selection contract + user-repro (express + postgres deps in package.json satisfy structural signal).
+- Existing 5 tests for `classify402Terminal` already pin the OpenRouter side; Plan 4 doesn't touch it.

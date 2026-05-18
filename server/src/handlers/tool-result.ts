@@ -155,8 +155,24 @@ const lastDivergenceVerdict = new Map<string, { mismatches: string[]; suggestion
 interface ToolResultBody {
   runId: string
   tool: string
+  /** 2026-05-18 (Plan 4 Stage 3): the ORIGINAL tool args from the cli.
+   *  Threaded through so the server's `ingestToolResult` + `recordRunAction`
+   *  can access write_file's `content` (for the content-snippet index that
+   *  feeds the divergence detector's structural-signal check) — not just
+   *  the cli's echoed result payload, which doesn't include content.
+   *  Optional for back-compat with older cli builds; absent args means
+   *  ingestion falls back to `body.result` (pre-fix behaviour). */
+  args?: Record<string, unknown>
   result: Record<string, unknown>
-  toolResults?: Array<{ id: string; tool: string; result: Record<string, unknown> }>
+  toolResults?: Array<{
+    id: string
+    tool: string
+    /** 2026-05-18 (Plan 4 Stage 3): same as the top-level `args` field
+     *  but per-tool in the batch payload. Cli builds an `argsById` map
+     *  at payload-construction and enriches each result entry. */
+    args?: Record<string, unknown>
+    result: Record<string, unknown>
+  }>
   planMode?: boolean
   /** Stage 4 of agent-runtime-fixes plan: fresh top-level directory
    *  tree the cli captured AFTER the just-executed tool batch. Present
@@ -377,17 +393,30 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
   }
 
   // Record actions for each tool AND feed results to action planner + context manager
+  // 2026-05-18 (Plan 4 Stage 3): use the ORIGINAL tool args (newly threaded
+  // through ToolResultBody) instead of `body.result` as the 3rd arg. The
+  // pre-fix code passed `body.result` for both args AND result — which
+  // worked accidentally for tools whose result echoed back `path` (e.g.
+  // write_file at executor.ts:263) but failed for `content` (never
+  // echoed). That broke the structural-signal check in the divergence
+  // detector — package.json content wasn't captured into contentSnippets,
+  // so `intent_keyword_absent: express` falsely fired even after the agent
+  // wrote a package.json with `"express"` in deps. Fallback to
+  // `tr.result` / `body.result` preserves pre-fix behaviour for older cli
+  // clients that haven't been upgraded to send `args`.
   if (isBatch) {
     for (const tr of body.toolResults!) {
-      recordRunAction(body.runId, tr.tool, tr.result, run.projectId)
-      ingestToolResult(body.runId, tr.tool, tr.result, tr.result)
+      const trArgs = tr.args ?? tr.result
+      recordRunAction(body.runId, tr.tool, trArgs, run.projectId)
+      ingestToolResult(body.runId, tr.tool, trArgs, tr.result)
       updatePipelineProgress(body.runId, tr.tool, tr.result)
     }
     actionPlanner.recordBatchResults(body.runId, body.toolResults!.map((tr) => ({ tool: tr.tool, result: tr.result })))
   } else {
-    recordRunAction(body.runId, body.tool, body.result, run.projectId)
+    const singleArgs = body.args ?? body.result
+    recordRunAction(body.runId, body.tool, singleArgs, run.projectId)
     actionPlanner.recordResult(body.runId, body.tool, body.result)
-    ingestToolResult(body.runId, body.tool, body.result, body.result)
+    ingestToolResult(body.runId, body.tool, singleArgs, body.result)
     updatePipelineProgress(body.runId, body.tool, body.result)
   }
 
