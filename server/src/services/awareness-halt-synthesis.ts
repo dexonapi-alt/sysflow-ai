@@ -68,8 +68,29 @@ export interface AwarenessHaltInputs {
   runId: string
   /** Per-run confidence score at halt time (0-100). */
   confidence: number
-  /** Signals contributing to the confidence drop. The most recent 6 are surfaced. */
+  /**
+   * Cumulative signal history (everything `recordConfidenceSignals`
+   * has accumulated this run). Used by the confidence score; surfaced
+   * to the modal evidence ONLY when `currentTurnSignals` is unset.
+   */
   signals: ReadonlyArray<DivergenceSignal>
+  /**
+   * Plan `2026-05-18-awareness-heuristic-accuracy.md` Stage 1:
+   * the signals returned by THIS turn's `detectDivergence` call. When
+   * provided, the modal evidence is rendered from this list instead
+   * of slicing the historical `signals`.
+   *
+   * Pre-Stage-1 the modal always showed the dedup'd tail of the full
+   * history — so a complaint that fired on turn 2 ("intent_keyword_absent:
+   * express") stayed in the modal even after turn 5 wrote `package.json`
+   * with express as a dep and the keyword was satisfied. The current
+   * turn's signals are what's TRUE NOW; that's what the user needs to
+   * judge "is the agent still off course?".
+   *
+   * Optional for backwards compatibility — callers that don't have a
+   * just-detected snapshot fall back to the historical dedup+slice.
+   */
+  currentTurnSignals?: ReadonlyArray<DivergenceSignal>
   /**
    * Cached LLM divergence verdict, if any. Only the chunk-boundary
    * path normally has this; the per-step path passes null. The cli
@@ -118,12 +139,16 @@ export function synthesizeAwarenessHaltResponse(input: AwarenessHaltInputs): Cli
   }
   const resp = mapNormalizedResponseToClient(input.runId, synthesised) as unknown as Record<string, unknown>
   resp.awarenessChoice = true
-  // Plan 2026-05-18-off-course-modal-display-fixes.md issue #1:
-  // dedup BEFORE slicing so the user sees up to 6 UNIQUE signals,
-  // not 6 entries that might collapse to 2-3 unique complaints.
+  // Plan 2026-05-18-awareness-heuristic-accuracy.md Stage 1: prefer the
+  // current turn's signals when provided. Historical slice is the
+  // fallback for callers that don't have a just-detected snapshot.
+  // Plan 2026-05-18-off-course-modal-display-fixes.md issue #1: dedup
+  // BEFORE slicing so the user sees up to 6 UNIQUE signals, not 6
+  // entries that might collapse to 2-3 unique complaints.
+  const evidenceSource = input.currentTurnSignals ?? input.signals
   resp.awarenessEvidence = {
     confidence: input.confidence,
-    signals: dedupeEvidenceSignals(input.signals).slice(-6).map((s) => ({
+    signals: dedupeEvidenceSignals(evidenceSource).slice(-6).map((s) => ({
       category: s.category,
       detail: s.detail,
       severity: s.severity ?? null,

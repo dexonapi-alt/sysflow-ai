@@ -414,6 +414,18 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
       if (!crossCheckOn) {
         signals = signals.filter((s) => s.category !== "reasoning_action_mismatch")
       }
+      // Plan 2026-05-18-awareness-heuristic-accuracy.md Stage 1 diagnostic:
+      // when `intent_keyword_absent` fires, surface what content snippets
+      // the detector saw. Helps localise whether the false-positive is
+      // hypothesis (a) snippet not captured / (b) detector ran before
+      // ingestion finished / (c) stale signal that the historical-slice
+      // path is now hiding behind the modal-evidence filter.
+      const intentMisses = signals.filter((s) => s.category === "intent_keyword_absent")
+      if (intentMisses.length > 0) {
+        const snippetKeys = Array.from(input.contentSnippets?.keys() ?? []).slice(0, 5)
+        const hasPackageJson = snippetKeys.some((k) => k.toLowerCase().endsWith("package.json"))
+        console.log(`[awareness] per-step intent_keyword_absent fired (${intentMisses.length}): ${intentMisses.map((s) => s.detail).join(" | ")} — snippets=${input.contentSnippets?.size ?? 0} hasPackageJson=${hasPackageJson} sample=${snippetKeys.join(",")}`)
+      }
       if (signals.length > 0) {
         recordConfidenceSignals(body.runId, signals)
         const score = getConfidence(body.runId)
@@ -437,10 +449,15 @@ export async function handleToolResult(body: ToolResultBody): Promise<ClientResp
           const chunkHist = getChunkHistory(body.runId)
           const lastGoodChunkIndex = chunkHist.length > 0 ? chunkHist[chunkHist.length - 1].index : -1
           console.log(`[awareness] per-step: BLOCKED (confidence=${score}). Surfacing off-course modal to user.`)
+          // Plan 2026-05-18-awareness-heuristic-accuracy.md Stage 1:
+          // pass the just-detected signals as `currentTurnSignals` so
+          // the modal evidence reflects what's TRUE NOW, not what fired
+          // on earlier turns and stuck in history.
           return synthesizeAwarenessHaltResponse({
             runId: body.runId,
             confidence: score,
             signals: fullState?.signals ?? [],
+            currentTurnSignals: signals,
             lastLlmVerdict: verdict,
             lastGoodChunkIndex,
             source: "per_step",
@@ -1172,10 +1189,15 @@ Do NOT reference these files in your next action. Do NOT try to read or edit the
             // share the synthesis with the per-step path via the new
             // helper. Identical envelope shape regardless of which
             // detector fired.
+            // Plan 2026-05-18-awareness-heuristic-accuracy.md Stage 1:
+            // pass this chunk's just-detected signals (heuristic + gate
+            // + llm) as `currentTurnSignals` so the modal evidence
+            // reflects this turn, not the whole-run history.
             return synthesizeAwarenessHaltResponse({
               runId: body.runId,
               confidence: score,
               signals: fullState?.signals ?? [],
+              currentTurnSignals: allSignals,
               lastLlmVerdict: verdict,
               // Roll back the chunk that JUST crossed the threshold —
               // its snapshot was taken at the start of this chunk.

@@ -226,3 +226,107 @@ describe("synthesizeAwarenessHaltResponse — dedupes evidence signals (user-rep
     expect(evSignals.map((s) => s.category).sort()).toEqual(["intent_keyword_absent", "no_investigation_before_write"])
   })
 })
+
+// Plan 2026-05-18-awareness-heuristic-accuracy.md Stage 1: modal evidence
+// reflects what's TRUE THIS TURN, not what fired earlier in the run and
+// stuck around in history.
+describe("synthesizeAwarenessHaltResponse — currentTurnSignals override (Plan 3 Stage 1)", () => {
+  const intentMiss: DivergenceSignal = {
+    category: "intent_keyword_absent",
+    detail: "user asked for express but no related files / mentions found",
+    severity: "major",
+  }
+  const noInvest: DivergenceSignal = {
+    category: "no_investigation_before_write",
+    detail: "agent wrote files without running any investigation commands first",
+    severity: "minor",
+  }
+  const repeatedAction: DivergenceSignal = {
+    category: "same_action_repeated_in_session",
+    detail: "agent ran edit_file on src/index.ts 4x in the last 6 turns",
+    severity: "moderate",
+  }
+
+  it("renders evidence from currentTurnSignals when provided, IGNORING the historical signals", () => {
+    // User-repro: history has the stale `intent_keyword_absent: express`
+    // signal from turns 2-3, but this turn (after package.json was
+    // written with express) only fires `same_action_repeated_in_session`.
+    // Modal should reflect THIS TURN, not the stale history.
+    const resp = synthesizeAwarenessHaltResponse({
+      ...makeInputs(),
+      signals: [intentMiss, intentMiss, noInvest, intentMiss], // history
+      currentTurnSignals: [repeatedAction],                     // THIS turn
+    })
+    const evidence = (resp as unknown as Record<string, unknown>).awarenessEvidence as Record<string, unknown>
+    const evSignals = evidence.signals as Array<{ category: string; detail: string }>
+    expect(evSignals).toHaveLength(1)
+    expect(evSignals[0].category).toBe("same_action_repeated_in_session")
+    expect(evSignals[0].detail).toContain("4x in the last 6 turns")
+  })
+
+  it("currentTurnSignals empty → modal evidence is empty (the user sees the score-driven message without stale complaints)", () => {
+    const resp = synthesizeAwarenessHaltResponse({
+      ...makeInputs(),
+      signals: [intentMiss, noInvest], // history accumulated across the run
+      currentTurnSignals: [],          // nothing fired THIS turn — block was score-decay
+    })
+    const evidence = (resp as unknown as Record<string, unknown>).awarenessEvidence as Record<string, unknown>
+    const evSignals = evidence.signals as Array<{ category: string }>
+    expect(evSignals).toHaveLength(0)
+  })
+
+  it("falls back to the historical dedupe+slice when currentTurnSignals is unset (backwards compat)", () => {
+    const resp = synthesizeAwarenessHaltResponse({
+      ...makeInputs(),
+      // No currentTurnSignals; pre-Stage-1 contract: surface the
+      // deduped historical tail.
+      signals: [intentMiss, noInvest, intentMiss, noInvest],
+    })
+    const evidence = (resp as unknown as Record<string, unknown>).awarenessEvidence as Record<string, unknown>
+    const evSignals = evidence.signals as Array<{ category: string }>
+    expect(evSignals).toHaveLength(2)
+    expect(evSignals.map((s) => s.category).sort()).toEqual(["intent_keyword_absent", "no_investigation_before_write"])
+  })
+
+  it("currentTurnSignals still goes through dedup (defensive — same heuristic could fire twice in a chunk)", () => {
+    const resp = synthesizeAwarenessHaltResponse({
+      ...makeInputs(),
+      signals: [intentMiss], // history irrelevant when currentTurnSignals is set
+      currentTurnSignals: [intentMiss, intentMiss, noInvest],
+    })
+    const evidence = (resp as unknown as Record<string, unknown>).awarenessEvidence as Record<string, unknown>
+    const evSignals = evidence.signals as Array<{ category: string }>
+    expect(evSignals).toHaveLength(2)
+    expect(evSignals.map((s) => s.category).sort()).toEqual(["intent_keyword_absent", "no_investigation_before_write"])
+  })
+
+  it("user-repro: express scaffold turn N — modal does NOT include the stale intent_keyword_absent after package.json was written", () => {
+    // Earlier turns (1-3) fired `intent_keyword_absent: express` because
+    // no files had been written yet. Turn 4: package.json with express
+    // landed; tier-2 structural signal satisfies the keyword → detector
+    // returns empty for that category. The score decayed past blocked
+    // because of other complaints (no_investigation_before_write).
+    const resp = synthesizeAwarenessHaltResponse({
+      ...makeInputs(),
+      signals: [intentMiss, intentMiss, intentMiss, noInvest], // history
+      currentTurnSignals: [noInvest],                          // THIS turn only
+    })
+    const evidence = (resp as unknown as Record<string, unknown>).awarenessEvidence as Record<string, unknown>
+    const evSignals = evidence.signals as Array<{ category: string; detail: string }>
+    expect(evSignals).toHaveLength(1)
+    expect(evSignals[0].category).toBe("no_investigation_before_write")
+    expect(evSignals.find((s) => s.category === "intent_keyword_absent")).toBeUndefined()
+  })
+
+  it("score-derived message still rounds confidence regardless of currentTurnSignals", () => {
+    // Stage 1 changes the EVIDENCE source, not the message logic.
+    const resp = synthesizeAwarenessHaltResponse({
+      ...makeInputs(),
+      confidence: 28.6,
+      signals: [intentMiss],
+      currentTurnSignals: [noInvest],
+    })
+    const r = resp as unknown as Record<string, unknown>
+    expect((r.message as string)).toContain("29/100")
+  })
+})
