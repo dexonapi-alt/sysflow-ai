@@ -29,21 +29,102 @@ import { isMotionEnabled, onMotionChange } from "../state/motion.js"
 export const DEFAULT_FPS = 30
 export const FRAME_INTERVAL_MS = Math.round(1000 / DEFAULT_FPS)
 
-type FrameCallback = (nowMs: number) => void
+/**
+ * Stage 1 of plan `2026-05-18-ui-ux-polish-and-action-aware-spinner.md`.
+ *
+ * Resize-pause window: after a `process.stdout.on("resize")` event fires,
+ * the pump skips ticks for this many ms. Closes the user-reported
+ * minimize-during-summary scroll-storm bug — on terminal restore the
+ * resize event fires once (or several times in close succession), and
+ * during that window any per-frame setState would compound into a burst
+ * of VT100 sequences that Ink can't reconcile cleanly. Skipping the
+ * pump entirely for ~150ms lets Ink's own resize-handler complete its
+ * full re-render before per-frame work resumes.
+ *
+ * Tuned: 150ms is long enough to cover the typical resize-flurry window
+ * on Windows Terminal / iTerm2 / GNOME Terminal, short enough that the
+ * human eye won't notice the spinner glyph freezing (max 4-5 frames at
+ * 30 fps). Operators can tune via the quality.typewriter_pause_during_resize_ms
+ * flag (Stage 6).
+ */
+export const RESIZE_PAUSE_MS = 150
+
+/**
+ * Frame callback. Returning `false` signals "I'm done — unsubscribe me
+ * from the pump." Returning anything else (undefined, true, etc.) keeps
+ * the subscription. This lets one-shot animations (e.g. `<Typewriter>`
+ * once the reveal completes) detach themselves WITHOUT the component
+ * having to handle unsubscribe-via-effect-cleanup, which was the root
+ * cause of the original scroll storm: components stayed subscribed after
+ * their work was done, accumulating per-frame setState calls that turned
+ * into VT100 burst on resize.
+ */
+type FrameCallback = (nowMs: number) => boolean | void
 
 const subscribers = new Set<FrameCallback>()
 let timer: ReturnType<typeof setInterval> | null = null
+let pausedUntilDateMs = 0
+
+/**
+ * Pause-window check. Uses `Date.now()` rather than `nowMs()` /
+ * `performance.now()` because the pause is a pure wall-clock concern
+ * (we don't need monotonic timing here — NTP-correction risk is
+ * acceptable for a 150ms window) AND because `Date.now()` is
+ * consistently shimmed by `vi.useFakeTimers()` + `vi.setSystemTime()`,
+ * which lets the resize-pause tests advance time deterministically
+ * without firing the setInterval pump as a side-effect.
+ */
+function isPausedNow(): boolean {
+  return Date.now() < pausedUntilDateMs
+}
 
 function pump(): void {
+  // Stage 1: skip ticks during the resize pause window. Subscribers stay
+  // attached; the pump just doesn't fire their callbacks. Resumes
+  // automatically on the next tick after the window closes.
+  if (isPausedNow()) return
   const now = nowMs()
+  // Collect detachments OUTSIDE the iteration so Set mutation doesn't
+  // disrupt the loop. Pump processes the set as-of-this-tick; any
+  // callbacks added DURING the pump fire on the next tick (standard
+  // single-shared-scheduler semantics).
+  const toDetach: FrameCallback[] = []
   for (const fn of subscribers) {
-    try { fn(now) } catch { /* one bad callback shouldn't kill the loop */ }
+    try {
+      const result = fn(now)
+      if (result === false) toDetach.push(fn)
+    } catch {
+      // One bad callback shouldn't kill the loop. Detach it so a
+      // persistently-throwing subscriber doesn't burn cycles forever.
+      toDetach.push(fn)
+    }
   }
+  for (const fn of toDetach) subscribers.delete(fn)
+  if (subscribers.size === 0) stop()
+}
+
+/**
+ * Stage 1: install the SIGWINCH listener exactly once per process. The
+ * listener flips the pause window forward by RESIZE_PAUSE_MS on every
+ * fire (so a rapid burst of resize events from terminal minimize/restore
+ * extends the pause cleanly without compounding).
+ *
+ * Idempotent — safe to call from any subscribeFrame() entrypoint.
+ */
+let resizeListenerInstalled = false
+function ensureResizeListener(): void {
+  if (resizeListenerInstalled) return
+  if (typeof process === "undefined" || !process.stdout || typeof process.stdout.on !== "function") return
+  resizeListenerInstalled = true
+  process.stdout.on("resize", () => {
+    pausedUntilDateMs = Date.now() + RESIZE_PAUSE_MS
+  })
 }
 
 function start(): void {
   if (timer != null) return
   if (!isMotionEnabled()) return
+  ensureResizeListener()
   timer = setInterval(pump, FRAME_INTERVAL_MS)
   // Don't keep the Node process alive just to drive the spinner.
   if (typeof timer === "object" && timer != null && "unref" in timer && typeof (timer as { unref: unknown }).unref === "function") {
@@ -90,6 +171,10 @@ export function useFrame(cb: FrameCallback): void {
   ref.current = cb
 
   useEffect(() => {
+    // Stage 1: propagate the user callback's return value so a `false`
+    // return triggers self-unsubscription via the pump's detach loop.
+    // The wrapper keeps a stable identity across renders (the ref shim
+    // handles closure freshness).
     const wrapped: FrameCallback = (t) => ref.current(t)
 
     if (!isMotionEnabled()) {
@@ -129,8 +214,8 @@ export function subscribeFrame(cb: FrameCallback): () => void {
 }
 
 /** Test-only: how many active subscribers + whether the timer is running. */
-export function _internals(): { subscribers: number; timerRunning: boolean } {
-  return { subscribers: subscribers.size, timerRunning: timer != null }
+export function _internals(): { subscribers: number; timerRunning: boolean; pausedUntilDateMs: number } {
+  return { subscribers: subscribers.size, timerRunning: timer != null, pausedUntilDateMs }
 }
 
 /** Test-only: drop every subscription, stop the timer, and clear the
@@ -139,10 +224,29 @@ export function _internals(): { subscribers: number; timerRunning: boolean } {
 export function _resetForTests(): void {
   subscribers.clear()
   stop()
+  pausedUntilDateMs = 0
   if (motionUnsubscribe) {
     motionUnsubscribe()
     motionUnsubscribe = null
   }
+}
+
+/**
+ * Test-only: simulate a resize event by extending the pause window
+ * directly. Production code never calls this — the real path is
+ * `process.stdout.on("resize")` → ensureResizeListener's handler.
+ */
+export function _simulateResizeForTests(): void {
+  pausedUntilDateMs = Date.now() + RESIZE_PAUSE_MS
+}
+
+/**
+ * Test-only: run the pump once synchronously. Production code drives
+ * the pump via setInterval; tests want to assert behaviour without
+ * waiting on real time.
+ */
+export function _pumpOnceForTests(): void {
+  pump()
 }
 
 /**

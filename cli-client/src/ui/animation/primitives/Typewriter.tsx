@@ -79,10 +79,24 @@ export function Typewriter({ wpm = 250, onDone, color, bold, children }: Typewri
   useFrame((t) => {
     const elapsed = t - startedAt.current
     const next = computeTypewriterCount(children, elapsed, wpm)
-    setCount(next)
-    if (next >= children.length && onDone && !fired.current) {
-      fired.current = true
-      onDone()
+    // Stage 1 of 2026-05-18-ui-ux-polish-and-action-aware-spinner plan:
+    // skip the setState when the count hasn't advanced. Pre-fix the
+    // setState fired every frame even after the reveal completed,
+    // accumulating per-frame Ink reconcile work that compounded into a
+    // VT100 burst on terminal resize. Now: no advance → no setState.
+    if (next !== count) {
+      setCount(next)
+    }
+    if (next >= children.length) {
+      if (onDone && !fired.current) {
+        fired.current = true
+        onDone()
+      }
+      // Stage 1: detach from the frame loop now that the reveal is
+      // complete. The shared scheduler stops automatically when the
+      // last subscriber unsubscribes — so a settled Typewriter contributes
+      // zero per-frame work.
+      return false
     }
   })
 
