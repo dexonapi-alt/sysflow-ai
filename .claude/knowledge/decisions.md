@@ -882,3 +882,28 @@ Persistently-throwing subscribers also get auto-detached so one bad callback can
 - *React.memo boundary around Typewriter in AgentStream* — the per-frame setState burst the original plan worried about is eliminated by Layer 1's detach. The memo would be defensive but unnecessary now.
 
 **Why `Date.now()` not `performance.now()`:** `nowMs()` (which uses `performance.now()` if available) is the right choice for animation cadence — monotonic, immune to NTP correction. But the pause window is a discrete wall-clock budget; `Date.now()` is sufficient and `vi.useFakeTimers` shims it by default while it doesn't shim `performance.now()` without `toFake: ["performance"]`. Test ergonomics matter; the production correctness doesn't change.
+
+## Investigation = safe-read `run_command` OR structured-read tool calls
+
+- **Source:** plan `applied/2026-05-18-awareness-heuristic-accuracy.md` (Stage 2)
+
+The `no_investigation_before_write` heuristic suppresses when EITHER kind of pre-write reconnaissance has happened:
+
+1. **Shell investigation** — `run_command` whose command passes `isSafeReadOnlyCommand` (`ls`, `cat`, `grep`, `git status`, …).
+2. **Structured investigation** — a tool call whose name is in `INVESTIGATION_TOOL_NAMES`:
+
+   ```
+   list_directory, read_file, batch_read,
+   search_code, search_files, file_exists
+   ```
+
+`buildDetectorInput` populates both `investigationCommandCount` and `investigationToolCount` from the run log; heuristic 7 sums them against its zero-check. Either > 0 suppresses the signal.
+
+**Why both forms count:**
+
+- Stage 4 of the command-first-investigation plan originally scoped investigation to safe-read `run_command` because at that point the agent's primary read path WAS the shell. Today the agent reaches for structured tools first — `list_directory(.)` is the canonical "what's in this directory?" call, not `ls`.
+- The structural shape is the same in both cases: agent reads BEFORE it writes. That's what the heuristic actually wants to measure. Whether the read came from `cat` or `read_file` is incidental.
+
+**Why NOT count `_verification` / `_lint`:** those are post-write artefacts (synthetic tool results that the cli auto-injects after writes). They show the agent verifying its own output, not investigating the existing world before changing it. Different signal, different heuristic.
+
+**How to extend:** when a new investigation-style tool ships, add its tool name to `INVESTIGATION_TOOL_NAMES` in `server/src/handlers/tool-result.ts`. No detector change needed — the field is summed pure-functionally.
