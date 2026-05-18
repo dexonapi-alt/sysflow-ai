@@ -88,23 +88,23 @@ The cli's rendering layer must:
 
 ### Stage 4 — Targeted polish part A (audit-derived)
 
-Placeholder until Stage 3 ships. Expected surfaces to address:
+Per `.claude/plans/2026-05-18-ui-ux-audit-findings.md` — 4 issues:
 
-- **Permission prompt copy + flow** — the modal renders correctly but the copy may be denser than necessary. Audit pass.
-- **Error display when sysflow_infra fires** — already has the banner; check that adjacent state (spinner, header) doesn't conflict.
-- **Streaming output during long `run_command`** — typewriter or raw passthrough? Phase 14 partially landed this; verify the bottom-edge.
-- **Awareness badge inline-vs-modal contrast** — `on_track`/`off_course`/`blocked` badges should read at a glance; the off-course modal should INHERIT the same colour language.
-
-Specific stages locked in after Stage 3.
+1. **#1 — Sysflow_infra banner in Ink mode (BLOCKING).** New `infra_error` structured event + `<ErrorBanner>` component; gate the existing raw `console.log` chain behind `shouldRenderInlineForLegacy()` for legacy mode parity.
+2. **#2 — ActionCard multi-line error rendering (CLARITY).** Replace `firstLine(error)` with pure `formatErrorLines(error, maxLines=3, maxCharsPerLine=100)`; render up to 3 indented lines with `+N more` tail when overflow.
+3. **#3 — Awareness badge surfaces lastSignal context (CLARITY).** When state ≠ on_track, append `(<category>: <detail>)` after the score. On-track stays compact.
+4. **#4 — Off-course modal Esc/q cancel + restrict default-on-unknown (CLARITY).** Explicit `q` / Esc → `continue` (safe default). Default-on-unknown limited to `r` / `R`; other keys re-prompt.
 
 ### Stage 5 — Targeted polish part B (audit-derived)
 
-Placeholder. Expected surfaces:
+Per the audit doc — 4 issues:
 
-- **Reasoning peek formatting** — long paragraphs sometimes overflow; the `r`-to-expand toggle works but the closed-state truncation could use cleaner ellipsis.
-- **ToolCard density on batches** — when 3 tools dispatch, the rendered cards stack tightly; consider a separator or per-card breath rhythm offset.
-- **Header status zones** — chunk progress + awareness + token meter need a coherent layout pass.
-- **Inline log entry colour mapping** — confirm `entry.level` → `palette` mapping renders correctly across all level values (info / warn / error / muted).
+5. **#5 — InteractiveHints modal-mode (CLARITY).** Reducer slot `activeModal` + `permission_modal_active` / `offcourse_modal_active` events; hint table grows two new states.
+6. **#6 — Permission prompt width-aware diff preview (CLARITY).** Pure `pickPermissionBoxWidth(columns)` helper → `min(80, columns - 4)`.
+7. **#7 — `run_command` stdout/stderr stream surface (CLARITY, BIG).** New `tool_stream` event with chunked stream lines (debounced 250ms); new `<StreamPreview>` block under the running ActionCard rendering last 5 lines muted.
+8. **#8 — Header chunk-pulse branching cleanup (COSMETIC code clarity).** Pure `chunkRenderMode(chunk, runIntent)` helper → 3 exhaustive branches in Header.
+
+Issues #9 and #10 from the audit are deferred (niche / cosmetic).
 
 ### Stage 6 — Telemetry + KB + plan archive
 
