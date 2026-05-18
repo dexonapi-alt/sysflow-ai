@@ -84,7 +84,16 @@ export async function askOffCourse(evidence: OffCourseEvidence): Promise<OffCour
 
   console.log("  " + colors.warning(BOX.v))
   console.log("  " + colors.warning(BOX.v) + "  " + colors.success("[c]") + " continue (override — keep going)")
-  console.log("  " + colors.warning(BOX.v) + "  " + colors.warning("[b]") + " backtrack (rollback to chunk " + evidence.lastGoodChunkIndex + ")")
+  // Plan 2026-05-18-off-course-modal-display-fixes.md issue #2: hide
+  // the [b] backtrack line when no chunk has been snapshotted yet
+  // (per-step blocked path with lastGoodChunkIndex < 0). The previous
+  // render read `rollback to chunk -1` which is gibberish. The cli's
+  // existing rollbackToChunk path still safe-returns false for -1, so
+  // a keystroke `b` (still classified as backtrack) won't crash —
+  // but hiding the option is the honest UX.
+  if (evidence.lastGoodChunkIndex >= 0) {
+    console.log("  " + colors.warning(BOX.v) + "  " + colors.warning("[b]") + " backtrack (rollback to chunk " + evidence.lastGoodChunkIndex + ")")
+  }
   console.log("  " + colors.warning(BOX.v) + "  " + colors.accent("[r]") + " redirect (give a corrected direction)")
   console.log("  " + colors.warning(BOX.v) + "  " + colors.muted("[q]") + " " + colors.muted("cancel (collapse to continue — Esc also works)"))
   console.log("  " + colors.warning(BOX.bl + BOX.h.repeat(BOX_WIDTH) + BOX.br))
