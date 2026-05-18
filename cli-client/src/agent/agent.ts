@@ -7,6 +7,7 @@ import { ensureSysbase, getSelectedModel, getSysbasePath, getReasoningEnabled, g
 import { executeTool, executeToolsBatch } from "./executor.js"
 import { isSafeReadOnlyCommand } from "./safe-commands.js"
 import { formatBatchHeading } from "./tool-meta.js"
+import { chunkPlanEventFromResponse } from "./chunk-plan-event.js"
 import { readFileTool, computeLineDiff } from "./tools.js"
 import { clearRunDiffs } from "./diff.js"
 import { getOrBuildIndex, compactTree } from "./indexer.js"
@@ -604,14 +605,18 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
     // the emit to fire. STAGE 3 WILL REMOVE THIS.
     console.log(`[chunk-pulse-diag] initial emit gate: ink=${isInkActive()} nextAction=${initialPlan?.nextAction ? "present" : "absent"}`)
     // Phase 12 Stage 5: surface the chunk-plan + awareness to the Ink Header.
-    if (isInkActive() && initialPlan?.nextAction) {
-      console.log(`[chunk-pulse-diag] initial chunk_plan EMIT: chunkIndex=${chunkIndex} nextAction="${initialPlan.nextAction}"`)
-      emitAgent({
-        type: "chunk_plan",
-        chunkIndex,
-        nextAction: initialPlan.nextAction,
-        fileCount: Array.isArray(initialPlan.files) ? initialPlan.files.length : 0,
-      })
+    // Plan 2026-05-18-chunk-pulse-missing-diagnostic.md Stage 2 — emit
+    // decision routed through the pure `chunkPlanEventFromResponse`
+    // helper so both observer sites are symmetric and integration-
+    // testable.
+    const initialChunkEvent = chunkPlanEventFromResponse(
+      response as Record<string, unknown>,
+      chunkIndex,
+      isInkActive(),
+    )
+    if (initialChunkEvent) {
+      console.log(`[chunk-pulse-diag] initial chunk_plan EMIT: chunkIndex=${chunkIndex} nextAction="${initialPlan?.nextAction}"`)
+      emitAgent(initialChunkEvent)
     }
     if (isInkActive() && initialAwareness) {
       emitAgent({
@@ -1820,19 +1825,23 @@ async function handleNeedsTool(
         try { await createChunkSnapshot(process.cwd(), currentRunId, ctx.chunkIndex) } catch { /* best-effort */ }
       }
       // Phase 12 Stage 5: surface chunk-plan + awareness to the Ink Header.
-      if (isInkActive() && chunkPlanBrief) {
-        const plan = chunkPlanBrief as { nextAction?: string; files?: string[] }
+      // Plan 2026-05-18-chunk-pulse-missing-diagnostic.md Stage 2 — same
+      // pure helper as the initial-turn site. Symmetric emit logic
+      // ensures both observers can't drift; the integration test pins
+      // both call paths through one helper.
+      {
+        const plan = chunkPlanBrief as { nextAction?: string; files?: string[] } | undefined
         // Plan 2026-05-18-chunk-pulse-missing-diagnostic.md Stage 1 — log
         // the per-turn emit gate evaluation. STAGE 3 WILL REMOVE THIS.
-        console.log(`[chunk-pulse-diag] per-turn emit gate: ink=${isInkActive()} nextAction=${plan.nextAction ? "present" : "absent"} ctx.chunkIndex=${ctx.chunkIndex}`)
-        if (plan.nextAction) {
-          console.log(`[chunk-pulse-diag] per-turn chunk_plan EMIT: chunkIndex=${ctx.chunkIndex} nextAction="${plan.nextAction}"`)
-          emitAgent({
-            type: "chunk_plan",
-            chunkIndex: ctx.chunkIndex,
-            nextAction: plan.nextAction,
-            fileCount: Array.isArray(plan.files) ? plan.files.length : 0,
-          })
+        console.log(`[chunk-pulse-diag] per-turn emit gate: ink=${isInkActive()} nextAction=${plan?.nextAction ? "present" : "absent"} ctx.chunkIndex=${ctx.chunkIndex}`)
+        const perTurnChunkEvent = chunkPlanEventFromResponse(
+          response as Record<string, unknown>,
+          ctx.chunkIndex,
+          isInkActive(),
+        )
+        if (perTurnChunkEvent) {
+          console.log(`[chunk-pulse-diag] per-turn chunk_plan EMIT: chunkIndex=${ctx.chunkIndex} nextAction="${plan?.nextAction}"`)
+          emitAgent(perTurnChunkEvent)
         }
       }
       // Phase 16-fixup (Bug 3): surface chunk_plan + chunk_reflect briefs
