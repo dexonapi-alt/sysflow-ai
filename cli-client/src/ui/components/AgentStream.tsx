@@ -5,6 +5,7 @@ import { Spinner } from "./Spinner.js"
 import { ActionCard } from "./ActionCard.js"
 import { ErrorBanner } from "./ErrorBanner.js"
 import { ReasoningPeek } from "./ReasoningPeek.js"
+import { StreamPreview } from "./StreamPreview.js"
 import { Typewriter } from "../animation/primitives/index.js"
 import { palette } from "../theme.js"
 import { formatRunningCardsForSpinner } from "../spinner-label-format.js"
@@ -24,7 +25,7 @@ import { formatRunningCardsForSpinner } from "../spinner-label-format.js"
  * actively-running card and the spinner re-render each frame.
  */
 export function AgentStream(): React.ReactElement {
-  const { log, spinnerText, toolCards, assistantMessage, reasoningBrief, infraError } = useAgentEvents()
+  const { log, spinnerText, toolCards, assistantMessage, reasoningBrief, infraError, streamPreview } = useAgentEvents()
 
   // Partition cards: settled ones go to <Static> (no per-frame redraw),
   // the in-flight one (if any) stays in the live region. There's at most
@@ -54,6 +55,16 @@ export function AgentStream(): React.ReactElement {
           <ActionCard card={card} />
         </Box>
       ))}
+      {/*
+        Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+        (audit issue #7): live stream preview from a running run_command.
+        Renders under the running card (run_command is in the serial
+        path so it's the most recent / only running card at this point).
+        Cleared by the reducer on the next tool_end.
+      */}
+      {streamPreview && (
+        <StreamPreview lines={streamPreview.lines} />
+      )}
       {/*
         Phase 12 Stage 6: assistant completion text reveals via <Typewriter>
         in the live region above the spinner. Keyed on assistantMessage.key

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest"
 import { reduceAgentEvent, _resetIdsForTests, type AgentEventState } from "../useAgentEvents.js"
 
-const initial: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null, runStartedAt: null, runIntent: null, infraError: null }
+const initial: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null, runStartedAt: null, runIntent: null, infraError: null, activeModal: null, streamPreview: null }
 
 beforeEach(() => _resetIdsForTests())
 
@@ -48,6 +48,102 @@ describe("reduceAgentEvent — infra_error event", () => {
     expect(withBanner.infraError).not.toBeNull()
     const cleared = reduceAgentEvent(withBanner, { type: "clear" })
     expect(cleared.infraError).toBeNull()
+  })
+})
+
+// Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md (audit issues #5 + #7).
+describe("reduceAgentEvent — modal_active / modal_dismissed", () => {
+  it("sets activeModal to 'permission' on modal_active", () => {
+    const after = reduceAgentEvent(initial, { type: "modal_active", modal: "permission" })
+    expect(after.activeModal).toBe("permission")
+  })
+
+  it("sets activeModal to 'offcourse' on modal_active", () => {
+    const after = reduceAgentEvent(initial, { type: "modal_active", modal: "offcourse" })
+    expect(after.activeModal).toBe("offcourse")
+  })
+
+  it("ignores unknown modal kinds (defensive)", () => {
+    const after = reduceAgentEvent(initial, { type: "modal_active", modal: "bogus" as never })
+    expect(after.activeModal).toBeNull()
+  })
+
+  it("clears activeModal on modal_dismissed", () => {
+    const active = reduceAgentEvent(initial, { type: "modal_active", modal: "permission" })
+    expect(active.activeModal).toBe("permission")
+    const dismissed = reduceAgentEvent(active, { type: "modal_dismissed" })
+    expect(dismissed.activeModal).toBeNull()
+  })
+
+  it("clear wipes the activeModal slot (fresh prompt)", () => {
+    const active = reduceAgentEvent(initial, { type: "modal_active", modal: "offcourse" })
+    const cleared = reduceAgentEvent(active, { type: "clear" })
+    expect(cleared.activeModal).toBeNull()
+  })
+})
+
+describe("reduceAgentEvent — tool_stream (live run_command preview)", () => {
+  it("sets streamPreview from a well-formed event", () => {
+    const after = reduceAgentEvent(initial, {
+      type: "tool_stream",
+      lines: ["added 3 packages", "0 vulnerabilities"],
+    })
+    expect(after.streamPreview).toEqual({ lines: ["added 3 packages", "0 vulnerabilities"] })
+  })
+
+  it("replaces the previous streamPreview entirely (no accumulation)", () => {
+    const first = reduceAgentEvent(initial, { type: "tool_stream", lines: ["old"] })
+    const second = reduceAgentEvent(first, { type: "tool_stream", lines: ["new1", "new2"] })
+    expect(second.streamPreview).toEqual({ lines: ["new1", "new2"] })
+  })
+
+  it("ignores empty / non-array lines (defensive)", () => {
+    expect(reduceAgentEvent(initial, { type: "tool_stream", lines: [] }).streamPreview).toBeNull()
+    expect(reduceAgentEvent(initial, { type: "tool_stream", lines: "not an array" as never }).streamPreview).toBeNull()
+  })
+
+  it("filters non-string entries from the lines array (defensive)", () => {
+    const after = reduceAgentEvent(initial, {
+      type: "tool_stream",
+      lines: ["real", 42 as never, null as never, "still real"],
+    })
+    expect(after.streamPreview).toEqual({ lines: ["real", "still real"] })
+  })
+
+  it("returns prev when ALL lines filter out (no blank preview from a malformed emission)", () => {
+    const after = reduceAgentEvent(initial, {
+      type: "tool_stream",
+      lines: [42 as never, null as never],
+    })
+    expect(after.streamPreview).toBeNull()
+  })
+
+  it("clear wipes the streamPreview slot", () => {
+    const withPreview = reduceAgentEvent(initial, {
+      type: "tool_stream",
+      lines: ["abc"],
+    })
+    const cleared = reduceAgentEvent(withPreview, { type: "clear" })
+    expect(cleared.streamPreview).toBeNull()
+  })
+
+  it("tool_end clears the streamPreview slot (run_command settling)", () => {
+    // Build a state where a tool card is running + a stream preview is active.
+    const withStart = reduceAgentEvent(initial, {
+      type: "tool_start",
+      id: "t1",
+      tool: "run_command",
+      label: "Bash(npm install)",
+      args: { command: "npm install" },
+    })
+    const withPreview = reduceAgentEvent(withStart, {
+      type: "tool_stream",
+      lines: ["added 3 packages"],
+    })
+    expect(withPreview.streamPreview).not.toBeNull()
+    const afterEnd = reduceAgentEvent(withPreview, { type: "tool_end", id: "t1", ok: true })
+    expect(afterEnd.streamPreview).toBeNull()
+    expect(afterEnd.toolCards[0].status).toBe("success")
   })
 })
 

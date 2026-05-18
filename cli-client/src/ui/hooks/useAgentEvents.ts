@@ -104,9 +104,21 @@ export interface AgentEventState {
    *  of `sysflow_infra`. The <AgentStream> renders an <ErrorBanner>
    *  block in the live region. Null when no infra error fired. */
   infraError: { title: string; message: string; hint: string | null } | null
+  /** Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+   *  (audit issue #5): which raw-TTY modal currently has stdin control,
+   *  if any. Drives the <InteractiveHints> bottom row to show
+   *  modal-appropriate keybindings instead of the idle hints (which do
+   *  nothing during the modal). Cleared by `modal_dismissed` OR `clear`. */
+  activeModal: "permission" | "offcourse" | null
+  /** Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+   *  (audit issue #7): live preview of the most-recent N lines from a
+   *  running `run_command`'s stdout+stderr stream. Replace-style — each
+   *  emission overwrites the prior preview with the new tail. Cleared
+   *  on the next `tool_end` (the run_command settling) OR on `clear`. */
+  streamPreview: { lines: string[] } | null
 }
 
-const INITIAL: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null, runStartedAt: null, runIntent: null, infraError: null }
+const INITIAL: AgentEventState = { log: [], spinnerText: null, toolCards: [], awareness: null, chunk: null, assistantMessage: null, reasoningBrief: null, runStartedAt: null, runIntent: null, infraError: null, activeModal: null, streamPreview: null }
 
 let nextLogId = 1
 
@@ -172,7 +184,13 @@ export function reduceAgentEvent(prev: AgentEventState, event: AgentEvent): Agen
         status: event.ok ? "success" : "error",
         error: event.ok ? undefined : event.error,
       }
-      return { ...prev, toolCards: next }
+      // Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+      // (audit issue #7): clear the stream preview when a tool settles.
+      // run_command is the only emitter today; clearing on any tool_end
+      // is correct because the preview should never outlive the running
+      // command — and the close handler fires tool_end right after the
+      // last stream chunk lands.
+      return { ...prev, toolCards: next, streamPreview: null }
     }
     case "awareness_update":
       return {
@@ -244,6 +262,25 @@ export function reduceAgentEvent(prev: AgentEventState, event: AgentEvent): Agen
           hint: typeof event.hint === "string" && event.hint.length > 0 ? event.hint : null,
         },
       }
+    }
+    case "modal_active": {
+      // Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+      // (audit issue #5). Defensive: ignore unknown modal kinds so a
+      // malformed payload can't put the reducer into a non-enumerated state.
+      if (event.modal !== "permission" && event.modal !== "offcourse") return prev
+      return { ...prev, activeModal: event.modal }
+    }
+    case "modal_dismissed":
+      return { ...prev, activeModal: null }
+    case "tool_stream": {
+      // Stage 5 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+      // (audit issue #7). Defensive: require a non-empty lines array so
+      // a malformed emission doesn't blank the preview from a working
+      // command.
+      if (!Array.isArray(event.lines) || event.lines.length === 0) return prev
+      const lines = event.lines.filter((l): l is string => typeof l === "string")
+      if (lines.length === 0) return prev
+      return { ...prev, streamPreview: { lines } }
     }
     default:
       return prev
