@@ -12,6 +12,7 @@
 import { describe, it, expect } from "vitest"
 import {
   synthesizeAwarenessHaltResponse,
+  dedupeEvidenceSignals,
   type AwarenessHaltInputs,
 } from "../awareness-halt-synthesis.js"
 import type { DivergenceSignal } from "../divergence-detector.js"
@@ -146,5 +147,82 @@ describe("synthesizeAwarenessHaltResponse — envelope shape", () => {
     expect((evidence.signals as unknown[]).length).toBe(2)
     expect(evidence.lastGoodChunkIndex).toBe(1)
     expect(evidence.source).toBe("chunk_boundary")
+  })
+})
+
+// Plan 2026-05-18-off-course-modal-display-fixes.md issue #1.
+describe("dedupeEvidenceSignals", () => {
+  it("returns an empty array unchanged", () => {
+    expect(dedupeEvidenceSignals([])).toEqual([])
+  })
+
+  it("preserves a single signal", () => {
+    const out = dedupeEvidenceSignals([makeSignal({ category: "intent_keyword_absent", detail: "express" })])
+    expect(out).toHaveLength(1)
+  })
+
+  it("collapses repeated identical signals to one (user repro: same complaint × N)", () => {
+    const out = dedupeEvidenceSignals([
+      makeSignal({ category: "intent_keyword_absent", detail: "user asked for express but no related files / mentions found" }),
+      makeSignal({ category: "no_investigation_before_write", detail: "agent wrote files without running any investigation commands first" }),
+      makeSignal({ category: "intent_keyword_absent", detail: "user asked for express but no related files / mentions found" }),
+      makeSignal({ category: "no_investigation_before_write", detail: "agent wrote files without running any investigation commands first" }),
+    ])
+    expect(out).toHaveLength(2)
+    expect(out[0].category).toBe("intent_keyword_absent")
+    expect(out[1].category).toBe("no_investigation_before_write")
+  })
+
+  it("preserves the MOST-RECENT severity when a signal escalates", () => {
+    const out = dedupeEvidenceSignals([
+      makeSignal({ category: "intent_keyword_absent", detail: "missing pg", severity: "minor" }),
+      makeSignal({ category: "intent_keyword_absent", detail: "missing pg", severity: "major" }),
+    ])
+    expect(out).toHaveLength(1)
+    expect(out[0].severity).toBe("major")
+  })
+
+  it("preserves chronological order across distinct signals", () => {
+    const out = dedupeEvidenceSignals([
+      makeSignal({ category: "intent_keyword_absent", detail: "a" }),
+      makeSignal({ category: "scope_creep", detail: "b" }),
+      makeSignal({ category: "intent_keyword_absent", detail: "a" }), // dupe of first
+      makeSignal({ category: "repeated_tool_error", detail: "c" }),
+    ])
+    expect(out.map((s) => s.detail)).toEqual(["b", "a", "c"])
+    // "a" appears in its LAST position; "b" before it; "c" last. Chronological with dupes collapsed.
+  })
+
+  it("dedupes by (category, detail) — same detail with different category is NOT collapsed", () => {
+    const out = dedupeEvidenceSignals([
+      makeSignal({ category: "intent_keyword_absent", detail: "shared text" }),
+      makeSignal({ category: "scope_creep", detail: "shared text" }),
+    ])
+    expect(out).toHaveLength(2)
+  })
+})
+
+// End-to-end check: synthesised modal envelope no longer carries dupes.
+describe("synthesizeAwarenessHaltResponse — dedupes evidence signals (user-repro guard)", () => {
+  it("does not surface duplicate signals when the same heuristic fired multiple turns", () => {
+    const sameSignal: DivergenceSignal = {
+      category: "intent_keyword_absent",
+      detail: "user asked for express but no related files / mentions found",
+      severity: "major",
+    }
+    const noInvest: DivergenceSignal = {
+      category: "no_investigation_before_write",
+      detail: "agent wrote files without running any investigation commands first",
+      severity: "minor",
+    }
+    const resp = synthesizeAwarenessHaltResponse({
+      ...makeInputs(),
+      // History from 4 turns; same two complaints fired twice.
+      signals: [sameSignal, noInvest, sameSignal, noInvest],
+    })
+    const evidence = (resp as unknown as Record<string, unknown>).awarenessEvidence as Record<string, unknown>
+    const evSignals = evidence.signals as Array<{ category: string }>
+    expect(evSignals).toHaveLength(2)
+    expect(evSignals.map((s) => s.category).sort()).toEqual(["intent_keyword_absent", "no_investigation_before_write"])
   })
 })

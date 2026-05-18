@@ -26,6 +26,36 @@ import { mapNormalizedResponseToClient } from "../providers/normalize.js"
 import type { ClientResponse, NormalizedResponse } from "../types.js"
 import type { DivergenceSignal } from "./divergence-detector.js"
 
+/**
+ * Plan `2026-05-18-off-course-modal-display-fixes.md` — pure dedup
+ * helper for the modal evidence list.
+ *
+ * The confidence-tracker appends one signal entry per turn the
+ * heuristic fires; the same complaint (`intent_keyword_absent: express`,
+ * `no_investigation_before_write`) can therefore appear N times in
+ * the history. The user-reported repro showed the off-course modal
+ * rendering each unique signal twice — pure dupe noise.
+ *
+ * Dedup by `(category, detail)`. Walk the history backward so the
+ * MOST-RECENT occurrence of each signal is kept (severity may have
+ * escalated turn-over-turn); reverse back to chronological for the
+ * render.
+ *
+ * Exported for direct tests.
+ */
+export function dedupeEvidenceSignals(signals: ReadonlyArray<DivergenceSignal>): DivergenceSignal[] {
+  const seen = new Set<string>()
+  const reversed: DivergenceSignal[] = []
+  for (let i = signals.length - 1; i >= 0; i--) {
+    const sig = signals[i]
+    const key = `${sig.category}::${sig.detail}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    reversed.push(sig)
+  }
+  return reversed.reverse()
+}
+
 export type AwarenessHaltSource = "per_step" | "chunk_boundary"
 
 export interface AwarenessLlmVerdictSummary {
@@ -88,9 +118,12 @@ export function synthesizeAwarenessHaltResponse(input: AwarenessHaltInputs): Cli
   }
   const resp = mapNormalizedResponseToClient(input.runId, synthesised) as unknown as Record<string, unknown>
   resp.awarenessChoice = true
+  // Plan 2026-05-18-off-course-modal-display-fixes.md issue #1:
+  // dedup BEFORE slicing so the user sees up to 6 UNIQUE signals,
+  // not 6 entries that might collapse to 2-3 unique complaints.
   resp.awarenessEvidence = {
     confidence: input.confidence,
-    signals: input.signals.slice(-6).map((s) => ({
+    signals: dedupeEvidenceSignals(input.signals).slice(-6).map((s) => ({
       category: s.category,
       detail: s.detail,
       severity: s.severity ?? null,
