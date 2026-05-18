@@ -76,6 +76,15 @@ export type AgentEvent =
   // <AgentStream> reads it to decide whether the task box renders
   // (`implement` → show; everything else → hide).
   | { type: "intent_classified"; intent: "simple" | "summary" | "bug" | "implement" }
+  // ── Stage 4 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md ──
+  // Issue #1 from the audit doc: structured sysflow_infra error event.
+  // Pre-Stage-4 the cli wrote 5+ raw `console.log` lines inline when the
+  // terminal-exit reason was `sysflow_infra` — gotcha-104 class risk in
+  // Ink mode (multi-line raw writes colliding with Ink's reserved region).
+  // Now: emit this event; <AgentStream> renders an <ErrorBanner> in the
+  // live region. Falls through to inline console.log only when
+  // shouldRenderInlineForLegacy() returns true.
+  | { type: "infra_error"; title: string; message: string; hint?: string }
 
 const emitter = new EventEmitter()
 emitter.setMaxListeners(20)

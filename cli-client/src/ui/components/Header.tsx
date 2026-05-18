@@ -145,20 +145,60 @@ export function Header({ model, user, chatTitle, planMode, cwd }: Props): React.
 }
 
 /**
+ * Stage 4 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+ * (audit issue #3): max chars for the lastSignal tail rendered next
+ * to the awareness badge when state ≠ on_track. Bounded so the badge
+ * doesn't push other Header cells off the terminal on narrow widths.
+ */
+const LAST_SIGNAL_MAX_CHARS = 40
+
+/**
+ * Pure: format the lastSignal tail for display alongside the awareness
+ * badge. Returns null when the snapshot is on_track OR has no signal —
+ * those cases render the compact `glyph score` form.
+ *
+ * The signal text from the reducer often has the shape
+ * `"<category>: <detail>"`, but the divergence detector emits a
+ * description-only string. We surface whatever's there (truncated to
+ * LAST_SIGNAL_MAX_CHARS) so the user sees WHY the badge is yellow/red.
+ *
+ * Exported for direct tests.
+ */
+export function formatAwarenessTail(snapshot: AwarenessSnapshot): string | null {
+  if (snapshot.state === "on_track") return null
+  if (!snapshot.lastSignal || snapshot.lastSignal.trim().length === 0) return null
+  const sig = snapshot.lastSignal.trim()
+  if (sig.length <= LAST_SIGNAL_MAX_CHARS) return sig
+  return sig.slice(0, Math.max(0, LAST_SIGNAL_MAX_CHARS - 1)) + "…"
+}
+
+/**
  * The awareness cell. Glyph + score, with the score colour interpolated
  * through the confidence gradient so the user reads state from colour
  * before they read the number. Glyph carries the state for `--no-motion`
  * mode (where the colour interpolation collapses to a single stop).
+ *
+ * Stage 4 (audit issue #3): when state ≠ on_track, append the latest
+ * divergence signal (truncated) so the user knows WHY confidence
+ * dropped. On-track stays compact (`✔ 92`).
  */
 function AwarenessBadge({ snapshot }: { snapshot: AwarenessSnapshot }): React.ReactElement {
   const glyph = awarenessGlyph(snapshot.state)
   const t = confidenceToGradientT(snapshot.confidence)
   const colour = confidenceGradient(t)
   const score = Math.round(snapshot.confidence)
+  const tail = formatAwarenessTail(snapshot)
   return (
     <>
       <Text color={colour}>{glyph}</Text>
       <Text color={colour}> {score}</Text>
+      {tail && (
+        <>
+          <Text color={palette.muted}>{" ("}</Text>
+          <Text color={palette.muted}>{tail}</Text>
+          <Text color={palette.muted}>{")"}</Text>
+        </>
+      )}
     </>
   )
 }

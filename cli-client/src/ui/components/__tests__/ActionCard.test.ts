@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { verbFor, formatActionHeader, truncateTarget } from "../ActionCard.js"
+import { verbFor, formatActionHeader, truncateTarget, formatErrorLines } from "../ActionCard.js"
 
 describe("verbFor", () => {
   it("maps the documented tool set to Claude-style verbs", () => {
@@ -120,5 +120,59 @@ describe("truncateTarget", () => {
     expect(truncateTarget(null)).toBe("")
     // @ts-expect-error — same
     expect(truncateTarget(undefined)).toBe("")
+  })
+})
+
+// Stage 4 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md (audit issue #2).
+describe("formatErrorLines — multi-line error rendering", () => {
+  it("returns empty result for missing / empty error string", () => {
+    expect(formatErrorLines(undefined, 3, 100)).toEqual({ lines: [], hidden: 0 })
+    expect(formatErrorLines(null, 3, 100)).toEqual({ lines: [], hidden: 0 })
+    expect(formatErrorLines("", 3, 100)).toEqual({ lines: [], hidden: 0 })
+  })
+
+  it("returns one line when the error is single-line and fits", () => {
+    const out = formatErrorLines("ENOENT: file not found", 3, 100)
+    expect(out.lines).toEqual([{ text: "ENOENT: file not found", truncated: false }])
+    expect(out.hidden).toBe(0)
+  })
+
+  it("renders multi-line errors up to maxLines (the user-reported repro: tsc diagnostic)", () => {
+    const tscError = "src/db.ts:14:5\n  error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'\n  more context here"
+    const out = formatErrorLines(tscError, 3, 100)
+    expect(out.lines).toHaveLength(3)
+    expect(out.lines[0].text).toBe("src/db.ts:14:5")
+    expect(out.lines[1].text).toContain("error TS2345")
+    expect(out.lines[2].text).toBe("more context here")
+    expect(out.hidden).toBe(0)
+  })
+
+  it("caps at maxLines + reports the hidden count when overflowing", () => {
+    const longError = ["line1", "line2", "line3", "line4", "line5"].join("\n")
+    const out = formatErrorLines(longError, 3, 100)
+    expect(out.lines).toHaveLength(3)
+    expect(out.hidden).toBe(2)
+  })
+
+  it("drops empty lines so the card doesn't render hollow rows", () => {
+    const errorWithGaps = "real line 1\n\n\nreal line 2\n   \nreal line 3"
+    const out = formatErrorLines(errorWithGaps, 5, 100)
+    expect(out.lines.map((l) => l.text)).toEqual(["real line 1", "real line 2", "real line 3"])
+    expect(out.hidden).toBe(0)
+  })
+
+  it("truncates per-line at maxCharsPerLine with ellipsis", () => {
+    const longLine = "a".repeat(150)
+    const out = formatErrorLines(longLine, 3, 50)
+    expect(out.lines).toHaveLength(1)
+    expect(out.lines[0].truncated).toBe(true)
+    expect(out.lines[0].text.length).toBe(50)
+    expect(out.lines[0].text.endsWith("…")).toBe(true)
+  })
+
+  it("trims whitespace before measuring length", () => {
+    const out = formatErrorLines("   surrounded by whitespace   ", 3, 100)
+    expect(out.lines[0].text).toBe("surrounded by whitespace")
+    expect(out.lines[0].truncated).toBe(false)
   })
 })

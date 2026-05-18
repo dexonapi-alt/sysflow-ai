@@ -102,6 +102,57 @@ export function truncateTarget(s: string, max: number = TARGET_MAX): string {
   return s.slice(0, Math.max(0, max - 1)) + "…"
 }
 
+/**
+ * Stage 4 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+ * (audit issue #2): pure error-line formatter for the ActionCard.
+ *
+ * Pre-Stage-4 the card rendered only `firstLine(error)` truncated at
+ * 100 chars — multi-line errors (tsc diagnostics, eslint reports,
+ * run_command stderr) lost everything past line 1. tsc errors in
+ * particular put the file path on line 1 and the diagnostic on line 2,
+ * so the user never saw the actual error.
+ *
+ * Stage 4: surface up to `maxLines` non-empty lines, each truncated
+ * to `maxCharsPerLine`. Append a `(+N more)` tail when there are more
+ * lines than the visible budget. Trims surrounding whitespace; drops
+ * empty lines so the card doesn't render hollow rows.
+ *
+ * Pure — no I/O, no rendering. Tested directly.
+ */
+export interface ErrorLineEntry {
+  /** The visible text (already truncated, no ellipsis state). */
+  text: string
+  /** True when the text was truncated for length. */
+  truncated: boolean
+}
+
+export interface FormattedErrorLines {
+  /** Visible lines (≤ maxLines). */
+  lines: ErrorLineEntry[]
+  /** Count of non-empty lines beyond the visible budget. 0 means "all shown". */
+  hidden: number
+}
+
+export function formatErrorLines(
+  error: string | undefined | null,
+  maxLines: number,
+  maxCharsPerLine: number,
+): FormattedErrorLines {
+  if (typeof error !== "string" || error.length === 0) {
+    return { lines: [], hidden: 0 }
+  }
+  const allLines = error.split("\n").map((l) => l.trim()).filter((l) => l.length > 0)
+  if (allLines.length === 0) return { lines: [], hidden: 0 }
+  const visible = allLines.slice(0, maxLines).map<ErrorLineEntry>((raw) => {
+    if (raw.length <= maxCharsPerLine) {
+      return { text: raw, truncated: false }
+    }
+    return { text: raw.slice(0, Math.max(0, maxCharsPerLine - 1)) + "…", truncated: true }
+  })
+  const hidden = Math.max(0, allLines.length - visible.length)
+  return { lines: visible, hidden }
+}
+
 function extractTarget(tool: string, args: Record<string, unknown>): string {
   switch (tool) {
     case "run_command":
@@ -132,8 +183,18 @@ function extractTarget(tool: string, args: Record<string, unknown>): string {
   }
 }
 
+const ERROR_MAX_LINES = 3
+const ERROR_MAX_CHARS_PER_LINE = 100
+
 export function ActionCard({ card }: Props): React.ReactElement {
   const header = formatActionHeader(card.tool, card.args)
+  // Stage 4 of plan 2026-05-18-ui-ux-polish-and-action-aware-spinner.md
+  // (audit issue #2): render up to 3 error lines instead of only the
+  // first one — multi-line tsc / eslint / stderr output is otherwise
+  // invisible to the user. Tail line surfaces overflow count.
+  const errorLines = card.status === "error" && card.error
+    ? formatErrorLines(card.error, ERROR_MAX_LINES, ERROR_MAX_CHARS_PER_LINE)
+    : null
   return (
     <Box flexDirection="column" marginLeft={2}>
       <Box>
@@ -141,10 +202,20 @@ export function ActionCard({ card }: Props): React.ReactElement {
         <Text> </Text>
         <HeaderText status={card.status} text={header} />
       </Box>
-      {card.status === "error" && card.error && (
-        <Box marginLeft={2}>
-          <Text color={palette.muted}>⎿  </Text>
-          <Text color={palette.error}>{truncateTarget(firstLine(card.error), 100)}</Text>
+      {errorLines && errorLines.lines.length > 0 && (
+        <Box flexDirection="column" marginLeft={2}>
+          {errorLines.lines.map((entry, i) => (
+            <Box key={i}>
+              <Text color={palette.muted}>{i === 0 ? "⎿  " : "   "}</Text>
+              <Text color={palette.error}>{entry.text}</Text>
+            </Box>
+          ))}
+          {errorLines.hidden > 0 && (
+            <Box>
+              <Text color={palette.muted}>   </Text>
+              <Text color={palette.muted}>{`(+${errorLines.hidden} more line${errorLines.hidden === 1 ? "" : "s"})`}</Text>
+            </Box>
+          )}
         </Box>
       )}
     </Box>
@@ -171,7 +242,3 @@ function HeaderText({ status, text }: { status: ToolCardState["status"]; text: s
   return <Text color={palette.muted}>{text}</Text>
 }
 
-function firstLine(s: string): string {
-  const i = s.indexOf("\n")
-  return i === -1 ? s : s.slice(0, i)
-}
