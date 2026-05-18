@@ -577,6 +577,11 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       lastSampledChunkIndex = chunkIndex
     }
   }
+  // Plan 2026-05-18-chunk-pulse-missing-diagnostic.md Stage 1 — log
+  // whether the initial response carried chunkPlanBrief at all. Helps
+  // separate hypothesis (a) "server never attached the field" from
+  // hypotheses (b)/(c) downstream. STAGE 3 WILL REMOVE THIS.
+  console.log(`[chunk-pulse-diag] initial response: chunkPlanBrief=${(response as Record<string, unknown>).chunkPlanBrief ? "present" : "absent"} ink=${isInkActive()}`)
   // Phase 10: initial-turn chunk plan from user-message.ts
   if ((response as Record<string, unknown>).chunkPlanBrief) {
     spinner.stop()
@@ -594,8 +599,13 @@ export async function runAgent({ prompt, command = null, model = null }: RunAgen
       lastAwarenessState = initialAwareness.state
       tallyAwareness(initialAwareness)
     }
+    // Plan 2026-05-18-chunk-pulse-missing-diagnostic.md Stage 1 — log
+    // the gate evaluation. ink + nextAction MUST both be truthy for
+    // the emit to fire. STAGE 3 WILL REMOVE THIS.
+    console.log(`[chunk-pulse-diag] initial emit gate: ink=${isInkActive()} nextAction=${initialPlan?.nextAction ? "present" : "absent"}`)
     // Phase 12 Stage 5: surface the chunk-plan + awareness to the Ink Header.
     if (isInkActive() && initialPlan?.nextAction) {
+      console.log(`[chunk-pulse-diag] initial chunk_plan EMIT: chunkIndex=${chunkIndex} nextAction="${initialPlan.nextAction}"`)
       emitAgent({
         type: "chunk_plan",
         chunkIndex,
@@ -1782,6 +1792,11 @@ async function handleNeedsTool(
     // ctx.chunkIndex when a new plan arrives so the badge stays monotonic.
     const chunkPlanBrief = (response as Record<string, unknown>).chunkPlanBrief
     const chunkReflectionBrief = (response as Record<string, unknown>).chunkReflectionBrief
+    // Plan 2026-05-18-chunk-pulse-missing-diagnostic.md Stage 1 — log
+    // every per-turn response's chunk-brief presence. Helps detect
+    // mid-run regressions (server stops attaching mid-flight). STAGE
+    // 3 WILL REMOVE THIS.
+    console.log(`[chunk-pulse-diag] per-turn response: chunkPlanBrief=${chunkPlanBrief ? "present" : "absent"} chunkReflectionBrief=${chunkReflectionBrief ? "present" : "absent"} ink=${isInkActive()} ctx.chunkIndex=${ctx.chunkIndex}`)
     // Phase 11 Stage 5: pull the awareness snapshot off the response so the
     // chunk-progress can render the badge + so we can detect state flips.
     const awareness = (response as Record<string, unknown>).awarenessSnapshot as { state: "on_track" | "off_course" | "blocked"; confidence: number; lastSignal?: string | null } | undefined
@@ -1807,7 +1822,11 @@ async function handleNeedsTool(
       // Phase 12 Stage 5: surface chunk-plan + awareness to the Ink Header.
       if (isInkActive() && chunkPlanBrief) {
         const plan = chunkPlanBrief as { nextAction?: string; files?: string[] }
+        // Plan 2026-05-18-chunk-pulse-missing-diagnostic.md Stage 1 — log
+        // the per-turn emit gate evaluation. STAGE 3 WILL REMOVE THIS.
+        console.log(`[chunk-pulse-diag] per-turn emit gate: ink=${isInkActive()} nextAction=${plan.nextAction ? "present" : "absent"} ctx.chunkIndex=${ctx.chunkIndex}`)
         if (plan.nextAction) {
+          console.log(`[chunk-pulse-diag] per-turn chunk_plan EMIT: chunkIndex=${ctx.chunkIndex} nextAction="${plan.nextAction}"`)
           emitAgent({
             type: "chunk_plan",
             chunkIndex: ctx.chunkIndex,
